@@ -99,13 +99,8 @@ networks:
 EOF
 }
 
-# add to the host file if not already set
-#if [ $VDM_UPDATE_HOST ]; then
-#  grep -q "port.${VDM_DOMAIN}" /etc/hosts  || {
-#    echo "[notice] Adding port.${VDM_DOMAIN} to the /etc/hosts file."
-#    sudo -- sh -c "127.0.0.1       port.${VDM_DOMAIN} >> /etc/hosts"
-#  }
-#fi
+# set host file if needed
+source "${VDM_SRC_PATH}/host.sh" "port"
 
 ## create the directory if it does not yet already exist
 # shellcheck disable=SC2174

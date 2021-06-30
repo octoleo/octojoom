@@ -324,13 +324,8 @@ networks:
 EOF
 }
 
-# add to the host file if not already set
-#if [ $VDM_UPDATE_HOST ]; then
-#  grep -q "${VDM_SUBDOMAIN}.${VDM_DOMAIN}" /etc/hosts  || {
-#    echo "[notice] Adding ${VDM_SUBDOMAIN}.${VDM_DOMAIN} to the /etc/hosts file."
-#    sudo echo "127.0.0.1       ${VDM_SUBDOMAIN}.${VDM_DOMAIN}" >> /etc/hosts
-#  }
-#fi
+# set host file if needed
+source "${VDM_SRC_PATH}/host.sh"
 
 # create the directory if it does not yet already exist
 # shellcheck disable=SC2174
