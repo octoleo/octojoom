@@ -28,48 +28,54 @@ function getProjectsAvailable() {
 }
 
 # set the local values
-vdm_project="${1:-$VDM_PROJECT}"
+VDM_PROJECT="${1:-$VDM_PROJECT}"
 # check that we have what we need
-[ ${#vdm_project} -ge 1 ] && [ -d "${VDM_PROJECT_PATH}/${vdm_project}" ] || {
-  vdm_project=$(getProjectsAvailable)
+# shellcheck disable=SC2015
+[ ${#VDM_PROJECT} -ge 1 ] && [ -d "${VDM_PROJECT_PATH}/${VDM_PROJECT}" ] || {
+  VDM_PROJECT=$(getProjectsAvailable)
   # make sure value was entered
-  [ ${#vdm_project} -ge 1 ] && [ -d "${VDM_PROJECT_PATH}/${vdm_project}" ] || exit
+  [ ${#VDM_PROJECT} -ge 1 ] && [ -d "${VDM_PROJECT_PATH}/${VDM_PROJECT}" ] || exit
 }
 
 ### Fix the folder ownership of Joomla folders
 #
-echo "[notice] Fix the folder ownership of ${vdm_project} Joomla folders"
+echo "[notice] Fix the folder ownership of ${VDM_PROJECT} Joomla folders"
 #
-sudo chown -R www-data:www-data "${VDM_PROJECT_PATH}/${vdm_project}/joomla"
-sudo setfacl -R -m u:llewellyn:rwx "${VDM_PROJECT_PATH}/${vdm_project}/joomla"
+sudo chown -R www-data:www-data "${VDM_PROJECT_PATH}/${VDM_PROJECT}/joomla"
 
 ### Fix the folder permissions for the Joomla websites
 #
-echo "[notice] Fix the file and folder permissions for the ${vdm_project} Joomla website"
+echo "[notice] Fix the file and folder permissions for the ${VDM_PROJECT} Joomla website"
 #
 # Change the file permissions
-sudo find "${VDM_PROJECT_PATH}/${vdm_project}/joomla" -type f -exec chmod 644 {} \;
-sudo find "${VDM_PROJECT_PATH}/${vdm_project}/joomla/configuration.php" -type f -exec chmod 444 {} \;
-[ -f "${VDM_PROJECT_PATH}/${vdm_project}/joomla/.htaccess" ] &&
-  sudo find "${VDM_PROJECT_PATH}/${vdm_project}/joomla/.htaccess" -type f -exec chmod 400 {} \;
-[ -f "${VDM_PROJECT_PATH}/${vdm_project}/joomla/php.ini" ] &&
-  sudo find "${VDM_PROJECT_PATH}/${vdm_project}/joomla/php.ini" -type f -exec chmod 400 {} \;
+sudo find "${VDM_PROJECT_PATH}/${VDM_PROJECT}/joomla" -type f -exec chmod 644 {} \;
+sudo find "${VDM_PROJECT_PATH}/${VDM_PROJECT}/joomla/configuration.php" -type f -exec chmod 444 {} \;
+[ -f "${VDM_PROJECT_PATH}/${VDM_PROJECT}/joomla/.htaccess" ] &&
+  sudo find "${VDM_PROJECT_PATH}/${VDM_PROJECT}/joomla/.htaccess" -type f -exec chmod 400 {} \;
+[ -f "${VDM_PROJECT_PATH}/${VDM_PROJECT}/joomla/php.ini" ] &&
+  sudo find "${VDM_PROJECT_PATH}/${VDM_PROJECT}/joomla/php.ini" -type f -exec chmod 400 {} \;
 # Change the folder permissions
-sudo find /"home/${USER}/Projects/${vdm_project}/joomla" -type d -exec chmod 755 {} \;
+sudo find /"home/${USER}/Projects/${VDM_PROJECT}/joomla" -type d -exec chmod 755 {} \;
 # Change the image folder permissions
-# chmod 707 "${VDM_PROJECT_PATH}/${vdm_project}/joomla/images"
-# chmod 707 "${VDM_PROJECT_PATH}/${vdm_project}/joomla/images/stories"
+# chmod 707 "${VDM_PROJECT_PATH}/${VDM_PROJECT}/joomla/images"
+# chmod 707 "${VDM_PROJECT_PATH}/${VDM_PROJECT}/joomla/images/stories"
+
+### Fix the folder permissions so the active user (1000) can access the files
+#
+echo "[notice] Fix the folder permissions of ${VDM_PROJECT} joomla so user:1000 can access them"
+#
+sudo setfacl -R -m u:1000:rwx "${VDM_PROJECT_PATH}/${VDM_PROJECT}/joomla"
 
 ### Fix the folder ownership of database folders
 #
-echo "[notice] Fix the folder ownership of ${vdm_project} database folders"
+echo "[notice] Fix the folder ownership of ${VDM_PROJECT} database folders"
 #
-sudo chown -R systemd-coredump:systemd-coredump "${VDM_PROJECT_PATH}/${vdm_project}/db"
+sudo chown -R systemd-coredump:systemd-coredump "${VDM_PROJECT_PATH}/${VDM_PROJECT}/db"
 
 ### Fix the folder permissions for the database files
 #
-echo "[notice] Fix the file and folder permissions for the ${vdm_project} database files"
+echo "[notice] Fix the file and folder permissions for the ${VDM_PROJECT} database files"
 #
 # Change the file permissions
-sudo find "${VDM_PROJECT_PATH}/${vdm_project}/db" -type f -exec chmod 660 {} \;
-sudo find "${VDM_PROJECT_PATH}/${vdm_project}/db" -type d -exec chmod 700 {} \;
+sudo find "${VDM_PROJECT_PATH}/${VDM_PROJECT}/db" -type f -exec chmod 660 {} \;
+sudo find "${VDM_PROJECT_PATH}/${VDM_PROJECT}/db" -type d -exec chmod 700 {} \;

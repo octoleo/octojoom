@@ -437,4 +437,19 @@ buildContainer "${VDM_MOUNT_PROJECTS}" >"${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/
 chmod 600 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_USER_NAME:-ubuntu}.${VDM_DOMAIN:-vdm.dev}/docker-compose.yml"
 # saved the file
 echo "[save] ${VDM_CONTAINER_TYPE}:docker-compose.yml"
+# some house cleaning
+PS3_old=$PS3
+# ask if we should right now enable the container
+echo "[question] Would you like to enable this new ${VDM_CONTAINER_TYPE} container?"
+# set the terminal
+export PS3="[select]: "
+# shellcheck disable=SC1090
+select yn in "Yes" "No"; do
+  case $yn in
+      Yes ) source "${VDM_SRC_PATH}/enable.sh" "${VDM_USER_NAME:-ubuntu}.${VDM_DOMAIN:-vdm.dev}";;
+  esac
+  break
+done
+# restore the default
+export PS3=$PS3_old
 echo "[setup] Completed!"

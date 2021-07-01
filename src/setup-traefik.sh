@@ -24,6 +24,7 @@ mkdir -p -m 700 "${VDM_REPO_PATH}/traefik"
 
 # set the local values
 REMOVE_SECURE=''
+HTTP_SCHEME="https"
 # check that we have what we need
 if [ "${VDM_SECURE,,}" != 'y' ] && [ "${VDM_SECURE,,}" != 'n' ]; then
   echo -n "[enter] Use letsencrypt (y/n): "
@@ -59,6 +60,7 @@ else
   grep -q "VDM_SECURE=\"n\"" "${VDM_SRC_PATH}/.env" || echo "export VDM_SECURE=\"n\"" >>"${VDM_SRC_PATH}/.env"
   # remove secure from build
   REMOVE_SECURE="#"
+  HTTP_SCHEME="http"
 fi
 
 # build function
@@ -73,11 +75,11 @@ services:
     image: "traefik:latest"
     command:
       - --entrypoints.web.address=:80
-${REMOVE_SECURE}      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.address=:443
 #      - --api.dashboard=true
 #      - --api.insecure=true
       - --providers.docker
-      - --log.level=ERROR
+      - --log.level=INFO
 ${REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge=true
 ${REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.keytype=RSA4096
 ${REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.email=${VDM_SECURE_EMAIL:-user@demo.com}
@@ -88,7 +90,7 @@ ${REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge.e
     restart: unless-stopped
     ports:
       - "80:80"
-${REMOVE_SECURE}      - "443:443"
+      - "443:443"
 #      - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -99,8 +101,8 @@ ${REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/acme.json:/acme.json"
       # settings for all containers
       - "traefik.http.routers.http-catchall.rule=hostregexp(\`{host:.+}\`)"
       - "traefik.http.routers.http-catchall.entrypoints=web"
-${REMOVE_SECURE}      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
-${REMOVE_SECURE}      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-me"
+      - "traefik.http.middlewares.redirect-to-me.redirectscheme.scheme=${HTTP_SCHEME}"
     networks:
       - traefik
 
