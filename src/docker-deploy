@@ -1,0 +1,2598 @@
+#!/bin/bash
+
+# The most recent program version.
+_VERSION="2.0.0"
+_V="2.0"
+
+# The program full name
+PROGRAM_NAME="Docker Deployment"
+
+# make sure whiptail is installed
+command -v whiptail >/dev/null 2>&1 || {
+  echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require whiptail."
+  exit 1
+}
+# make sure docker is installed
+command -v docker >/dev/null 2>&1 || {
+  echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require docker."
+  exit 1
+}
+# make sure docker-compose is installed
+command -v docker-compose >/dev/null 2>&1 || {
+  echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require docker-compose."
+  exit 1
+}
+# just clear the screen
+clear
+
+#####################################################################################################################VDM
+######################################## The main method
+function main() {
+  # we check if we have a type and a task
+  # we use the __TRuST__ convention AS "PUBLIC METHODS" to avoid wrong calls, and hide other functions
+  if [ ${#VDM_CONTAINER_TYPE} -ge 1 ] && [ ${#VDM_TASK} -ge 1 ] && isFunc "${VDM_CONTAINER_TYPE}__TRuST__${VDM_TASK}"; then
+    "${VDM_CONTAINER_TYPE}__TRuST__${VDM_TASK}"
+  else
+    mainMenu
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## SETUP TRAEFIK
+function traefik__TRuST__setup() {
+  # load this container type globals
+  # shellcheck disable=SC1090
+  [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && source "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+  # check if we have secure switch set
+  if [ "${VDM_SECURE:-not}" = 'not' ]; then
+    # check the security switch
+    if (whiptail --yesno "Would you like to use Letsencrypt auto setup for your containers [only for server with public static IP]" --defaultno --title "Letsencrypt" 8 112); then
+      # we set the secure switch
+      VDM_SECURE=true
+    else
+      VDM_SECURE=false
+    fi
+  fi
+  # setup letsencrypt stuff
+  if $VDM_SECURE; then
+    VDM_REMOVE_SECURE=''
+    VDM_HTTP_SCHEME="https"
+    # get the email if not set
+    [ ${#VDM_SECURE_EMAIL} -ge 1 ] || {
+      echo -n "[enter] Email: "
+      read -r VDM_SECURE_EMAIL
+      # make sure value was entered
+      [ ${#VDM_SECURE_EMAIL} -ge 1 ] || exit
+    }
+  else
+    VDM_REMOVE_SECURE="#"
+    VDM_HTTP_SCHEME="http"
+  fi
+  # set the main domain if not set
+  while [ ${#VDM_DOMAIN} -le 1 ]; do
+    # get the value
+    VDM_DOMAIN=$(getInput "Enter main domain of all your containers.\n[only one main domain allowed for now, must have at least one dot]" \
+      "vdm.dev" 'Enter Main Domain')
+    # keep asking if empty or does exist
+    [ ${#VDM_DOMAIN} -ge 1 ] || {
+      showError "You must enter a domain name!"
+    }
+  done
+  # add this value if not set variable
+  setEnvVariable "VDM_DOMAIN=\"${VDM_DOMAIN}\""
+  # add this value if not set variable
+  setEnvVariable "VDM_SECURE=${VDM_SECURE}"
+  ##########################
+  ### export all we need
+  # global
+  export VDM_CONTAINER_TYPE
+  export VDM_REPO_PATH
+  export VDM_PROJECT_PATH
+  export VDM_DOMAIN
+  export VDM_SECURE
+  # container
+  export VDM_REMOVE_SECURE
+  export VDM_HTTP_SCHEME
+  export VDM_SECURE_EMAIL
+  ## create the directory if it does not yet already exist
+  # shellcheck disable=SC2174
+  mkdir -p -m 700 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}"
+  ## place this docker composer file in its place
+  traefikContainer >"${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml"
+  ## set permissions
+  chmod 600 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml"
+  # saved the file
+  showNotice "Saved ${VDM_CONTAINER_TYPE}:docker-compose.yml file.\nSetup of this container is complete!"
+  # ask if we should continue to enable
+  if (whiptail --yesno "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" --defaultno --title "Enable Container" 8 112); then
+    enableContainer "${VDM_CONTAINER_TYPE}"
+  fi
+  ##########################
+  ### unset all no longer needed
+  # container
+  unset VDM_REMOVE_SECURE
+  unset VDM_HTTP_SCHEME
+  unset VDM_SECURE_EMAIL
+  # return a success
+  return 0
+}
+
+# return the Traefik Container setup yml
+function traefikContainer() {
+  # we build the yml file
+  cat <<EOF
+version: "3.3"
+
+services:
+  traefik:
+    container_name: traefik
+    image: "traefik:latest"
+    command:
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+#      - --api.dashboard=true
+#      - --api.insecure=true
+      - --providers.docker
+      - --log.level=INFO
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge=true
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.keytype=RSA4096
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.email=${VDM_SECURE_EMAIL:-user@demo.com}
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.storage=/acme.json
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge.entrypoint=web
+#      - --providers.file.directory=/conf
+#      - --providers.file.watch=true
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+#      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+#      - "\${VDM_PROJECT_PATH}/traefik/conf:/conf"
+${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/acme.json:/acme.json"
+      - "\${VDM_PROJECT_PATH}/traefik/errors:/errors"
+    labels:
+      # settings for all containers
+      - "traefik.http.routers.http-catchall.rule=hostregexp(\`{host:.+}\`)"
+      - "traefik.http.routers.http-catchall.entrypoints=web"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-me"
+      - "traefik.http.middlewares.redirect-to-me.redirectscheme.scheme=${VDM_HTTP_SCHEME}"
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    external:
+      name: traefik_webgateway
+EOF
+}
+
+#####################################################################################################################VDM
+######################################## SETUP PORTAINER
+function portainer__TRuST__setup() {
+  # load this container type globals
+  # shellcheck disable=SC1090
+  [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && source "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+  # check if we have secure switch set
+  if [ "${VDM_SECURE:-not}" = 'not' ]; then
+    # check the security switch
+    if (whiptail --yesno "Would you like to use Letsencrypt auto setup for your containers [only for server with public static IP]" --defaultno --title "Letsencrypt" 8 112); then
+      # we set the secure switch
+      VDM_SECURE=true
+    else
+      VDM_SECURE=false
+    fi
+  fi
+  # setup letsencrypt stuff
+  if $VDM_SECURE; then
+    VDM_REMOVE_SECURE=''
+    VDM_ENTRY_POINT="websecure"
+  else
+    VDM_REMOVE_SECURE="#"
+    VDM_ENTRY_POINT="web"
+  fi
+  # set the main domain if not set
+  while [ ${#VDM_DOMAIN} -le 1 ]; do
+    # get the value
+    VDM_DOMAIN=$(getInput "Enter main domain of all your containers.\n[only one main domain allowed for now, must have at least one dot]" \
+      "vdm.dev" 'Enter Main Domain')
+    # keep asking if empty or does exist
+    [ ${#VDM_DOMAIN} -ge 1 ] || {
+      showError "You must enter a domain name!"
+    }
+  done
+  # add this value if not set variable
+  setEnvVariable "VDM_DOMAIN=\"${VDM_DOMAIN}\""
+  # add this value if not set variable
+  setEnvVariable "VDM_SECURE=${VDM_SECURE}"
+  ##########################
+  ### export all we need
+  # global
+  export VDM_CONTAINER_TYPE
+  export VDM_REPO_PATH
+  export VDM_PROJECT_PATH
+  export VDM_DOMAIN
+  export VDM_SECURE
+  export VDM_UPDATE_HOST
+  # container
+  export VDM_REMOVE_SECURE
+  export VDM_ENTRY_POINT
+  # set host file if needed
+  updateHostFile "port"
+  ## create the directory if it does not yet already exist
+  # shellcheck disable=SC2174
+  mkdir -p -m 700 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}"
+  ## place this docker composer file in its place
+  portainerContainer >"${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml"
+  ## set permissions
+  chmod 600 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml"
+  # saved the file
+  showNotice "Saved ${VDM_CONTAINER_TYPE}:docker-compose.yml file.\nSetup of this container is complete!"
+  # ask if we should continue to enable
+  if (whiptail --yesno "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" --defaultno --title "Enable Container" 8 112); then
+    enableContainer "${VDM_CONTAINER_TYPE}"
+  fi
+  ##########################
+  ### unset all no longer needed
+  # container
+  unset VDM_REMOVE_SECURE
+  unset VDM_ENTRY_POINT
+  # return a success
+  return 0
+}
+
+# return the Portainer Container setup yml
+function portainerContainer() {
+  # we build the yml file
+  cat <<EOF
+version: "3.3"
+
+services:
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    command: -H unix:///var/run/docker.sock
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    labels:
+      # Frontend
+      - "traefik.enable=true"
+      - "traefik.http.routers.portainer.rule=Host(\`port.${VDM_DOMAIN}\`)"
+      - "traefik.http.routers.portainer.entrypoints=${VDM_ENTRY_POINT}"
+${VDM_REMOVE_SECURE}      - "traefik.http.routers.portainer.tls.certresolver=vdmresolver"
+      - "traefik.http.routers.portainer.service=portainer"
+      - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+
+      # Edge
+#      - "traefik.http.routers.portaineredge.rule=Host(\`edge.${VDM_DOMAIN}\`)"
+#      - "traefik.http.routers.portaineredge.entrypoints=${VDM_ENTRY_POINT}"
+#      - "traefik.http.routers.portaineredge.tls.certresolver=vdmresolver"
+#      - "traefik.http.routers.portaineredge.service=portaineredge"
+#      - "traefik.http.services.portaineredge.loadbalancer.server.port=8000"
+    networks:
+      - traefik
+
+volumes:
+  portainer_data:
+
+networks:
+  traefik:
+    external:
+      name: traefik_webgateway
+EOF
+}
+
+#####################################################################################################################VDM
+######################################## SETUP JOOMLA
+function joomla__TRuST__setup() {
+  # load this container type globals
+  # shellcheck disable=SC1090
+  [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && source "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+  # get the Joomla version if not set
+  while [ ${#VDM_JV} -le 1 ]; do
+    # get the value
+    VDM_JV=$(getInput 'Enter Joomla version on this container.\n[Numbers only like 3.10.2]' '3.10' 'Enter Version')
+    # keep asking
+    [ ${#VDM_JV} -ge 1 ] || {
+      showError "You must enter a version number. See available tags here https://hub.docker.com/_/joomla"
+    }
+  done
+  # get the key if not set
+  while [ ${#VDM_KEY} -le 1 ] || [ -d "${VDM_PROJECT_PATH}/${VDM_KEY}" ]; do
+    # get the value
+    VDM_KEY=$(getInput "Enter key used for container naming and name of the persistent volume folder.\n[Text with no spaces that is only alphabetical]" \
+      '' 'Enter Key')
+    # keep asking if empty or does exist
+    if [ ${#VDM_KEY} -ge 1 ] && [ -d "${VDM_PROJECT_PATH}/${VDM_KEY}" ]; then
+      showError "The key:${VDM_KEY} is already used. Select another"
+    elif [ ${#VDM_KEY} -le 1 ]; then
+      showError "You must enter a key!"
+    fi
+  done
+  # get the env key if not set
+  while [ ${#VDM_ENV_KEY} -le 1 ]; do
+    # get the value
+    VDM_ENV_KEY=$(getInput "Enter environment key used to load the container environment variables.\n[Text with no spaces that is only alphabetical UPPERCASE]" \
+      "${VDM_KEY^^}" 'Enter ENV Key')
+    # keep asking if empty or does exist
+    [ ${#VDM_ENV_KEY} -ge 1 ] || {
+      showError "You must enter a environment key!"
+    }
+  done
+  # set the main domain if not set
+  while [ ${#VDM_DOMAIN} -le 1 ]; do
+    # get the value
+    VDM_DOMAIN=$(getInput "Enter main domain of all your containers.\n[only one main domain allowed for now, must have at least one dot]" \
+      "vdm.dev" 'Enter Main Domain')
+    # keep asking if empty or does exist
+    [ ${#VDM_DOMAIN} -ge 1 ] || {
+      showError "You must enter a domain name!"
+    }
+  done
+  # get the sub domain if not set
+  while [ ${#VDM_SUBDOMAIN} -le 1 ] || [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}" ]; do
+    # get the value
+    VDM_SUBDOMAIN=$(getInput "Enter sub-domain used for this container.\n[Text with no spaces that is only alphabetical]" \
+      "${VDM_KEY,,}" 'Enter Sub-Domain')
+    # keep asking if empty or does exist
+    if [ ${#VDM_SUBDOMAIN} -ge 1 ] && [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}" ]; then
+      showError "The sub-domain:${VDM_SUBDOMAIN} is already used. Select another"
+    elif [ ${#VDM_KEY} -le 1 ]; then
+      showError "You must enter a sub-domain!"
+    fi
+  done
+  # check if we have secure switch set
+  if [ "${VDM_SECURE:-not}" = 'not' ]; then
+    # check the security switch
+    if (whiptail --yesno "Would you like to use Letsencrypt auto setup for your containers [only for server with public static IP]" --defaultno --title "Letsencrypt" 8 112); then
+      # we set the secure switch
+      VDM_SECURE=true
+    else
+      VDM_SECURE=false
+    fi
+  fi
+  # setup letsencrypt stuff
+  if $VDM_SECURE; then
+    VDM_REMOVE_SECURE=''
+    VDM_ENTRY_POINT="websecure"
+  else
+    VDM_REMOVE_SECURE="#"
+    VDM_ENTRY_POINT="web"
+  fi
+  # check if env is already set
+  # shellcheck disable=SC2015
+  [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && grep -q "VDM_${VDM_ENV_KEY}_DB=" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || {
+    # add a space or create the file
+    [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && echo '' >>"${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+    # get the database name needed
+    while [ ${#vdm_database_name} -le 1 ]; do
+      # get the value
+      vdm_database_name=$(getInput "Enter Database Name\n[Text with no spaces that is only underscore and alphabetical]" \
+        "vdm_io" 'Enter Database Name')
+      # keep asking if empty or does exist
+      [ ${#vdm_database_name} -ge 1 ] || {
+        showError "You must enter a database name!"
+      }
+    done
+    # get the database user name needed
+    while [ ${#vdm_database_user} -le 1 ]; do
+      # get the value
+      vdm_database_user=$(getInput "Enter Database Username\n[Text with no spaces that is only underscore and alphabetical]" \
+        "vdm_user" 'Enter Database Username')
+      # keep asking if empty or does exist
+      [ ${#vdm_database_user} -ge 1 ] || {
+        showError "You must enter a database username!"
+      }
+    done
+    # get the database user password needed
+    while [ ${#vdm_database_pass} -le 1 ]; do
+      # get the value
+      vdm_database_pass=$(getPassword "Enter Database User Password" \
+        "$(getRandomPass 20)" 'Enter Database User Password')
+      # keep asking if empty or does exist
+      [ ${#vdm_database_pass} -ge 1 ] || {
+        showError "You must enter a database user password!"
+      }
+    done
+    # get the database root password
+    while [ ${#vdm_database_rootpass} -le 1 ]; do
+      # get the value
+      vdm_database_rootpass=$(getPassword "Enter Database Root Password" \
+        "$(getRandomPass 40)" 'Enter Database Root Password')
+      # keep asking if empty or does exist
+      [ ${#vdm_database_rootpass} -ge 1 ] || {
+        showError "You must enter a database root password!"
+      }
+    done
+  }
+  # add this value if not set variable
+  setEnvVariable "VDM_DOMAIN=\"${VDM_DOMAIN}\""
+  # add this value if not set variable
+  setEnvVariable "VDM_SECURE=${VDM_SECURE}"
+  # add this value if not set variable
+  setContainerEnvVariable "VDM_${VDM_ENV_KEY}_DB=\"${vdm_database_name}\""
+  # add this value if not set variable
+  setContainerEnvVariable "VDM_${VDM_ENV_KEY}_DB_USER=\"${vdm_database_user}\""
+  # add this value if not set variable
+  setContainerEnvVariable "VDM_${VDM_ENV_KEY}_DB_PASS=\"${vdm_database_pass}\""
+  # add this value if not set variable
+  setContainerEnvVariable "VDM_${VDM_ENV_KEY}_DB_ROOT=\"${vdm_database_rootpass}\""
+  # add the projects path
+  setContainerEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
+  ##########################
+  ### export all we need
+  # global
+  export VDM_CONTAINER_TYPE
+  export VDM_REPO_PATH
+  export VDM_PROJECT_PATH
+  export VDM_DOMAIN
+  export VDM_SECURE
+  export VDM_UPDATE_HOST
+  # container
+  export VDM_SUBDOMAIN
+  export VDM_JV
+  export VDM_KEY
+  export VDM_ENV_KEY
+  export VDM_REMOVE_SECURE
+  export VDM_ENTRY_POINT
+  # container lower
+  export vdm_database_name
+  export vdm_database_user
+  export vdm_database_pass
+  export vdm_database_rootpass
+  # set host file if needed
+  updateHostFile
+  # create the directory if it does not yet already exist
+  # shellcheck disable=SC2174
+  mkdir -p -m 700 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}"
+  # place this docker composer file in its place
+  joomlaContainer >"${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}/docker-compose.yml"
+  # set permissions
+  chmod 600 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}/docker-compose.yml"
+  # saved the file
+  showNotice "Saved ${VDM_CONTAINER_TYPE}:docker-compose.yml file.\nSetup of this container is complete!"
+  # ask if we should continue to enable
+  if (whiptail --yesno "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" --defaultno --title "Enable Container" 8 112); then
+    # we set the container details
+    export VDM_CONTAINER="${VDM_SUBDOMAIN}.${VDM_DOMAIN}"
+    # then we enable it
+    enableContainer "${VDM_CONTAINER_TYPE}"
+  fi
+  ##########################
+  ### unset all no longer needed
+  # container
+  unset VDM_SUBDOMAIN
+  unset VDM_JV
+  unset VDM_KEY
+  unset VDM_ENV_KEY
+  unset VDM_REMOVE_SECURE
+  unset VDM_ENTRY_POINT
+  # container lower
+  unset vdm_database_name
+  unset vdm_database_user
+  unset vdm_database_pass
+  unset vdm_database_rootpass
+  # return a success
+  return 0
+}
+
+# return the Joomla Container setup yml
+function joomlaContainer() {
+  # we build the yml file
+  cat <<EOF
+version: '2'
+services:
+  mariadb_${VDM_KEY}:
+    image: mariadb:latest
+    container_name: mariadb_${VDM_KEY}
+    restart: unless-stopped
+    environment:
+      - MARIADB_DATABASE=\${VDM_${VDM_ENV_KEY}_DB}
+      - MARIADB_USER=\${VDM_${VDM_ENV_KEY}_DB_USER}
+      - MARIADB_PASSWORD=\${VDM_${VDM_ENV_KEY}_DB_PASS}
+      - MARIADB_ROOT_PASSWORD=\${VDM_${VDM_ENV_KEY}_DB_ROOT}
+    volumes:
+      - "\${VDM_PROJECT_PATH}/${VDM_KEY}/db:/var/lib/mysql"
+    networks:
+      - traefik
+  joomla_${VDM_KEY}:
+    image: joomla:${VDM_JV}
+    container_name: joomla_${VDM_KEY}
+    restart: unless-stopped
+    environment:
+      - JOOMLA_DB_HOST=mariadb_${VDM_KEY}:3306
+      - JOOMLA_DB_NAME=\${VDM_${VDM_ENV_KEY}_DB}
+      - JOOMLA_DB_USER=\${VDM_${VDM_ENV_KEY}_DB_USER}
+      - JOOMLA_DB_PASSWORD=\${VDM_${VDM_ENV_KEY}_DB_PASS}
+    depends_on:
+      - mariadb_${VDM_KEY}
+    volumes:
+      - "\${VDM_PROJECT_PATH}/${VDM_KEY}/joomla:/var/www/html"
+    networks:
+      - traefik
+    labels:
+      # joomla
+      - "traefik.enable=true"
+      - "traefik.http.routers.joomla_${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}.${VDM_DOMAIN}\`)"
+      - "traefik.http.routers.joomla_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}"
+${VDM_REMOVE_SECURE}      - "traefik.http.routers.joomla_${VDM_KEY}.tls.certresolver=vdmresolver"
+${VDM_REMOVE_SECURE}      - "traefik.http.routers.joomla_${VDM_KEY}.service=joomla_${VDM_KEY}"
+${VDM_REMOVE_SECURE}      - "traefik.http.services.joomla_${VDM_KEY}.loadbalancer.server.port=80"
+  phpmyadmin_${VDM_KEY}:
+    image: phpmyadmin/phpmyadmin
+    container_name: phpmyadmin_${VDM_KEY}
+    restart: unless-stopped
+    environment:
+      PMA_HOST: mariadb_${VDM_KEY}
+      PMA_PORT: 3306
+      UPLOAD_LIMIT: 300M
+    depends_on:
+      - mariadb_${VDM_KEY}
+    networks:
+      - traefik
+    labels:
+      # phpmyadmin
+      - "traefik.enable=true"
+      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}db.${VDM_DOMAIN}\`)"
+      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}"
+${VDM_REMOVE_SECURE}      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.tls.certresolver=vdmresolver"
+      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.service=phpmyadmin_${VDM_KEY}"
+      - "traefik.http.services.phpmyadmin_${VDM_KEY}.loadbalancer.server.port=80"
+
+networks:
+  traefik:
+    external:
+      name: traefik_webgateway
+EOF
+}
+
+#####################################################################################################################VDM
+######################################## SETUP OPENSSH
+function openssh__TRuST__setup() {
+  # load this container type globals
+  # shellcheck disable=SC1090
+  [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && source "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+  # get the ssh port if not set
+  while [ ${#VDM_PORT} -le 1 ]; do
+    # get the value
+    VDM_PORT=$(getInput 'Enter ssh port to use\n[do not use 22]' '' 'Enter Port')
+    # keep asking
+    [ ${#VDM_PORT} -ge 1 ] || {
+      showError "You must enter a ssh port for the container"
+    }
+  done
+  # set the main domain if not set
+  while [ ${#VDM_DOMAIN} -le 1 ]; do
+    # get the value
+    VDM_DOMAIN=$(getInput "Enter main domain of all your containers.\n[only one main domain allowed for now, must have at least one dot]" \
+      "vdm.dev" 'Enter Main Domain')
+    # keep asking if empty or does exist
+    [ ${#VDM_DOMAIN} -ge 1 ] || {
+      showError "You must enter a domain name!"
+    }
+  done
+  # get the username if not set
+  while [ ${#VDM_USER_NAME} -le 1 ] || [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_USER_NAME}.${VDM_DOMAIN}" ]; do
+    # get the value
+    VDM_USER_NAME=$(getInput 'Enter username of the container\n[Text with no spaces that is only alphabetical]' 'ubuntu' 'Enter Username')
+    # keep asking if empty or does exist
+    if [ ${#VDM_USER_NAME} -ge 1 ] && [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_USER_NAME}.${VDM_DOMAIN}" ]; then
+      showError "The username:${VDM_USER_NAME} is already used. Select another"
+    elif [ ${#VDM_USER_NAME} -le 1 ]; then
+      showError "You must enter a username for the container"
+    fi
+  done
+  # get the key if not set
+  while [ ${#VDM_KEY} -le 1 ]; do
+    # get the value
+    VDM_KEY=$(getInput "Enter key used for container naming.\n[Text with no spaces that is only alphabetical]" \
+      '' 'Enter Key')
+    # keep asking if empty
+    if [ ${#VDM_KEY} -le 1 ]; then
+      showError "You must enter a key!"
+    fi
+  done
+  # get the env key if not set
+  while [ ${#VDM_ENV_KEY} -le 1 ]; do
+    # get the value
+    VDM_ENV_KEY=$(getInput "Enter environment key used to load the container environment variables.\n[Text with no spaces that is only alphabetical UPPERCASE]" \
+      "${VDM_KEY^^}" 'Enter ENV Key')
+    # keep asking if empty or does exist
+    [ ${#VDM_ENV_KEY} -ge 1 ] || {
+      showError "You must enter a environment key!"
+    }
+  done
+  # we check if it was set
+  [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -le 1 ] && VDM_PUBLIC_KEY_GLOBAL_DIR="${VDM_PUBLIC_KEY_DIR:-}"
+  # get the global directory of the ssh public keys if not set
+  while [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -le 1 ] || [ ! -d "${VDM_PUBLIC_KEY_GLOBAL_DIR}" ]; do
+    # creat the path if it exist
+    if [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -ge 1 ] &&
+      (whiptail --yesno "Can we create the ${VDM_PUBLIC_KEY_GLOBAL_DIR} ssh folder" --title "Create the Path" 8 112); then
+      mkdir -p "${VDM_PUBLIC_KEY_GLOBAL_DIR}"
+    else
+      # get the value
+      VDM_PUBLIC_KEY_GLOBAL_DIR=$(getInput "Enter the ssh path where we can select the ssh key folders from." \
+        "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.ssh" 'Enter SSH Path')
+      # keep asking if empty or does exist
+      if [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -ge 1 ] && [ ! -d "${VDM_PUBLIC_KEY_GLOBAL_DIR}" ] &&
+        (whiptail --yesno "Can we create the ${VDM_PUBLIC_KEY_GLOBAL_DIR} ssh folder" --title "Create the Path" 8 112); then
+        # shellcheck disable=SC2174
+        mkdir -p -m 700 "${VDM_PUBLIC_KEY_GLOBAL_DIR}"
+      elif [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -le 1 ]; then
+        showError "You must set a ssh path where we can select the ssh key folders from."
+      fi
+    fi
+  done
+  # set the global key env string for the ssh keys
+  VDM_ENV_PUBLIC_KEY_U_DIR="VDM_${VDM_ENV_KEY^^}_PUBLIC_KEY_DIR"
+  VDM_PUBLIC_KEY_U_DIR=${!VDM_ENV_PUBLIC_KEY_U_DIR}
+  # get the directory of this containers public keys if not set
+  while [ ${#VDM_PUBLIC_KEY_U_DIR} -le 1 ] || [ ! -d "${VDM_PUBLIC_KEY_U_DIR}" ]; do
+    # creat the path if it exist
+    if [ ${#VDM_PUBLIC_KEY_U_DIR} -ge 1 ] &&
+      (whiptail --yesno "Can we create this (${VDM_PUBLIC_KEY_U_DIR}) containers ssh public keys folder" --title "Create the Path" 8 112); then
+      # shellcheck disable=SC2174
+      mkdir -p -m 700 "${VDM_PUBLIC_KEY_U_DIR}"
+    else
+      # get the value
+      VDM_PUBLIC_KEY_U_DIR=$(getSelectedDirectory "Select the containers ssh public keys folder." \
+        "${VDM_PUBLIC_KEY_GLOBAL_DIR}" "${VDM_KEY,,}" 'Select Folder')
+      # keep asking if empty or does exist
+      if [ ${#VDM_PUBLIC_KEY_U_DIR} -ge 1 ] && [ ! -d "${VDM_PUBLIC_KEY_U_DIR}" ] &&
+        (whiptail --yesno "Can we create this (${VDM_PUBLIC_KEY_U_DIR}) containers ssh public keys folder" --title "Create the Path" 8 112); then
+        # shellcheck disable=SC2174
+        mkdir -p -m 700 "${VDM_PUBLIC_KEY_U_DIR}"
+        # TODO add option to add keys?
+      elif [ ${#VDM_PUBLIC_KEY_U_DIR} -le 1 ]; then
+        showError "You must set a containers ssh public keys folder."
+      fi
+    fi
+  done
+  # we must get the project path
+  VDM_ENV_PROJECT_PATH="VDM_${VDM_ENV_KEY^^}_PROJECT_PATH"
+  VDM_PROJECT_U_PATH=${!VDM_ENV_PROJECT_PATH}
+  # get the directory of the ssh public keys if not set
+  while [ ${#VDM_PROJECT_U_PATH} -le 1 ] || [ ! -d "${VDM_PROJECT_U_PATH}" ]; do
+    # creat the path if it exist
+    if [ ${#VDM_PROJECT_U_PATH} -ge 1 ] &&
+      (whiptail --yesno "Can we create the ${VDM_PROJECT_U_PATH} parent mounting directory" --title "Create the Path" 8 112); then
+      mkdir -p "${VDM_PROJECT_U_PATH}"
+    else
+      # get the value
+      VDM_PROJECT_U_PATH=$(getInput "Enter the parent path where we can select the folders to mount to this container." \
+        "${VDM_PROJECT_PATH}" 'Enter Path')
+      # keep asking if empty or does exist
+      if [ ${#VDM_PROJECT_U_PATH} -ge 1 ] && [ ! -d "${VDM_PROJECT_U_PATH}" ] &&
+        (whiptail --yesno "Can we create the ${VDM_PROJECT_U_PATH} parent mounting directory" --title "Create the Path" 8 112); then
+        # shellcheck disable=SC2174
+        mkdir -p -m 700 "${VDM_PROJECT_U_PATH}"
+      elif [ ${#VDM_PROJECT_U_PATH} -le 1 ]; then
+        showError "You must set a parent mounting directory path where we can select the folders to mount to this container."
+      fi
+    fi
+  done
+  # now load the mounting volumes
+  while [ ${#VDM_MOUNT_DIRS} -le 1 ]; do
+    # get the value
+    VDM_MOUNT_DIRS=$(getSelectedDirectories "Select the directories to mount to this container." \
+      "${VDM_PROJECT_U_PATH}" 'Select Folders')
+    # keep asking if empty or does exist
+    if [ ${#VDM_MOUNT_DIRS} -le 1 ]; then
+      showError "You must set the directories to mount to this container."
+    fi
+  done
+  # convert the string to an array
+  IFS=' ' read -r -a vdm_mount_dirs_array <<<"${VDM_MOUNT_DIRS[@]}"
+  # build the mount projects
+  VDM_MOUNT_PROJECTS=$(getYMLDashLine "\${${VDM_ENV_PUBLIC_KEY_U_DIR}}:/config/ssh_public_keys")
+  # loop over the directories to build the
+  for mDir in "${vdm_mount_dirs_array[@]}"; do
+    # set the full path
+    mDir="${mDir//\"/}"
+    # when we mount a joomla volume we may not want to mount the database
+    mFull="${VDM_PROJECT_U_PATH}/${mDir}/joomla"
+    # add to mount projects
+    if [ -d "${mFull}" ] && (whiptail --yesno "Should we ONLY mount the (joomla website files) ${mDir}/joomla directory" --title "Mount Joomla" 8 112); then
+      VDM_MOUNT_PROJECTS+=$(getYMLDashLine "\${VDM_${VDM_ENV_KEY^^}_PROJECT_DIR}/${mDir}/joomla:/app/${mDir}")
+    else
+      VDM_MOUNT_PROJECTS+=$(getYMLDashLine "\${VDM_${VDM_ENV_KEY^^}_PROJECT_DIR}/${mDir}:/app/${mDir}")
+    fi
+  done
+  # add this value if not set variable
+  setEnvVariable "VDM_DOMAIN=\"${VDM_DOMAIN}\""
+  # add this value if not set variable
+  setContainerEnvVariable "${VDM_ENV_PROJECT_PATH}=\"${VDM_PROJECT_U_PATH}\""
+  # add this value if not set variable
+  setContainerEnvVariable "VDM_PUBLIC_KEY_GLOBAL_DIR=\"${VDM_PUBLIC_KEY_GLOBAL_DIR}\""
+  # add this value if not set variable
+  setContainerEnvVariable "${VDM_ENV_PUBLIC_KEY_U_DIR}=\"${VDM_PUBLIC_KEY_U_DIR}\""
+  ##########################
+  ### export all we need
+  # global
+  export VDM_CONTAINER_TYPE
+  export VDM_REPO_PATH
+  export VDM_PROJECT_PATH
+  export VDM_DOMAIN
+  # container
+  export VDM_PORT
+  export VDM_USER_NAME
+  export VDM_KEY
+  export VDM_ENV_KEY
+  export VDM_PUBLIC_KEY_GLOBAL_DIR
+  export VDM_PUBLIC_KEY_U_DIR
+  export VDM_PROJECT_U_PATH
+  # create the directory if it does not yet already exist
+  # shellcheck disable=SC2174
+  mkdir -p -m 700 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_USER_NAME}.${VDM_DOMAIN}"
+  # place this docker composer file in its place
+  opensshContainer "${VDM_MOUNT_PROJECTS}" >"${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_USER_NAME}.${VDM_DOMAIN}/docker-compose.yml"
+  # set permissions
+  chmod 600 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_USER_NAME}.${VDM_DOMAIN}/docker-compose.yml"
+  # saved the file
+  showNotice "Saved ${VDM_CONTAINER_TYPE}:docker-compose.yml file.\nSetup of this container is complete!"
+  # ask if we should continue to enable
+  if (whiptail --yesno "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" --defaultno --title "Enable Container" 8 112); then
+    # we set the container details
+    export VDM_CONTAINER="${VDM_USER_NAME}.${VDM_DOMAIN}"
+    # then we enable it
+    enableContainer "${VDM_CONTAINER_TYPE}"
+  fi
+  ##########################
+  ### unset all no longer needed
+  # container
+  unset VDM_PORT
+  unset VDM_USER_NAME
+  unset VDM_KEY
+  unset VDM_ENV_KEY
+  unset VDM_PUBLIC_KEY_GLOBAL_DIR
+  unset VDM_PUBLIC_KEY_U_DIR
+  unset VDM_PROJECT_U_PATH
+  # return a success
+  return 0
+}
+
+# return the Openssh Container setup yml
+function opensshContainer() {
+  # get the projects to mount
+  local mount_projects="$1"
+  # we build the yml file
+  # we use 33 as this is the www-data ID
+  cat <<EOF
+version: "2.1"
+services:
+  openssh-server-${VDM_KEY}:
+    image: lscr.io/linuxserver/openssh-server
+    container_name: openssh-server-${VDM_KEY}
+    restart: unless-stopped
+    hostname: ${VDM_DOMAIN:-vdm.dev}
+    environment:
+      - PUID=${VDM_PUID:-33}
+      - PGID=${VDM_PGID:-33}
+      - TZ=${VDM_TZ:-Africa/Windhoek}
+      - PUBLIC_KEY_DIR=/config/ssh_public_keys
+      - SUDO_ACCESS=${VDM_SUDO_ACCESS:-false}
+      - USER_NAME=${VDM_USER_NAME:-ubuntu}
+    volumes:${mount_projects}
+    ports:
+      - ${VDM_PORT}:2222
+    networks:
+      - openssh
+
+networks:
+  openssh:
+    external:
+      name: openssh_gateway
+EOF
+}
+
+#####################################################################################################################VDM
+######################################## ENABLE JOOMLA
+function joomla__TRuST__enable() {
+  # some local values
+  local evn_file
+  # check if this type have available containers
+  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" ]; then
+    showError "The path ${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/ does not exist, first run a ${VDM_CONTAINER_TYPE} setup."
+  elif [ ! -d "${VDM_PROJECT_PATH}" ]; then
+    # this should never happen, but in case
+    showError "The path ${VDM_PROJECT_PATH} does not exist, so we can't mount the persistent volumes. This error should never show, \
+      please open an issue and report docker-deploy-error-1234 with the steps of how did you got here?"
+  elif [ ${#VDM_CONTAINER} -ge 1 ]; then
+    # this means we have a single already selected container to enable if it exists
+    if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_CONTAINER}" ]; then
+      # create the folder as needed
+      mkdir -p "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"
+      # create the soft link
+      [ -e "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ] || {
+        ln -s "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_CONTAINER}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
+      }
+      # check if image has its own env file also
+      evn_file=''
+      # shellcheck disable=SC2015
+      [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/.env" || {
+        [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+      }
+      # make sure the docker image is started
+      # shellcheck disable=SC2015
+      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" up -d || {
+        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" up -d
+      }
+    else
+      showError "The (${VDM_CONTAINER}) container does not exist."
+    fi
+    # always unset after
+    VDM_CONTAINER=''
+    unset VDM_CONTAINER
+  else
+    # set some local variables
+    local vdm_enable_me
+    local container
+    # create the folder as needed
+    mkdir -p "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"
+    # get containers to enable
+    vdm_enable_me=$(getSelectedDirectories "Select container/s to enable." \
+      "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" "Enable ${VDM_CONTAINER_TYPE} Containers")
+    # check that we have something, else return to main menu
+    if [ ${#vdm_enable_me} -ge 1 ]; then
+      # convert the string to and array
+      IFS=' ' read -r -a vdm_enable_me_array <<<"${vdm_enable_me[@]}"
+      # loop over the directories to build the
+      for containered in "${vdm_enable_me_array[@]}"; do
+        # remove the " from the string
+        container="${containered//\"/}"
+        # create the soft link
+        [ -e "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ] || {
+          ln -s "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
+        }
+        # check if image has its own env file also
+        evn_file=''
+        # shellcheck disable=SC2015
+        [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/.env" || {
+          [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+        }
+        # make sure the docker image is started
+        # shellcheck disable=SC2015
+        [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" up -d || {
+          docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" up -d
+        }
+      done
+    fi
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## ENABLE OPENSSH
+function openssh__TRuST__enable() {
+  # check if this type have available containers
+  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" ]; then
+    showError "The path ${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/ does not exist, first run a ${VDM_CONTAINER_TYPE} setup."
+  elif [ ${#VDM_CONTAINER} -ge 1 ]; then
+    # this means we have a single already selected container to enable if it exists
+    if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_CONTAINER}" ]; then
+      # create the folder as needed
+      mkdir -p "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"
+      # create the soft lin
+      [ -e "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ] || {
+        ln -s "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_CONTAINER}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
+      }
+      # check if image has its own env file also
+      evn_file=''
+      # shellcheck disable=SC2015
+      [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/.env" || {
+        [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+      }
+      # make sure the docker image is started
+      # shellcheck disable=SC2015
+      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" up -d || {
+        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" up -d
+      }
+    else
+      showError "The (${VDM_CONTAINER}) container does not exist."
+    fi
+    # always unset after
+    VDM_CONTAINER=''
+    unset VDM_CONTAINER
+  else
+    # set some local variables
+    local vdm_enable_me
+    local container
+    local evn_file
+    # create the folder as needed
+    mkdir -p "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"
+    # get containers to enable
+    vdm_enable_me=$(getSelectedDirectories "Select container/s to enable." \
+      "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" "Enable ${VDM_CONTAINER_TYPE} Containers")
+    # check that we have something, else return to main menu
+    if [ ${#vdm_enable_me} -ge 1 ]; then
+      # convert the string to and array
+      IFS=' ' read -r -a vdm_enable_me_array <<<"${vdm_enable_me[@]}"
+      # loop over the directories to build the
+      for containered in "${vdm_enable_me_array[@]}"; do
+        # remove the " from the string
+        container="${containered//\"/}"
+        # create the soft link
+        [ -e "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ] || {
+          ln -s "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
+        }
+        # check if image has its own env file also
+        evn_file=''
+        # shellcheck disable=SC2015
+        [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/.env" || {
+          [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+        }
+        # make sure the docker image is started
+        # shellcheck disable=SC2015
+        [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" up -d || {
+          docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" up -d
+        }
+      done
+    fi
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## ENABLE TRAEFIK
+function traefik__TRuST__enable() {
+  # check if traefik has been setup
+  if [ ! -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" ]; then
+    showError "There are no ${VDM_CONTAINER_TYPE} container to enable, first run the ${VDM_CONTAINER_TYPE} setup."
+  else
+    # set some local variables
+    local evn_file
+    # make sure to take down Apache
+    downApache
+    # check if image has its own env file also
+    evn_file=''
+    # shellcheck disable=SC2015
+    [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || {
+      [ -f "${VDM_SRC_PATH}/.env" ] && evn_file="${VDM_SRC_PATH}/.env"
+    }
+    # make sure the docker image is started
+    # shellcheck disable=SC2015
+    [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" up -d || {
+      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" up -d
+    }
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## ENABLE PORTAINER
+function portainer__TRuST__enable() {
+  # check if traefik has been setup
+  if [ ! -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" ]; then
+    showError "There are no ${VDM_CONTAINER_TYPE} container to enable, first run the ${VDM_CONTAINER_TYPE} setup."
+  else
+    # set some local variables
+    local evn_file
+    # check if image has its own env file also
+    evn_file=''
+    # shellcheck disable=SC2015
+    [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || {
+      [ -f "${VDM_SRC_PATH}/.env" ] && evn_file="${VDM_SRC_PATH}/.env"
+    }
+    # make sure the docker image is started
+    # shellcheck disable=SC2015
+    [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" up -d || {
+      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" up -d
+    }
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## DISABLE JOOMLA
+function joomla__TRuST__disable() {
+  # check if this type has enabled containers
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" ] ||
+    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" | wc -l) = 0 ]; then
+    showError "There are no ${VDM_CONTAINER_TYPE} containers to disable."
+  elif [ ${#VDM_CONTAINER} -ge 1 ]; then
+    # this means we have a single already selected container to enable if it exists
+    if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ]; then
+        # make sure the docker image is stopped
+        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down
+        # then remove soft link
+        rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
+    else
+      showError "The (${VDM_CONTAINER}) container is not enabled."
+    fi
+    # always unset after
+    VDM_CONTAINER=''
+    unset VDM_CONTAINER
+  else
+    # set some local variables
+    local vdm_disable_me
+    local container
+    # get containers to enable
+    vdm_disable_me=$(getSelectedDirectories "Select container/s to disable." \
+      "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" "Disable ${VDM_CONTAINER_TYPE} Containers")
+    # check that we have something, else return to main menu
+    if [ ${#vdm_disable_me} -ge 1 ]; then
+      # convert the string to and array
+      IFS=' ' read -r -a vdm_disable_me_array <<<"${vdm_disable_me[@]}"
+      # loop over the directories to build the
+      for containered in "${vdm_disable_me_array[@]}"; do
+        # remove the " from the string
+        container="${containered//\"/}"
+        # make sure the docker image is stopped
+        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down
+        # then remove soft link
+        rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
+      done
+    fi
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## DISABLE OPENSSH
+function openssh__TRuST__disable() {
+  # check if this type has enabled containers
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" ] ||
+    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" | wc -l) = 0 ]; then
+    showError "There are no ${VDM_CONTAINER_TYPE} containers to disable."
+  elif [ ${#VDM_CONTAINER} -ge 1 ]; then
+    # this means we have a single already selected container to enable if it exists
+    if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ]; then
+        # make sure the docker image is stopped
+        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down
+        # then remove soft link
+        rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
+    else
+      showError "The (${VDM_CONTAINER}) container is not enabled."
+    fi
+    # always unset after
+    VDM_CONTAINER=''
+    unset VDM_CONTAINER
+  else
+    # set some local variables
+    local vdm_disable_me
+    local container
+    # get containers to enable
+    vdm_disable_me=$(getSelectedDirectories "Select container/s to disable." \
+      "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" "Disable ${VDM_CONTAINER_TYPE} Containers")
+    # check that we have something, else return to main menu
+    if [ ${#vdm_disable_me} -ge 1 ]; then
+      # convert the string to and array
+      IFS=' ' read -r -a vdm_disable_me_array <<<"${vdm_disable_me[@]}"
+      # loop over the directories to build the
+      for containered in "${vdm_disable_me_array[@]}"; do
+        # remove the " from the string
+        container="${containered//\"/}"
+        # make sure the docker image is stopped
+        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down
+        # then remove soft link
+        rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
+      done
+    fi
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## DISABLE TRAEFIK
+function traefik__TRuST__disable() {
+  # check if traefik has been setup
+  if [ ! -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" ]; then
+    showError "There are no ${VDM_CONTAINER_TYPE} container to disable."
+  else
+    # make sure the docker image is stopped
+    docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## DISABLE PORTAINER
+function portainer__TRuST__disable() {
+  # check if portainer has been setup
+  if [ ! -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" ]; then
+    showError "There are no ${VDM_CONTAINER_TYPE} container to disable."
+  else
+    # make sure the docker image is stopped
+    docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
+  fi
+}
+
+#####################################################################################################################VDM
+########################################UP JOOMLA
+function joomla__TRuST__up() {
+  # check if this type has enabled containers
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" ] ||
+    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" | wc -l) = 0 ]; then
+    showError "There are no ${VDM_CONTAINER_TYPE} containers enabled, first enable some containers.\n\
+      (UP and DOWN targets only enabled containers)"
+  else
+    # set some local variables
+    local evn_file
+    local vdm_container
+    # get all zip files
+    for yml in "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"*/*.yml; do
+      # get the vdm_container value
+      vdm_container="${yml%/docker-compose.yml}"
+      # check if image has its own env file also
+      evn_file=''
+      # check if image has its own env file also
+      # shellcheck disable=SC2015
+      [ -f "${vdm_container}/.env" ] && evn_file="${vdm_container}/.env" || {
+        [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+      }
+      # make sure the docker image is started
+      # shellcheck disable=SC2015
+      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${yml}" up -d || {
+        docker-compose --file "${yml}" up -d
+      }
+    done
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## UP OPENSSH
+function openssh__TRuST__up() {
+  # check if this type has enabled containers
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" ] ||
+    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" | wc -l) = 0 ]; then
+    showError "There are no ${VDM_CONTAINER_TYPE} containers enabled, first enable some containers.\n\
+      (UP and DOWN targets only enabled containers)"
+  else
+    # set some local variables
+    local evn_file
+    local vdm_container
+    # get all zip files
+    for yml in "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"*/*.yml; do
+      # get the vdm_container value
+      vdm_container="${yml%/docker-compose.yml}"
+      # check if image has its own env file also
+      evn_file=''
+      # check if image has its own env file also
+      # shellcheck disable=SC2015
+      [ -f "${vdm_container}/.env" ] && evn_file="${vdm_container}/.env" || {
+        [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+      }
+      # make sure the docker image is started
+      # shellcheck disable=SC2015
+      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${yml}" up -d || {
+        docker-compose --file "${yml}" up -d
+      }
+    done
+  fi
+}
+
+#####################################################################################################################VDM
+########################################DOWN JOOMLA
+function joomla__TRuST__down() {
+  # check if this type has enabled containers
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" ] ||
+    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" | wc -l) = 0 ]; then
+    showError "There are no ${VDM_CONTAINER_TYPE} containers to take down.\n\
+      (UP and DOWN targets only enabled containers)"
+  else
+    # get all zip files
+    for yml in "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"*/*.yml; do
+      docker-compose --file "${yml}" down
+    done
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## DOWN OPENSSH
+function openssh__TRuST__down() {
+  # check if this type has enabled containers
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" ] ||
+    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" | wc -l) = 0 ]; then
+    showError "There are no ${VDM_CONTAINER_TYPE} containers to take down."
+  else
+    # get all zip files
+    for yml in "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"*/*.yml; do
+      docker-compose --file "${yml}" down
+    done
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## DELETE JOOMLA
+function joomla__TRuST__delete() {
+  # check if this type has enabled containers
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" ] ||
+    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" | wc -l) = 0 ]; then
+    showError "There are no ${VDM_CONTAINER_TYPE} available containers."
+  else
+    # set some local variables
+    local vdm_delete_me
+    local container
+    # saved the file
+    showNotice "Only delete containers of which you have made absolutely sure its no longer needed! Better to just disable them if all you want is to just take them down."
+    # get containers to enable
+    vdm_delete_me=$(getSelectedDirectories "Select container/s to delete." \
+      "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" "Delete ${VDM_CONTAINER_TYPE} Container/s")
+    # check that we have something, else return to main menu
+    if [ ${#vdm_delete_me} -ge 1 ]; then
+      # convert the string to and array
+      IFS=' ' read -r -a vdm_delete_me_array <<<"${vdm_delete_me[@]}"
+      # loop over the directories to build the
+      for containered in "${vdm_delete_me_array[@]}"; do
+        # remove the " from the string
+        container="${containered//\"/}"
+        # check if the container is still enabled
+        if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ]; then
+          # make sure the docker image is stopped
+          docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down
+          # then remove soft link
+          rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
+        fi
+        # before deleting the config we ask to make sure
+        if (whiptail --yesno "Would you like to delete the (${container}) container's folder that holds the docker-compose.yml file?" --title "Delete Docker Compose Yaml" 8 112); then
+          # then remove docker-compose.yml file
+          rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}"
+        fi
+      done
+    fi
+    # ask if there are volumes to delete
+    if [ -d "${VDM_PROJECT_PATH}" ] && [ $(ls -A "${VDM_PROJECT_PATH}" | wc -l) -ne 0 ] &&
+      (whiptail --yesno "Would you like to delete persistent volumes found in (${VDM_PROJECT_PATH})?" --title "Continue To Delete Persistent Volumes" 12 112); then
+      # trigger the volumes removal script
+      deletePersistentVolumes
+    fi
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## DELETE OPENSSH
+function openssh__TRuST__delete() {
+  # check if this type has enabled containers
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" ] ||
+    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" | wc -l) = 0 ]; then
+    showError "There are no ${VDM_CONTAINER_TYPE} available containers."
+  else
+    # set some local variables
+    local vdm_delete_me
+    local container
+    # saved the file
+    showNotice "Only delete containers of which you have made absolutely sure its no longer needed! Better to just disable them if all you want is to just take them down."
+    # get containers to enable
+    vdm_delete_me=$(getSelectedDirectories "Select container/s to delete." \
+      "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" "Delete ${VDM_CONTAINER_TYPE} Container/s")
+    # check that we have something, else return to main menu
+    if [ ${#vdm_delete_me} -ge 1 ]; then
+      # convert the string to and array
+      IFS=' ' read -r -a vdm_delete_me_array <<<"${vdm_delete_me[@]}"
+      # loop over the directories to build the
+      for containered in "${vdm_delete_me_array[@]}"; do
+        # remove the " from the string
+        container="${containered//\"/}"
+        # check if the container is still enabled
+        if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ]; then
+          # make sure the docker image is stopped
+          docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down
+          # then remove soft link
+          rm -fr "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
+        fi
+        # before deleting the config we ask to make sure
+        if (whiptail --yesno "Would you like to delete the (${container}) container's folder that holds the docker-compose.yml file?" --title "Delete Docker Compose Yaml" 8 112); then
+          # then remove docker-compose.yml file
+          rm -fr "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}"
+        fi
+      done
+    fi
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## MENU ACTIONS
+
+# setup a container
+function setupContainer() {
+  # make sure the networks are set
+  setNetworks
+  # make sure of our container type
+  VDM_CONTAINER_TYPE="${1}"
+  VDM_TASK="setup"
+  # execute the task
+  main
+}
+
+# enable a container
+function enableContainer() {
+  # make sure of our container type
+  VDM_CONTAINER_TYPE="${1}"
+  VDM_TASK="enable"
+  # execute the task
+  main
+}
+
+# disable a container
+function disableContainer() {
+  # make sure of our container type
+  VDM_CONTAINER_TYPE="${1}"
+  VDM_TASK="disable"
+  # execute the task
+  main
+}
+
+# down containers
+function downContainers() {
+  # make sure of our container type
+  VDM_CONTAINER_TYPE="${1}"
+  VDM_TASK="down"
+  # execute the task
+  main
+}
+
+# up containers
+function upContainers() {
+  # make sure of our container type
+  VDM_CONTAINER_TYPE="${1}"
+  VDM_TASK="up"
+  # execute the task
+  main
+}
+
+# delete a container
+function deleteContainer() {
+  # make sure of our container type
+  VDM_CONTAINER_TYPE="${1}"
+  VDM_TASK="delete"
+  # execute the task
+  main
+}
+
+# To fix the permissions of Joomla containers
+function fixContainerPermissions() {
+  # check if we have persistent volumes
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ ! -d "${VDM_PROJECT_PATH}" ]; then
+    showError "The ${VDM_PROJECT_PATH} does not exist."
+  elif [ $(ls -A "${VDM_PROJECT_PATH}" | wc -l) = 0 ]; then
+    showError "There are no persistent volumes in ${VDM_PROJECT_PATH} available."
+  else
+    # set some local variables
+    local vdm_fix_me
+    local persistent
+    # get containers to enable
+    vdm_fix_me=$(getSelectedDirectories "Select persistent volume to fix." \
+      "${VDM_PROJECT_PATH}" "Fix Joomla Permissions")
+    # check that we have something, else return to main menu
+    if [ ${#vdm_fix_me} -ge 1 ]; then
+      # convert the string to and array
+      IFS=' ' read -r -a vdm_fix_me_array <<<"${vdm_fix_me[@]}"
+      # loop over the directories to build the
+      for volume in "${vdm_fix_me_array[@]}"; do
+        # remove the " from the string
+        persistent="${volume//\"/}"
+        # make sure this is a joomla system
+        if [ -d "${VDM_PROJECT_PATH}/${persistent}/joomla" ]; then
+          ### Fix the folder ownership of Joomla folders
+          #
+          echo "Fixing Fix the folder ownership of ${persistent} Joomla folders"
+          #
+          sudo chown -R www-data:www-data "${VDM_PROJECT_PATH}/${persistent}/joomla"
+          ### Fix the folder permissions for the Joomla websites
+          #
+          echo "Fixing the file and folder permissions for the ${persistent} Joomla website"
+          #
+          # Change the file permissions
+          sudo find "${VDM_PROJECT_PATH}/${persistent}/joomla" -type f -exec chmod 644 {} \;
+          sudo find "${VDM_PROJECT_PATH}/${persistent}/joomla/configuration.php" -type f -exec chmod 444 {} \;
+          [ -f "${VDM_PROJECT_PATH}/${persistent}/joomla/.htaccess" ] &&
+            sudo find "${VDM_PROJECT_PATH}/${persistent}/joomla/.htaccess" -type f -exec chmod 400 {} \;
+          [ -f "${VDM_PROJECT_PATH}/${persistent}/joomla/php.ini" ] &&
+            sudo find "${VDM_PROJECT_PATH}/${persistent}/joomla/php.ini" -type f -exec chmod 400 {} \;
+          # Change the folder permissions
+          sudo find /"home/${USER}/Projects/${persistent}/joomla" -type d -exec chmod 755 {} \;
+          # Change the image folder permissions
+          # chmod 707 "${VDM_PROJECT_PATH}/${persistent}/joomla/images"
+          # chmod 707 "${VDM_PROJECT_PATH}/${persistent}/joomla/images/stories"
+          ### Fix the folder permissions so the active user (1000) can access the files
+          #
+          echo "Fixing the folder permissions of ${persistent} joomla so user:$USER can access them"
+          #
+          sudo setfacl -R -m u:"$USER":rwx "${VDM_PROJECT_PATH}/${persistent}/joomla"
+          ### Fix the folder ownership of database folders
+          #
+          echo "Fixing the folder ownership of ${persistent} database folders"
+          #
+          sudo chown -R systemd-coredump:systemd-coredump "${VDM_PROJECT_PATH}/${persistent}/db"
+          ### Fix the folder permissions for the database files
+          #
+          echo "Fixing the file and folder permissions for the ${persistent} database files"
+          #
+          # Change the file permissions
+          sudo find "${VDM_PROJECT_PATH}/${persistent}/db" -type f -exec chmod 660 {} \;
+          sudo find "${VDM_PROJECT_PATH}/${persistent}/db" -type d -exec chmod 700 {} \;
+          # show the completion of this permission fix
+          showNotice "Permissions fix completed on (${persistent})."
+        else
+          showError "${VDM_PROJECT_PATH}/${persistent} is not a joomla persistent volume and was skipped."
+        fi
+      done
+    fi
+  fi
+}
+
+# delete persistent volumes
+function deletePersistentVolumes() {
+  # we first check if we have some volumes
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ -d "${VDM_PROJECT_PATH}" ] && [ $(ls -A "${VDM_PROJECT_PATH}" | wc -l) -ne 0 ]; then
+    # set some local variables
+    local vdm_delete_volumes
+    local persistent
+    # saved the file
+    showNotice "Only delete persistent volumes of which you have made absolutely sure its no longer in use!"
+    # get containers to enable
+    vdm_delete_volumes=$(getSelectedDirectories "Select persistent volume\s to delete." \
+      "${VDM_PROJECT_PATH}" "Select Persistent Volume\s to Delete")
+    # check that we have something, else return to main menu
+    if [ ${#vdm_delete_volumes} -ge 1 ]; then
+      # convert the string to and array
+      IFS=' ' read -r -a vdm_delete_volumes_array <<<"${vdm_delete_volumes[@]}"
+      # loop over the directories to build the
+      for volumes in "${vdm_delete_volumes_array[@]}"; do
+        # remove the " from the string
+        persistent="${volumes//\"/}"
+        # last serious check and then its gone
+        if [ -d "${VDM_PROJECT_PATH}/${persistent}" ] &&
+          (whiptail --yesno "Are you absolutely sure you would like to delete this (${persistent}) persistent volume. THIS CAN'T BE UNDONE!" --title "Delete Persistent Volume" 15 112); then
+          # then remove soft link
+          sudo rm -rf "${VDM_PROJECT_PATH}/${persistent}"
+        fi
+      done
+    fi
+  else
+    showError "There are no persistent volumes found in ${VDM_PROJECT_PATH}."
+  fi
+}
+
+# make an update
+function runUpdate() {
+  # check that we have an access token
+  getAccessToken || return 1
+  # remove the current version
+  if [ -f /usr/local/bin/docker-deploy ]; then
+    # just backup in case of failure
+    sudo mv /usr/local/bin/docker-deploy /usr/local/bin/docker-deploy.bak
+  fi
+  # pull the latest version. Master is always the latest
+  if sudo curl --fail -L "https://git.vdm.dev/api/v1/repos/octoleo/docker-deploy/raw/src/docker-deploy?ref=master&access_token=${VDM_ACCESS_TOKEN}" -o /usr/local/bin/docker-deploy 2>/dev/null; then
+    # give success message
+    echo "SUCCESS: Update was successful."
+    # do we have a backup
+    if [ -f /usr/local/bin/docker-deploy.bak ]; then
+      # lets remove it now
+      sudo rm -f /usr/local/bin/docker-deploy.bak
+    fi
+  else
+    # show the error
+    echo >&2 "ERROR: Update failed please try again later."
+    # do we have a backup
+    if [ -f /usr/local/bin/docker-deploy.bak ]; then
+      # move backup back
+      sudo mv /usr/local/bin/docker-deploy.bak /usr/local/bin/docker-deploy
+    fi
+  fi
+  # always set the permission again if we have a file
+  if [ -f /usr/local/bin/docker-deploy ]; then
+    # the we make sure its executable
+    sudo chmod +x /usr/local/bin/docker-deploy
+  fi
+  # always exit so the new script can load
+  exit 0
+}
+
+# make an uninstall
+function runUninstall() {
+  # little notice
+  showNotice "We have three uninstall options: 1) Complete. 2) Just Script. 3) Make your selection."
+  # first safety check
+  if (whiptail --yesno "We are just trying to be careful here, therefore we have a few questions. Please remember there is an auto update option!\n\
+    Are you absolutely sure you want to continue with the uninstalling process?" --defaultno --title "Uninstalling ${PROGRAM_NAME} v${_VERSION} " 12 112); then
+    # we have four main options
+    if (whiptail --yesno "Okay, So do you want to completely remove everything? This is the most dangerous option! IT CAN'T BE UNDONE!\
+      We will remove literally everything like this script was never here." --defaultno --title "Complete Uninstall of ${PROGRAM_NAME} v${_VERSION} " 12 112); then
+      if [ -d "${VDM_REPO_PATH}/joomla" ]; then
+        # take down all joomla containers
+        downContainers 'joomla'
+        # now completely remove Joomla configurations
+        sudo rm -fr "${VDM_REPO_PATH}/joomla"
+      fi
+      # Remove all of Openssh Docker stuff
+      if [ -d "${VDM_REPO_PATH}/openssh" ]; then
+        # take down all joomla containers
+        downContainers 'openssh'
+        # now completely remove Joomla configurations
+        sudo rm -fr "${VDM_REPO_PATH}/openssh"
+      fi
+      # Remove all of Portainer Docker stuff
+      if [ -d "${VDM_REPO_PATH}/portainer" ]; then
+        # take down all portainer containers
+        disableContainer 'portainer'
+        # now completely remove Portainer configurations
+        sudo rm -fr "${VDM_REPO_PATH}/portainer"
+      fi
+      # Remove all of Traefik Docker stuff
+      if [ -d "${VDM_REPO_PATH}/traefik" ]; then
+        # take down all traefik containers
+        disableContainer 'traefik'
+        # now completely remove Traefik configurations
+        sudo rm -fr "${VDM_REPO_PATH}/traefik"
+      fi
+      # remove config if found
+      if [ -d "${VDM_SRC_PATH}" ]; then
+        sudo rm -fr "${VDM_SRC_PATH}"
+      fi
+      # remove config if found
+      if [ -d "${VDM_REPO_PATH}" ]; then
+        sudo rm -fr "${VDM_REPO_PATH}"
+      fi
+    elif (whiptail --yesno "Would you like to only remove the actual ${PROGRAM_NAME} v${_V}  script but keep all the Docker stuff?" --title "Keep Docker Stuff" 8 112); then
+      # now remove the docker-deploy script
+      if [ -f /usr/local/bin/docker-deploy ]; then
+        sudo rm -f /usr/local/bin/docker-deploy
+      fi
+      # give the final message
+      whiptail --title "${PROGRAM_NAME} v${_VERSION}  is UNINSTALLED" --msgbox "\n\
+        ${PROGRAM_NAME}  v${_V} has been uninstalled.\n\n\
+        We have not touched any of the Docker stuff.\n\
+        To also remove these you will have to manually pull down the Docker containers (if their are any running) and then remove the following directories.\n\n\
+        DOCKER:  ${VDM_REPO_PATH} \n\
+        VOLUMES: ${VDM_PROJECT_PATH} \n\
+        CONFIG:  ${VDM_SRC_PATH}" 20 112
+      # we exit here... where done!
+      exit 0
+    else
+      # little notice
+      showNotice "This option lets you choose what you keep, so read the questions carefully! IT CAN'T BE UNDONE!"
+      # shellcheck disable=SC1090
+      # ----------------------------------------------------- MULTI CONTAINERS
+      # Remove all of Joomla Docker stuff
+      if [ -d "${VDM_REPO_PATH}/joomla" ] &&
+        (whiptail --yesno "Would you like to completely remove the Joomla Docker yml configurations in (${VDM_REPO_PATH}/joomla)?" --defaultno --title "Remove Docker Config" 12 112); then
+        # take down all joomla containers
+        downContainers 'joomla'
+        # now completely remove Joomla configurations
+        sudo rm -fr "${VDM_REPO_PATH}/joomla"
+      fi
+      # check if we have possible joomla containers (this will only run if they did not remove it above)
+      if [ -e "${VDM_REPO_PATH}/joomla/enabled" ] &&
+        (whiptail --yesno "Would you like to take down Joomla containers?" --defaultno --title "Take Down Containers" 8 112); then
+        # take down all joomla containers
+        downContainers 'joomla'
+        # remove all enabled
+        rm -fr "${VDM_REPO_PATH}/joomla/enabled"
+      fi
+      # Remove all of Openssh Docker stuff
+      if [ -d "${VDM_REPO_PATH}/openssh" ] &&
+        (whiptail --yesno "Would you like to completely remove the Openssh Docker yml configurations in (${VDM_REPO_PATH}/openssh)?" --defaultno --title "Remove Docker Config" 12 112); then
+        # take down all joomla containers
+        downContainers 'openssh'
+        # now completely remove Joomla configurations
+        sudo rm -fr "${VDM_REPO_PATH}/openssh"
+      fi
+      # check if we have possible openssh containers (this will only run if they did not remove it above)
+      if [ -e "${VDM_REPO_PATH}/openssh/enabled" ] &&
+        (whiptail --yesno "Would you like to take down Openssh containers?" --defaultno --title "Take Down Containers" 8 112); then
+        # take down all joomla containers
+        downContainers 'openssh'
+        # remove all enabled
+        rm -fr "${VDM_REPO_PATH}/openssh/enabled"
+      fi
+      # ----------------------------------------------------- SINGLE CONTAINER
+      # Remove all of Portainer Docker stuff
+      if [ -d "${VDM_REPO_PATH}/portainer" ] &&
+        (whiptail --yesno "Would you like to completely remove the Portainer Docker yml configurations in (${VDM_REPO_PATH}/portainer)?" --defaultno --title "Remove Docker Config" 12 112); then
+        # take down all portainer containers
+        disableContainer 'portainer'
+        # now completely remove Portainer configurations
+        sudo rm -fr "${VDM_REPO_PATH}/portainer"
+      fi
+      # check if we have possible portainer container (this will only run if they did not remove it above)
+      if [ -f "${VDM_REPO_PATH}/portainer/docker-compose.yml" ] &&
+        (whiptail --yesno "Would you like to take down Portainer container?" --defaultno --title "Take Down Container" 8 112); then
+        # take down the container
+        disableContainer 'portainer'
+      fi
+      # Remove all of Traefik Docker stuff
+      if [ -d "${VDM_REPO_PATH}/traefik" ] &&
+        (whiptail --yesno "Would you like to completely remove the Traefik Docker yml configurations in (${VDM_REPO_PATH}/traefik)?" --defaultno --title "Remove Docker Config" 12 112); then
+        # take down all traefik containers
+        disableContainer 'traefik'
+        # now completely remove Traefik configurations
+        sudo rm -fr "${VDM_REPO_PATH}/traefik"
+      fi
+      # check if we have possible traefik container (this will only run if they did not remove it above)
+      if [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
+        (whiptail --yesno "Would you like to take down Traefik container?" --defaultno --title "Take Down Container" 8 112); then
+        # take down the container
+        disableContainer 'traefik'
+      fi
+      # remove config if found
+      if [ -d "${VDM_SRC_PATH}" ] &&
+        (whiptail --yesno "Would you like to remove the global docker configurations?" --defaultno --title "Remove Docker Config" 8 112); then
+        sudo rm -fr "${VDM_SRC_PATH}"
+      fi
+    fi
+    # now remove the docker-deploy script
+    if [ -f /usr/local/bin/docker-deploy ]; then
+      sudo rm -f /usr/local/bin/docker-deploy
+    fi
+    # last and final question as this is most dangerous and serious issue.
+    if [ -d "${VDM_PROJECT_PATH}" ] &&
+      (whiptail --yesno "Last question, would you like to remove all persistent volumes of your containers in (${VDM_PROJECT_PATH})?" --defaultno --title "Completely DELETE persistent volumes" 12 112); then
+      sudo rm -rf "${VDM_PROJECT_PATH}"
+    fi
+    # give the final message
+    whiptail --title "${PROGRAM_NAME} v${_VERSION} is UNINSTALLED" --msgbox "\n\n\
+      ${PROGRAM_NAME} v${_V} has been uninstalled." 10 112
+    # exit the program right now
+    exit 0
+  fi
+}
+
+# we show the octoleo info quietly
+octoleoQuietly(){
+  local message
+  # now set the message
+  message="                                              https://git.vdm.dev/octoleo/docker-deploy
+
+  Welcome to an Octoleo Program (${PROGRAM_NAME} v$_VERSION)
+
+  Description
+      With this script we can easily deploy docker containers of Joomla and Openssh.
+      This combination of these tools give rise to a powerful and very secure shared
+      development environment.
+      This program has **command input** options as seen in the menus item called
+      **Show command help**, but these command are _not the only way_ to set these
+      values. When the values are **omitted** you will be _asked in the terminal_ to
+      manually enter the required values as needed. Furthermore, the use of
+      **env variables** are also heavily used across the script. There are more
+      than one .env file and the script will set those up for you whenever you run a
+      task that make use of env variables the script will check if those values exist,
+      and if they don't it will ask for them, and store them automatically for future use.
+      That same time the output message to the terminal will show you where the specific
+      .env file can be found.
+
+  Author                                        Licence
+      Llewellyn van der Merwe <octoleo@vdm.io>      GNU GENERAL PUBLIC LICENSE Version 2
+
+  --quiet"
+
+  whiptail --msgbox --scrolltext "${message}" 30 112
+}
+
+# show the help menu
+function showHelpMenu() {
+  help=$(showHelp)
+  whiptail --msgbox --scrolltext "${help}" 30 112
+}
+
+#####################################################################################################################VDM
+######################################## MENUS
+
+# show Joomla menu
+function showJoomla() {
+  CHOICE=$(
+    whiptail --title "Joomla | ${PROGRAM_NAME} v${_V}" --menu "Make your selection" 16 112 7 \
+      "1)" "<-- Return to the main menu." \
+      "2)" "Setup new container" \
+      "3)" "Enable existing container" \
+      "4)" "Disable enabled container" \
+      "5)" "Delete a container" \
+      "6)" "Take all enabled containers down" \
+      "7)" "Pull up all enabled containers" \
+      "8)" "Fix permissions of folders and files of a container" 3>&2 2>&1 1>&3
+  )
+
+  case $CHOICE in
+  "2)")
+    setupContainer 'joomla'
+    ;;
+  "3)")
+    enableContainer 'joomla'
+    ;;
+  "4)")
+    disableContainer 'joomla'
+    ;;
+  "5)")
+    deleteContainer 'joomla'
+    ;;
+  "6)")
+    downContainers 'joomla'
+    ;;
+  "7)")
+    upContainers 'joomla'
+    ;;
+  "8)")
+    fixContainerPermissions
+    ;;
+  esac
+}
+
+# show Openssh menu
+function showOpenssh() {
+  CHOICE=$(
+    whiptail --title "Openssh | ${PROGRAM_NAME} v${_V}" --menu "Make your selection" 16 112 6 \
+      "1)" "<-- Return to the main menu." \
+      "2)" "Setup new container" \
+      "3)" "Enable existing container" \
+      "4)" "Disable enabled container" \
+      "5)" "Delete a container" \
+      "6)" "Take all enabled containers down" \
+      "7)" "Pull up all enabled containers" 3>&2 2>&1 1>&3
+  )
+
+  case $CHOICE in
+  "2)")
+    setupContainer 'openssh'
+    ;;
+  "3)")
+    enableContainer 'openssh'
+    ;;
+  "4)")
+    disableContainer 'openssh'
+    ;;
+  "5)")
+    deleteContainer 'openssh'
+    ;;
+  "6)")
+    downContainers 'openssh'
+    ;;
+  "7)")
+    upContainers 'openssh'
+    ;;
+  esac
+}
+
+# show Traefik menu
+function showTraefik() {
+  CHOICE=$(
+    whiptail --title "Traefik | ${PROGRAM_NAME} v${_V}" --menu "Make your selection" 16 112 4 \
+      "1)" "<-- Return to the main menu." \
+      "2)" "Setup Traefik" \
+      "3)" "Enable Traefik" \
+      "4)" "Disable Traefik" 3>&2 2>&1 1>&3
+  )
+
+  case $CHOICE in
+  "2)")
+    setupContainer 'traefik'
+    ;;
+  "3)")
+    enableContainer 'traefik'
+    ;;
+  "4)")
+    disableContainer 'traefik'
+    ;;
+  esac
+}
+
+# show Portainer menu
+function showPortainer() {
+  CHOICE=$(
+    whiptail --title "Portainer | ${PROGRAM_NAME} v${_V}" --menu "Make your selection" 16 112 4 \
+      "1)" "<-- Return to the main menu." \
+      "2)" "Setup Portainer" \
+      "3)" "Enable Portainer" \
+      "4)" "Disable Portainer" 3>&2 2>&1 1>&3
+  )
+
+  case $CHOICE in
+  "2)")
+    setupContainer 'portainer'
+    ;;
+  "3)")
+    enableContainer 'portainer'
+    ;;
+  "4)")
+    disableContainer 'portainer'
+    ;;
+  esac
+}
+
+# MAIN MENU
+function mainMenu() {
+  while true; do
+    CHOICE=$(
+      whiptail --title "${PROGRAM_NAME} v${_V}" --menu "Make your selection" 16 112 10 \
+        "1)" "Joomla containers" \
+        "2)" "Openssh containers" \
+        "3)" "Traefik container" \
+        "4)" "Portainer container" \
+        "5)" "Delete Persistent Volumes" \
+        "6)" "Update ${PROGRAM_NAME,,}" \
+        "7)" "Uninstall ${PROGRAM_NAME,,}" \
+        "8)" "Show command help" \
+        "9)" "Octoleo" \
+        "10)" "Quit" 3>&2 2>&1 1>&3
+    )
+
+    case $CHOICE in
+    "1)")
+      showJoomla
+      ;;
+    "2)")
+      showOpenssh
+      ;;
+    "3)")
+      showTraefik
+      ;;
+    "4)")
+      showPortainer
+      ;;
+    "5)")
+      deletePersistentVolumes
+      ;;
+    "6)")
+      runUpdate
+      ;;
+    "7)")
+      runUninstall
+      ;;
+    "8)")
+      showHelpMenu
+      ;;
+    "9)")
+      octoleoQuietly
+      ;;
+    "10)") exit ;;
+    esac
+  done
+}
+
+#####################################################################################################################VDM
+######################################## GENERAL SHARED FUNCTIONS
+
+# show error
+function showError() {
+  whiptail --title "ERROR | ${PROGRAM_NAME} v${_V}" --msgbox "${1}" 12 112
+}
+
+# show info
+function showInfo() {
+  whiptail --title "INFO | ${PROGRAM_NAME} v${_V}" --infobox "${1}" 12 112
+}
+
+# show notice
+function showNotice() {
+  whiptail --title "NOTICE | ${PROGRAM_NAME} v${_V}" --msgbox "${1}" 12 112
+}
+
+# we must get a random key
+function getRandomPass() {
+  # simple basic random
+  # shellcheck disable=SC2046
+  echo $(tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | dd bs="${1:-128}" count=1 status=none)
+}
+
+# get input from user
+function getInput() {
+  # set local var
+  local answer
+  # get the answer
+  answer=$(whiptail --inputbox "$1" 10 112 "${2:-}" --title "${3:-Get Input}" --nocancel 3>&1 1>&2 2>&3)
+  # return the answer
+  echo "${answer}"
+}
+
+# get a selected directory
+function getSelectedDirectory() {
+  # the selected folder
+  local answer
+  #  set the local path
+  local path="${2:-}"
+  # set local var
+  local folder="${3:-}"
+  # we start the selection array
+  local selected=()
+  # our counter
+  local i=0
+  # now check if this dir has sub dirs
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ -d "${path}" ] && [ $(ls -A "$path" | wc -l) -ne 0 ]; then
+    # loop over the directory
+    for dir_ in "${path%/}/"*; do
+      # remove the full path
+      dir_="${dir_/$path/}"
+      # load the selection
+      [ "$folder" = "${dir_#/}" ] && selected+=("${dir_#/}" "${dir_#/}" "ON") || selected+=("${dir_#/}" "${dir_#/}" "OFF")
+      # increment our pointer
+      i=$((i + 1))
+    done
+    # now make the selection
+    answer=$(whiptail --title "${4:-Make a Selection}" --radiolist \
+      "${1}" 20 112 $i \
+      "${selected[@]}" --nocancel --notags 3>&1 1>&2 2>&3)
+  fi
+  # return the answer
+  echo "${answer:-$folder}"
+}
+
+# select multiple directories from one directory
+function getSelectedDirectories() {
+  # the selected folder
+  local answer
+  #  set the local path
+  local path="${2:-}"
+  # we start the selection array
+  local selected=()
+  # our counter
+  local i=0
+  # now check if this dir has sub dirs
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ -d "${path}" ] && [ $(ls -A "$path" | wc -l) -ne 0 ]; then
+    # loop over the directory
+    for dir_ in "${path%/}/"*; do
+      # remove the full path
+      dir_="${dir_/$path/}"
+      # load the selection
+      selected+=("${dir_#/}" "${dir_#/}" "OFF")
+      # increment our pointer
+      i=$((i + 1))
+    done
+    # now make the selection
+    answer=$(whiptail --title "${3:-Make a Selection}" --checklist \
+      "${1}" 20 112 $i \
+      "${selected[@]}" --nocancel --notags 3>&1 1>&2 2>&3)
+    # return the answer
+    echo "${answer[@]}"
+  else
+    echo ''
+  fi
+}
+
+# create a yml dashed line
+function getYMLDashLine() {
+  # get the projects to mount
+  local line="$1"
+  # return line
+  cat <<EOF
+
+      - ${line}
+EOF
+}
+
+# get input from user
+function getPassword() {
+  # set local var
+  local PASSWORD
+  # get the pass
+  PASSWORD=$(whiptail --passwordbox "$1" 10 112 "${2:-}" --title "${3:-Get Password}" --nocancel 3>&1 1>&2 2>&3)
+  # return the password
+  echo "${PASSWORD}"
+}
+
+# get and set the access token
+function getAccessToken(){
+  # we try getting the token twice
+  local t=0
+  local new_token=false
+  # check that we have an access token, els ask for it
+  while [ ${#VDM_ACCESS_TOKEN} -le 30 ]; do
+    # this is a new token
+    new_token=true
+    # get the value
+    VDM_ACCESS_TOKEN=$(getInput "Enter access token for updates.\n[You can get an access token from https://git.vdm.dev/user/settings/applications]" \
+      '' 'Access Token')
+    # keep asking if empty
+    if [ ${#VDM_ACCESS_TOKEN} -le 30 ]; then
+      showError "Updates can only be done if you have an access token."
+      # increment our try
+      t=$((t + 1))
+      # when the user for the second time does not supply the correct value we return
+      if [ $t -eq 2 ]; then
+        return 12
+      fi
+    fi
+  done
+  # make the token available
+  export VDM_ACCESS_TOKEN
+  # store the token for next time
+  $new_token && setEnvVariable "VDM_ACCESS_TOKEN=\"${VDM_ACCESS_TOKEN}\"" &&
+    showNotice "The token has been stored in the environment variable file (${VDM_SRC_PATH}/.env)."
+  # we have success
+  return 0
+}
+
+# set the networks in place
+function setNetworks() {
+  # we create the networks
+  docker network inspect traefik_webgateway >/dev/null 2>&1 ||
+    docker network create traefik_webgateway
+  docker network inspect openssh_gateway >/dev/null 2>&1 ||
+    docker network create openssh_gateway
+}
+
+# to set a global Env Variable
+function setEnvVariable() {
+  # check if the env file exist
+  if [ -f "${VDM_SRC_PATH}/.env" ]; then
+    grep -q "${1}" "${VDM_SRC_PATH}/.env" || echo "${1}" >>"${VDM_SRC_PATH}/.env"
+  elif (whiptail --yesno "Can we create the ${VDM_SRC_PATH}/.env file" --title "Environment Variable File" 8 112); then
+    # make sure the folder exist
+    mkdir -p "${VDM_SRC_PATH}"
+    # so we creat the file
+    echo "${1}" >"${VDM_SRC_PATH}/.env"
+    # make sure the permissions are secured
+    chmod 600 "${VDM_SRC_PATH}/.env"
+  else
+    showError "The ${VDM_SRC_PATH}/.env file does not exist. So ${1} could not be added!"
+    # we return false
+    return 12
+  fi
+  # we return true
+  return 0
+}
+
+# to set a container Env Variable
+function setContainerEnvVariable() {
+  # check if the env file exist
+  if [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ]; then
+    grep -q "${1}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || echo "${1}" >>"${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+  elif (whiptail --yesno "Can we create the ${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env file" --title "Container Environment Variable File" 8 112); then
+    # make sure the folder exist
+    mkdir -p "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}"
+    # so we creat the file
+    echo "${1}" >"${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+    # make sure the permissions are secured
+    chmod 600 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+  else
+    showError "The ${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env file does not exist. So ${1} could not be added!"
+  fi
+}
+
+# take down apache
+function downApache() {
+  # make sure port 80 is not used by apache
+  command -v apache2 >/dev/null 2>&1 && [[ $(service apache2 status) == *"active (running)"* ]] && {
+    if (whiptail --yesno "Traefik needs port 80/443 and since Apache is also enabled (we dont know if is using these ports) so Traefik may not work. Can we disable Apache?" --defaultno --title "Disable Apache" 12 112); then
+      sudo systemctl stop apache2.service
+      sudo systemctl disable apache2.service
+    fi
+  }
+}
+
+# check if some thing is a function
+function isFunc() {
+  declare -F "$1" >/dev/null
+}
+
+# update the host file
+function updateHostFile(){
+  # check if we have secure switch set
+  if [ "${VDM_UPDATE_HOST:-not}" = 'not' ]; then
+    # check the security switch
+    if (whiptail --yesno "Would you like to update your host file with each new domain you add?" --defaultno --title "Update /etc/hosts" 8 112); then
+      # we set the secure switch
+      VDM_UPDATE_HOST=true
+    else
+      VDM_UPDATE_HOST=false
+    fi
+    # add this value since its not set variable
+    setEnvVariable "VDM_UPDATE_HOST=${VDM_UPDATE_HOST}"
+  fi
+  # check if we should add to host file
+  if $VDM_UPDATE_HOST; then
+    # check if already in host file
+    if grep -q "${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN}" /etc/hosts; then
+      showNotice "${USER^}, ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} is already in the /etc/hosts file."
+    elif (whiptail --yesno "${USER^}, to add the ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} entry to your host file we need sudo privileges." --title "Give sudo Privileges" 8 112); then
+      # add the domain to the host file
+      echo "127.0.0.1       ${VDM_SUBDOMAIN}.${VDM_DOMAIN}" | sudo tee -a /etc/hosts > /dev/null
+      # show notice
+      showNotice "${USER^}, ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} was added to the /etc/hosts file."
+    fi
+  fi
+}
+
+#####################################################################################################################VDM
+######################################## CLI MENU ʕ•ᴥ•ʔ
+
+# help message
+function showHelp() {
+  cat <<EOF
+Usage: ${0##*/:-} [OPTION...]
+	Options
+	======================================================
+   --type <type>
+	set type you would like to work with
+	example: ${0##*/:-} --type joomla
+	======================================================
+   --task <task>
+	set type of task you would like to perform
+	example: ${0##*/:-} --task setup
+	======================================================
+   --container <container.domain.name>
+	Directly enabling or disabling a container with
+	  the type=joomla and task=enable/disable set
+	The container must exist, which means it was
+	  setup previously
+	Used without type and task Joomla-Enable is (default)
+	example: ${0##*/:-} --container "io.vdm.dev"
+	======================================================
+   --update
+	to update your install
+	example: ${0##*/:-} --update
+	======================================================
+   --access-token <token>
+	to update the program you will need an access token
+	from https://git.vdm.dev/user/settings/applications
+	example: docker-deploy --access-token xxxxxxxxxxx
+	======================================================
+   --uninstall
+	to uninstall this script
+	example: ${0##*/:-} --uninstall
+	======================================================
+	AVAILABLE FOR TO ANY CONTAINER
+	======================================================
+   -k|--key <key>
+	set key for the docker compose container naming
+	!! no spaces allowed in the key !!
+	example: ${0##*/:-} -k="vdm"
+	example: ${0##*/:-} --key="vdm"
+	======================================================
+   -e|--env-key <key>
+	set key for the environment variable naming
+	!! no spaces allowed in the key & must be UPPERCASE !!
+	example: ${0##*/:-} -e="VDM"
+	example: ${0##*/:-} --env-key="VDM"
+	======================================================
+   -d|--domain <domain.com>
+	set key website domain
+	!! must be domain.tld !!
+	example: ${0##*/:-} -d="vdm.dev"
+	example: ${0##*/:-} --domain="vdm.dev"
+	======================================================
+	AVAILABLE FOR JOOMLA CONTAINER
+	======================================================
+   -j|--joomla-version <version>
+	set Joomla version number
+	!! only number allowed !!
+	example: ${0##*/:-} -j=3.10
+	example: ${0##*/:-} --joomla-version=3.10
+	======================================================
+   -s|--sub-domain <domain.com>
+	set key website sub domain
+	!! no spaces allowed in the sub domain !!
+	example: ${0##*/:-} -s="jcb"
+	example: ${0##*/:-} --sub-domain="jcb"
+	======================================================
+	AVAILABLE FOR OPENSSH CONTAINER
+	======================================================
+   -u|--username <username>
+	set username of the container
+	example: ${0##*/:-} -u="ubuntu"
+	example: ${0##*/:-} --username="ubuntu"
+	======================================================
+   --uid <id>
+	set container user id
+	example: ${0##*/:-} --uid=1000
+	======================================================
+   --gid <id>
+	set container user group id
+	example: ${0##*/:-} --gid=1000
+	======================================================
+   -p|--port <port>
+	set ssh port to use
+	!! do not use 22 !!
+	example: ${0##*/:-} -p=2239
+	example: ${0##*/:-} --port=2239
+	======================================================
+   --ssh-dir <dir>
+	set ssh directory name found in the .ssh dir
+	of this repo for the container keys
+		This directory has separate files for
+		each public key allowed to access
+		the container
+	example: ${0##*/:-} --ssh-dir="teamname"
+	======================================================
+   --sudo
+	switch to add the container user to the
+	sudo group of the container
+	example: ${0##*/:-} --sudo
+	======================================================
+   -t|--time-zone <time/zone>
+	set time zone of the container
+	!! must valid time zone !!
+	example: ${0##*/:-} -t="Africa/Windhoek"
+	example: ${0##*/:-} --time-zone="Africa/Windhoek"
+	======================================================
+	HELP ʕ•ᴥ•ʔ
+	======================================================
+   -h|--help
+	display this help menu
+	example: ${0##*/:-} -h
+	example: ${0##*/:-} --help
+	======================================================
+			${PROGRAM_NAME} v${_VERSION}
+	======================================================
+EOF
+}
+
+#####################################################################################################################VDM
+######################################## CLI INPUT ¯\_(ツ)_/¯
+
+# check if we have options
+while :; do
+  case $1 in
+  -h | --help)
+    showHelp # Display a usage synopsis.
+    exit
+    ;;
+  --update)
+    runUpdate
+    shift
+    ;;
+  --access-token) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_ACCESS_TOKEN=$2
+      shift
+    else
+      showError '"--access-token" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  --access-token=?*)
+    VDM_ACCESS_TOKEN=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  --access-token=) # Handle the case of an empty --type=
+    showError '"--access-token=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  --uninstall)
+    runUninstall
+    shift
+    ;;
+  --type) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_CONTAINER_TYPE=$2
+      shift
+    else
+      showError '"--type" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  --type=?*)
+    VDM_CONTAINER_TYPE=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  --type=) # Handle the case of an empty --type=
+    showError '"--type=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  --task) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_TASK=$2
+      shift
+    else
+      showError '"--task" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  --task=?*)
+    VDM_TASK=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  --task=) # Handle the case of an empty --task=
+    showError '"--task=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  --container) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_CONTAINER=$2
+      shift
+    else
+      showError '"--container" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  --container=?*)
+    VDM_CONTAINER=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  --container=) # Handle the case of an empty --container=
+    showError '"--container=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  -j | --joomla-version) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_JV=$2
+      shift
+    else
+      showError '"--joomla-version" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  -j=?* | --joomla-version=?*)
+    VDM_JV=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  -j= | --joomla-version=) # Handle the case of an empty --joomla-version=
+    showError '"--joomla-version=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  -k | --key) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_KEY=$2
+      shift
+    else
+      showError '"--key" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  -k=?* | --key=?*)
+    VDM_KEY=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  -k= | --key=) # Handle the case of an empty --key=
+    showError '"--key=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  -e | --env-key) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_ENV_KEY=$2
+      shift
+    else
+      showError '"--env-key" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  -e=?* | --env-key=?*)
+    VDM_ENV_KEY=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  -e= | --env-key=) # Handle the case of an empty --env-key=
+    showError '"--env-key=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  -d | --domain) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_DOMAIN=$2
+      shift
+    else
+      showError '"--domain" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  -d=?* | --domain=?*)
+    VDM_DOMAIN=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  -d= | --domain=) # Handle the case of an empty --domain=
+    showError '"--domain=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  -s | --sub-domain) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_SUBDOMAIN=$2
+      shift
+    else
+      showError '"--sub-domain" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  -s=?* | --sub-domain=?*)
+    VDM_SUBDOMAIN=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  -s= | --sub-domain=) # Handle the case of an empty --sub-domain=
+    showError '"--sub-domain=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  --sudo)
+    VDM_SUDO_ACCESS=true
+    shift
+    ;;
+  -u | --username) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_USER_NAME=$2
+      shift
+    else
+      showError '"--username" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  -u=?* | --username=?*)
+    VDM_USER_NAME=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  -u= | --username=) # Handle the case of an empty --username=
+    showError '"--username=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  --uid) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_PUID=$2
+      shift
+    else
+      showError '"--uid" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  --uid=?*)
+    VDM_PUID=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  --uid=) # Handle the case of an empty --uid=
+    showError '"--uid=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  --gid) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_PGID=$2
+      shift
+    else
+      showError '"--gid" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  --gid=?*)
+    VDM_PGID=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  --gid=) # Handle the case of an empty --gid=
+    showError '"--gid=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  -p | --port) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_PORT=$2
+      shift
+    else
+      showError '"--port" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  -p=?* | --port=?*)
+    VDM_PORT=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  -p= | --port=) # Handle the case of an empty --port=
+    showError '"--port=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  --ssh-dir) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_PUBLIC_KEY_DIR=$2
+      shift
+    else
+      showError '"--ssh-dir" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  --ssh-dir=?*)
+    VDM_PUBLIC_KEY_DIR=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  -ssh-dir=) # Handle the case of an empty --ssh-dir=
+    showError '"--ssh-dir=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  -t | --time-zone) # Takes an option argument; ensure it has been specified.
+    if [ "$2" ]; then
+      VDM_TZ=$2
+      shift
+    else
+      showError '"--time-zone" requires a non-empty option argument.'
+      exit 17
+    fi
+    ;;
+  -t=?* | --time-zone=?*)
+    VDM_TZ=${1#*=} # Delete everything up to "=" and assign the remainder.
+    ;;
+  -t= | --time-zone=) # Handle the case of an empty --time-zone=
+    showError '"--time-zone=" requires a non-empty option argument.'
+    exit 17
+    ;;
+  *) # Default case: No more options, so break out of the loop.
+    break ;;
+  esac
+  shift
+done
+
+#####################################################################################################################VDM
+######################################## CLI PREP
+
+# set the type and task if we have a container value
+if [ ${#VDM_CONTAINER} -ge 1 ]; then
+  # check that the type is set (default Joomla)
+  VDM_CONTAINER_TYPE="${VDM_CONTAINER_TYPE:-joomla}"
+  # check that the task is set (default enable)
+  VDM_TASK="${VDM_TASK:-enable}"
+fi
+
+# set the container value if we have type and task set and not the container value
+if [ ${#VDM_CONTAINER} -le 1 ] &&
+  [ ${#VDM_CONTAINER_TYPE} -ge 1 ] &&
+  [ ${#VDM_TASK} -ge 1 ] &&
+  [ ${#VDM_DOMAIN} -ge 1 ]; then
+  # we set the sub based on what was set
+  sub=''
+  if [ ${#VDM_SUBDOMAIN} -ge 1 ]; then
+    sub="${VDM_SUBDOMAIN}"
+  elif [ "${VDM_CONTAINER_TYPE}" = 'portainer' ]; then
+    sub="port"
+  elif [ "${VDM_CONTAINER_TYPE}" = 'traefik' ]; then
+    sub="traefik"
+  elif [ ${#VDM_USER_NAME} -ge 1 ]; then
+    sub="${VDM_USER_NAME}"
+  fi
+  # check if we now have a value
+  if [ ${#sub} -le 1 ]; then
+    showError 'Setting the type and task, and not setting the container details will require further input.'
+  else
+    # we set the container defaults based an user input
+    VDM_CONTAINER="${sub:-vdm}.${VDM_DOMAIN}"
+  fi
+fi
+
+#####################################################################################################################VDM
+######################################## SETUP KEY PATHS
+# the src folder path is where we store the script global env
+VDM_SRC_PATH="/home/${USER}/.config/docker-deploy"
+# create the folder if not set
+# shellcheck disable=SC2174
+mkdir -p -m '700' "${VDM_SRC_PATH}"
+# load this globals
+# shellcheck disable=SC1090
+[ -f "${VDM_SRC_PATH}/.env" ] && source "${VDM_SRC_PATH}/.env"
+# get repo path where store the container deploy scripts
+while [ ${#VDM_REPO_PATH} -le 1 ] || [ ! -d "${VDM_REPO_PATH}" ]; do
+  # we catch the token now.. so we don't need asking for it later
+  getAccessToken
+  # creat the path if it exist
+  if [ ${#VDM_REPO_PATH} -ge 1 ] && (whiptail --yesno "Can we create the ${VDM_REPO_PATH} repository folder" --title "Create the Path" 8 112); then
+    mkdir -p "${VDM_REPO_PATH}"
+  else
+    # get the value
+    VDM_REPO_PATH=$(getInput "Enter the repository path where we can store the container deployment scripts." \
+      "/home/${USER}/Docker" 'Enter Repository Path')
+    # keep asking if empty or does exist
+    if [ ${#VDM_REPO_PATH} -ge 1 ] && [ ! -d "${VDM_REPO_PATH}" ] && (whiptail --yesno "Can we create the ${VDM_REPO_PATH} repository folder" --title "Create the Path" 8 112); then
+      mkdir -p "${VDM_REPO_PATH}"
+    elif [ ${#VDM_REPO_PATH} -le 1 ]; then
+      showError "You must set a repository path where we can store the container deployment scripts."
+    fi
+  fi
+done
+# add this value if not set variable
+setEnvVariable "VDM_REPO_PATH=\"${VDM_REPO_PATH}\""
+# get repo path where store the container deploy scripts
+while [ ${#VDM_PROJECT_PATH} -le 1 ] || [ ! -d "${VDM_PROJECT_PATH}" ]; do
+  # creat the path if it exist
+  if [ ${#VDM_PROJECT_PATH} -ge 1 ] && (whiptail --yesno "Can we create the ${VDM_PROJECT_PATH} projects folder" --title "Create the Path" 8 112); then
+    mkdir -p "${VDM_PROJECT_PATH}"
+  else
+    # get the value
+    VDM_PROJECT_PATH=$(getInput "Enter the projects path where we can store the containers persistent volumes." \
+      "/home/${USER}/Projects" 'Enter Projects Path')
+    # keep asking if empty or does exist
+    if [ ${#VDM_PROJECT_PATH} -ge 1 ] && [ ! -d "${VDM_PROJECT_PATH}" ] && (whiptail --yesno "Can we create the ${VDM_PROJECT_PATH} projects folder" --title "Create the Path" 8 112); then
+      mkdir -p "${VDM_PROJECT_PATH}"
+    elif [ ${#VDM_PROJECT_PATH} -le 1 ]; then
+      showError "You must set a projects path where we can store the containers persistent volumes."
+    fi
+  fi
+done
+# add this value if not set variable
+setEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
+
+#####################################################################################################################VDM
+######################################## MAIN ┬┴┬┴┤(･_├┬┴┬┴
+main
+
+####### CLEAR ALL
+unset VDM_CONTAINER_TYPE
+unset VDM_TASK
+unset VDM_SRC_PATH
+unset VDM_REPO_PATH
+unset VDM_PROJECT_PATH
+unset VDM_DOMAIN
+unset VDM_SECURE
+unset VDM_UPDATE_HOST
+unset VDM_CONTAINER
+unset VDM_ACCESS_TOKEN

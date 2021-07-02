@@ -1,58 +1,28 @@
 # Easy Docker Deployment (UBUNTU ONLY)
 With this script we can easily deploy docker containers of Joomla and Openssh. This combination of these tools give rise to a powerful and very secure shared development environment.
 
-Both the installation and deployment script has **command input** options as seen in the menus below, but these command ar _not the only way_ to set these values. When the values are **omitted** you will be _asked in the terminal_ to manually enter the required values as needed. Furthermore, the use of **env variables** are also heavily used across the script. There are more than one .env file and the script will set those up for you whenever you run a task that make use of env variables the script will check if those values exist, and if they don't it will ask for them, and store them automatically for future use. That same time the output message to the terminal will show you where the specific .env file can be found.
+This program has **command input** options as seen in the menus below, but these command are _not the only way_ to set these values.
+When the values are **omitted** you will be _asked in the terminal_ to manually enter the required values as needed.
+Furthermore, the use of **env variables** are also heavily used across the script.
+There are more than one .env file and the script will set those up for you whenever you run a task that make use of env variables
+the script will check if those values exist, and if they don't it will ask for them, and store them automatically for future use.
+That same time the output message to the terminal will show you where the specific .env file can be found.
 
 ---
 # Install
 ```shell
-$ git clone https://git.vdm.dev/octoleo/docker-deploy.git
-$ cd docker-deploy/src
-$ sudo chmod +x install.sh
-$ sudo ./install.sh
-```
-> To see the installation help menu:
-```shell
-$ ./install.sh -h
+$ sudo curl -L "https://git.vdm.dev/api/v1/repos/octoleo/docker-deploy/raw/src/docker-deploy?access_token=xxxx" -o /usr/local/bin/docker-deploy
+$ sudo chmod +x /usr/local/bin/docker-deploy
 ```
 
-### Help Menu (install)
-```txt
-Usage: ./install.sh [OPTION...]
-	Options
-	======================================================
-   --src-path=<path>|--src=<path>
-	set path to the script source folder
-	example: ./install.sh --src=/home/username/Docker/src
-	example: ./install.sh --src-path=/home/username/Docker/src
-	======================================================
-   --repo-path=<path>|--repo=<path>
-	set path to the repository folder
-	example: ./install.sh --repo=/home/username/Docker
-	example: ./install.sh --repo-path=/home/username/Docker
-	======================================================
-   --project-path=<path>|--project=<path>
-	set path to the projects folder
-	example: ./install.sh --project=/home/username/Projects
-	example: ./install.sh --project-path=/home/username/Projects
-	======================================================
-   -f|--force
-	force installation
-	example: ./install.sh -f
-	example: ./install.sh --force
-	======================================================
-   --host
-	always update your host file
-	example: ./install.sh --host
-	======================================================
-   -h|--help
-	display this help menu
-	example: ./install.sh -h
-	example: ./install.sh --help
-	======================================================
-			docker-deploy v1.0
-	======================================================
-```
+### How to get the Access Token
+Sign in to [https://git.vdm.dev/](https://git.vdm.dev/user/login) with your **GitHub** or **Gitlab** account.
+Then open your [applications settings](https://git.vdm.dev/user/settings/applications) and create a new access token.
+
+![image](https://user-images.githubusercontent.com/5607939/143513412-946843be-acd8-4973-be44-00902226f6ba.png)
+
+The first time you use the program, it will ask for the access token again, so it can do updates in the future.
+
 ---
 # Usage
 
@@ -73,9 +43,22 @@ Usage: docker-deploy [OPTION...]
 	set type of task you would like to perform
 	example: docker-deploy --task setup
 	======================================================
+   --container <container.domain.name>
+	Directly enabling or disabling a container with
+	  the type=joomla and task=enable/disable set
+	The container must exist, which means it was
+	  setup previously
+	Used without type and task Joomla-Enable is (default)
+	example: docker-deploy --container "io.vdm.dev"
+	======================================================
    --update
 	to update your install
 	example: docker-deploy --update
+	======================================================
+   --access-token <token>
+	to update the program you will need an access token
+	from https://git.vdm.dev/user/settings/applications
+	example: docker-deploy --access-token xxxxxxxxxxx
 	======================================================
    --uninstall
 	to uninstall this script
@@ -162,7 +145,7 @@ Usage: docker-deploy [OPTION...]
 	example: docker-deploy -h
 	example: docker-deploy --help
 	======================================================
-			docker-deploy v1.0
+			Docker Deploy v2.0
 	======================================================
 ```
 ---
