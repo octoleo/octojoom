@@ -641,35 +641,40 @@ function openssh__TRuST__setup() {
       VDM_PUBLIC_KEY_U_DIR=$(getSelectedDirectory "Select the containers ssh public keys folder." \
         "${VDM_PUBLIC_KEY_GLOBAL_DIR}" "${VDM_KEY,,}" 'Select Folder')
       # keep asking if empty or does exist
-      if [ ${#VDM_PUBLIC_KEY_U_DIR} -ge 1 ] && [ ! -d "${VDM_PUBLIC_KEY_U_DIR}" ] &&
-        (whiptail --yesno "Can we create this (${VDM_PUBLIC_KEY_U_DIR}) containers ssh public keys folder" --title "Create the Path" 8 112); then
-        # shellcheck disable=SC2174
-        mkdir -p -m 700 "${VDM_PUBLIC_KEY_U_DIR}"
-        # TODO add option to add keys?
-      elif [ ${#VDM_PUBLIC_KEY_U_DIR} -le 1 ]; then
+      if [ ${#VDM_PUBLIC_KEY_U_DIR} -ge 1 ]; then
+        # add the parent dir back
+        VDM_PUBLIC_KEY_U_DIR="${VDM_PUBLIC_KEY_GLOBAL_DIR}/${VDM_PUBLIC_KEY_U_DIR}"
+        # check if this directory exist
+        if [ ! -d "${VDM_PUBLIC_KEY_U_DIR}" ] &&
+          (whiptail --yesno "Can we create this (${VDM_PUBLIC_KEY_U_DIR}) containers ssh public keys folder" --title "Create the Path" 8 112); then
+          # shellcheck disable=SC2174
+          mkdir -p -m 700 "${VDM_PUBLIC_KEY_U_DIR}"
+          # TODO add option to add keys?
+        fi
+      else
         showError "You must set a containers ssh public keys folder."
       fi
     fi
   done
   # we must get the project path
-  VDM_ENV_PROJECT_PATH="VDM_${VDM_ENV_KEY^^}_PROJECT_PATH"
-  VDM_PROJECT_U_PATH=${!VDM_ENV_PROJECT_PATH}
+  VDM_ENV_PROJECT_DIR="VDM_${VDM_ENV_KEY^^}_PROJECT_DIR"
+  VDM_PROJECT_U_DIR=${!VDM_ENV_PROJECT_DIR}
   # get the directory of the ssh public keys if not set
-  while [ ${#VDM_PROJECT_U_PATH} -le 1 ] || [ ! -d "${VDM_PROJECT_U_PATH}" ]; do
+  while [ ${#VDM_PROJECT_U_DIR} -le 1 ] || [ ! -d "${VDM_PROJECT_U_DIR}" ]; do
     # creat the path if it exist
-    if [ ${#VDM_PROJECT_U_PATH} -ge 1 ] &&
-      (whiptail --yesno "Can we create the ${VDM_PROJECT_U_PATH} parent mounting directory" --title "Create the Path" 8 112); then
-      mkdir -p "${VDM_PROJECT_U_PATH}"
+    if [ ${#VDM_PROJECT_U_DIR} -ge 1 ] &&
+      (whiptail --yesno "Can we create the ${VDM_PROJECT_U_DIR} parent mounting directory" --title "Create the Path" 8 112); then
+      mkdir -p "${VDM_PROJECT_U_DIR}"
     else
       # get the value
-      VDM_PROJECT_U_PATH=$(getInput "Enter the parent path where we can select the folders to mount to this container." \
+      VDM_PROJECT_U_DIR=$(getInput "Enter the parent path where we can select the folders to mount to this container." \
         "${VDM_PROJECT_PATH}" 'Enter Path')
       # keep asking if empty or does exist
-      if [ ${#VDM_PROJECT_U_PATH} -ge 1 ] && [ ! -d "${VDM_PROJECT_U_PATH}" ] &&
-        (whiptail --yesno "Can we create the ${VDM_PROJECT_U_PATH} parent mounting directory" --title "Create the Path" 8 112); then
+      if [ ${#VDM_PROJECT_U_DIR} -ge 1 ] && [ ! -d "${VDM_PROJECT_U_DIR}" ] &&
+        (whiptail --yesno "Can we create the ${VDM_PROJECT_U_DIR} parent mounting directory" --title "Create the Path" 8 112); then
         # shellcheck disable=SC2174
-        mkdir -p -m 700 "${VDM_PROJECT_U_PATH}"
-      elif [ ${#VDM_PROJECT_U_PATH} -le 1 ]; then
+        mkdir -p -m 700 "${VDM_PROJECT_U_DIR}"
+      elif [ ${#VDM_PROJECT_U_DIR} -le 1 ]; then
         showError "You must set a parent mounting directory path where we can select the folders to mount to this container."
       fi
     fi
@@ -678,7 +683,7 @@ function openssh__TRuST__setup() {
   while [ ${#VDM_MOUNT_DIRS} -le 1 ]; do
     # get the value
     VDM_MOUNT_DIRS=$(getSelectedDirectories "Select the directories to mount to this container." \
-      "${VDM_PROJECT_U_PATH}" 'Select Folders')
+      "${VDM_PROJECT_U_DIR}" 'Select Folders')
     # keep asking if empty or does exist
     if [ ${#VDM_MOUNT_DIRS} -le 1 ]; then
       showError "You must set the directories to mount to this container."
@@ -693,7 +698,7 @@ function openssh__TRuST__setup() {
     # set the full path
     mDir="${mDir//\"/}"
     # when we mount a joomla volume we may not want to mount the database
-    mFull="${VDM_PROJECT_U_PATH}/${mDir}/joomla"
+    mFull="${VDM_PROJECT_U_DIR}/${mDir}/joomla"
     # add to mount projects
     if [ -d "${mFull}" ] && (whiptail --yesno "Should we ONLY mount the (joomla website files) ${mDir}/joomla directory" --title "Mount Joomla" 8 112); then
       VDM_MOUNT_PROJECTS+=$(getYMLDashLine "\${VDM_${VDM_ENV_KEY^^}_PROJECT_DIR}/${mDir}/joomla:/app/${mDir}")
@@ -704,7 +709,7 @@ function openssh__TRuST__setup() {
   # add this value if not set variable
   setEnvVariable "VDM_DOMAIN=\"${VDM_DOMAIN}\""
   # add this value if not set variable
-  setContainerEnvVariable "${VDM_ENV_PROJECT_PATH}=\"${VDM_PROJECT_U_PATH}\""
+  setContainerEnvVariable "${VDM_ENV_PROJECT_DIR}=\"${VDM_PROJECT_U_DIR}\""
   # add this value if not set variable
   setContainerEnvVariable "VDM_PUBLIC_KEY_GLOBAL_DIR=\"${VDM_PUBLIC_KEY_GLOBAL_DIR}\""
   # add this value if not set variable
@@ -723,7 +728,7 @@ function openssh__TRuST__setup() {
   export VDM_ENV_KEY
   export VDM_PUBLIC_KEY_GLOBAL_DIR
   export VDM_PUBLIC_KEY_U_DIR
-  export VDM_PROJECT_U_PATH
+  export VDM_PROJECT_U_DIR
   # create the directory if it does not yet already exist
   # shellcheck disable=SC2174
   mkdir -p -m 700 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_USER_NAME}.${VDM_DOMAIN}"
@@ -749,7 +754,7 @@ function openssh__TRuST__setup() {
   unset VDM_ENV_KEY
   unset VDM_PUBLIC_KEY_GLOBAL_DIR
   unset VDM_PUBLIC_KEY_U_DIR
-  unset VDM_PROJECT_U_PATH
+  unset VDM_PROJECT_U_DIR
   # return a success
   return 0
 }
@@ -993,10 +998,10 @@ function joomla__TRuST__disable() {
   elif [ ${#VDM_CONTAINER} -ge 1 ]; then
     # this means we have a single already selected container to enable if it exists
     if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ]; then
-        # make sure the docker image is stopped
-        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down
-        # then remove soft link
-        rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
+      # make sure the docker image is stopped
+      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down
+      # then remove soft link
+      rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
     else
       showError "The (${VDM_CONTAINER}) container is not enabled."
     fi
@@ -1039,10 +1044,10 @@ function openssh__TRuST__disable() {
   elif [ ${#VDM_CONTAINER} -ge 1 ]; then
     # this means we have a single already selected container to enable if it exists
     if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ]; then
-        # make sure the docker image is stopped
-        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down
-        # then remove soft link
-        rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
+      # make sure the docker image is stopped
+      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down
+      # then remove soft link
+      rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
     else
       showError "The (${VDM_CONTAINER}) container is not enabled."
     fi
@@ -1469,8 +1474,12 @@ function runUpdate() {
     # just backup in case of failure
     sudo mv /usr/local/bin/docker-deploy /usr/local/bin/docker-deploy.bak
   fi
+  # some local values
+  local branch
+  # get the target branch to use in our update
+  branch=$( getTargetBranch )
   # pull the latest version. Master is always the latest
-  if sudo curl --fail -L "https://git.vdm.dev/api/v1/repos/octoleo/docker-deploy/raw/src/docker-deploy?ref=master&access_token=${VDM_ACCESS_TOKEN}" -o /usr/local/bin/docker-deploy 2>/dev/null; then
+  if sudo curl --fail -L "https://git.vdm.dev/api/v1/repos/octoleo/docker-deploy/raw/src/docker-deploy?ref=${branch:-master}&access_token=${VDM_ACCESS_TOKEN}" -o /usr/local/bin/docker-deploy 2>/dev/null; then
     # give success message
     echo "SUCCESS: Update was successful."
     # do we have a backup
@@ -1646,7 +1655,7 @@ function runUninstall() {
 }
 
 # we show the octoleo info quietly
-octoleoQuietly(){
+octoleoQuietly() {
   local message
   # now set the message
   message="                                              https://git.vdm.dev/octoleo/docker-deploy
@@ -1980,7 +1989,7 @@ function getPassword() {
 }
 
 # get and set the access token
-function getAccessToken(){
+function getAccessToken() {
   # we try getting the token twice
   local t=0
   local new_token=false
@@ -2009,6 +2018,18 @@ function getAccessToken(){
     showNotice "The token has been stored in the environment variable file (${VDM_SRC_PATH}/.env)."
   # we have success
   return 0
+}
+
+# get the target branch to use in update
+function getTargetBranch() {
+  # now make the selection
+  answer=$(whiptail --title "Select Update Channel" --radiolist --nocancel --notags \
+    "You can select the update channel you would like to use." 10 80 2 \
+    "master" "Stable Version" "ON" \
+    "staging" "Developer Version" "OFF" \
+      3>&1 1>&2 2>&3)
+  # return the answer (default master)
+  echo "${answer:-master}"
 }
 
 # set the networks in place
@@ -2075,7 +2096,7 @@ function isFunc() {
 }
 
 # update the host file
-function updateHostFile(){
+function updateHostFile() {
   # check if we have secure switch set
   if [ "${VDM_UPDATE_HOST:-not}" = 'not' ]; then
     # check the security switch
@@ -2095,7 +2116,7 @@ function updateHostFile(){
       showNotice "${USER^}, ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} is already in the /etc/hosts file."
     elif (whiptail --yesno "${USER^}, to add the ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} entry to your host file we need sudo privileges." --title "Give sudo Privileges" 8 112); then
       # add the domain to the host file
-      echo "127.0.0.1       ${VDM_SUBDOMAIN}.${VDM_DOMAIN}" | sudo tee -a /etc/hosts > /dev/null
+      echo "127.0.0.1       ${VDM_SUBDOMAIN}.${VDM_DOMAIN}" | sudo tee -a /etc/hosts >/dev/null
       # show notice
       showNotice "${USER^}, ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} was added to the /etc/hosts file."
     fi
