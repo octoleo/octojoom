@@ -158,6 +158,6 @@ $ docker-deploy --uninstall
 # Free Software License
 ```txt
 @copyright  Copyright (C) 2021 Llewellyn van der Merwe. All rights reserved.
-@license    GNU General Public License version 3; see LICENSE
+@license    GNU General Public License version 2; see LICENSE
 ```
 

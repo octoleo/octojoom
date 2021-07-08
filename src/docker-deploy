@@ -1682,13 +1682,13 @@ octoleoQuietly() {
 
   --quiet"
 
-  whiptail --msgbox --scrolltext "${message}" 30 112
+  whiptail --msgbox "${message}" --fb --backtitle "    Octoleo" 32 112
 }
 
 # show the help menu
 function showHelpMenu() {
   help=$(showHelp)
-  whiptail --msgbox --scrolltext "${help}" 30 112
+  whiptail --msgbox --scrolltext "${help}" --fb --backtitle "    Octoleo" 30 90
 }
 
 #####################################################################################################################VDM
@@ -1697,7 +1697,9 @@ function showHelpMenu() {
 # show Joomla menu
 function showJoomla() {
   CHOICE=$(
-    whiptail --title "Joomla | ${PROGRAM_NAME} v${_V}" --menu "Make your selection" 16 112 7 \
+    whiptail --menu "Make your selection" 20 112 8 \
+      --title "Joomla | ${PROGRAM_NAME} v${_V}" --fb \
+      --backtitle "    Octoleo" \
       "1)" "<-- Return to the main menu." \
       "2)" "Setup new container" \
       "3)" "Enable existing container" \
@@ -1736,7 +1738,9 @@ function showJoomla() {
 # show Openssh menu
 function showOpenssh() {
   CHOICE=$(
-    whiptail --title "Openssh | ${PROGRAM_NAME} v${_V}" --menu "Make your selection" 16 112 6 \
+    whiptail --menu "Make your selection" 20 112 7 \
+      --title "Openssh | ${PROGRAM_NAME} v${_V}" --fb \
+      --backtitle "    Octoleo" \
       "1)" "<-- Return to the main menu." \
       "2)" "Setup new container" \
       "3)" "Enable existing container" \
@@ -1771,7 +1775,9 @@ function showOpenssh() {
 # show Traefik menu
 function showTraefik() {
   CHOICE=$(
-    whiptail --title "Traefik | ${PROGRAM_NAME} v${_V}" --menu "Make your selection" 16 112 4 \
+    whiptail --menu "Make your selection" 16 112 4 \
+      --title "Traefik | ${PROGRAM_NAME} v${_V}" --fb \
+      --backtitle "    Octoleo" \
       "1)" "<-- Return to the main menu." \
       "2)" "Setup Traefik" \
       "3)" "Enable Traefik" \
@@ -1794,7 +1800,9 @@ function showTraefik() {
 # show Portainer menu
 function showPortainer() {
   CHOICE=$(
-    whiptail --title "Portainer | ${PROGRAM_NAME} v${_V}" --menu "Make your selection" 16 112 4 \
+    whiptail --menu "Make your selection" 16 112 4 \
+      --title "Portainer | ${PROGRAM_NAME} v${_V}" --fb \
+      --backtitle "    Octoleo" \
       "1)" "<-- Return to the main menu." \
       "2)" "Setup Portainer" \
       "3)" "Enable Portainer" \
@@ -1818,7 +1826,9 @@ function showPortainer() {
 function mainMenu() {
   while true; do
     CHOICE=$(
-      whiptail --title "${PROGRAM_NAME} v${_V}" --menu "Make your selection" 16 112 10 \
+      whiptail --menu "Make your selection" 20 112 10 \
+        --title "${PROGRAM_NAME} v${_V}" --fb \
+        --backtitle "    Octoleo" \
         "1)" "Joomla containers" \
         "2)" "Openssh containers" \
         "3)" "Traefik container" \
