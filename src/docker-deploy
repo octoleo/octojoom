@@ -72,7 +72,7 @@ function traefik__TRuST__setup() {
   while [ ${#VDM_DOMAIN} -le 1 ]; do
     # get the value
     VDM_DOMAIN=$(getInput "Enter main domain of all your containers.\n[only one main domain allowed for now, must have at least one dot]" \
-      "vdm.dev" 'Enter Main Domain')
+      "${USER}.vdm" 'Enter Main Domain')
     # keep asking if empty or does exist
     [ ${#VDM_DOMAIN} -ge 1 ] || {
       showError "You must enter a domain name!"
@@ -195,7 +195,7 @@ function portainer__TRuST__setup() {
   while [ ${#VDM_DOMAIN} -le 1 ]; do
     # get the value
     VDM_DOMAIN=$(getInput "Enter main domain of all your containers.\n[only one main domain allowed for now, must have at least one dot]" \
-      "vdm.dev" 'Enter Main Domain')
+      "${USER}.vdm" 'Enter Main Domain')
     # keep asking if empty or does exist
     [ ${#VDM_DOMAIN} -ge 1 ] || {
       showError "You must enter a domain name!"
@@ -325,7 +325,7 @@ function joomla__TRuST__setup() {
   while [ ${#VDM_DOMAIN} -le 1 ]; do
     # get the value
     VDM_DOMAIN=$(getInput "Enter main domain of all your containers.\n[only one main domain allowed for now, must have at least one dot]" \
-      "vdm.dev" 'Enter Main Domain')
+      "${USER}.vdm" 'Enter Main Domain')
     # keep asking if empty or does exist
     [ ${#VDM_DOMAIN} -ge 1 ] || {
       showError "You must enter a domain name!"
@@ -444,6 +444,8 @@ function joomla__TRuST__setup() {
   export vdm_database_rootpass
   # set host file if needed
   updateHostFile
+  # also set the database domain
+  updateHostFile "${VDM_SUBDOMAIN}db"
   # create the directory if it does not yet already exist
   # shellcheck disable=SC2174
   mkdir -p -m 700 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}"
@@ -567,7 +569,7 @@ function openssh__TRuST__setup() {
   while [ ${#VDM_DOMAIN} -le 1 ]; do
     # get the value
     VDM_DOMAIN=$(getInput "Enter main domain of all your containers.\n[only one main domain allowed for now, must have at least one dot]" \
-      "vdm.dev" 'Enter Main Domain')
+      "${USER}.vdm" 'Enter Main Domain')
     # keep asking if empty or does exist
     [ ${#VDM_DOMAIN} -ge 1 ] || {
       showError "You must enter a domain name!"
@@ -2126,7 +2128,7 @@ function updateHostFile() {
       showNotice "${USER^}, ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} is already in the /etc/hosts file."
     elif (whiptail --yesno "${USER^}, to add the ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} entry to your host file we need sudo privileges." --title "Give sudo Privileges" 8 112); then
       # add the domain to the host file
-      echo "127.0.0.1       ${VDM_SUBDOMAIN}.${VDM_DOMAIN}" | sudo tee -a /etc/hosts >/dev/null
+      echo "127.0.0.1       ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN}" | sudo tee -a /etc/hosts >/dev/null
       # show notice
       showNotice "${USER^}, ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} was added to the /etc/hosts file."
     fi
