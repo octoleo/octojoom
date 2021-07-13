@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="2.0.0"
+_VERSION="2.0.2"
 _V="2.0"
 
 # The program full name
@@ -128,19 +128,19 @@ services:
     container_name: traefik
     image: "traefik:latest"
     command:
-      - --entrypoints.web.address=:80
-      - --entrypoints.websecure.address=:443
+${VDM_REMOVE_SECURE}      - --entrypoints.web.address=:80
+${VDM_REMOVE_SECURE}      - --entrypoints.websecure.address=:443
 #      - --api.dashboard=true
 #      - --api.insecure=true
       - --providers.docker
-      - --log.level=INFO
+${VDM_REMOVE_SECURE}      - --log.level=INFO
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge=true
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.keytype=RSA4096
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.email=${VDM_SECURE_EMAIL:-user@demo.com}
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.storage=/acme.json
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge.entrypoint=web
-#      - --providers.file.directory=/conf
-#      - --providers.file.watch=true
+${VDM_REMOVE_SECURE}      - --providers.file.directory=/conf
+${VDM_REMOVE_SECURE}      - --providers.file.watch=true
     restart: unless-stopped
     ports:
       - "80:80"
@@ -148,15 +148,15 @@ ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallen
 #      - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-#      - "\${VDM_PROJECT_PATH}/traefik/conf:/conf"
+${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/conf:/conf"
 ${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/acme.json:/acme.json"
-      - "\${VDM_PROJECT_PATH}/traefik/errors:/errors"
-    labels:
+${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/errors:/errors"
+${VDM_REMOVE_SECURE}    labels:
       # settings for all containers
-      - "traefik.http.routers.http-catchall.rule=hostregexp(\`{host:.+}\`)"
-      - "traefik.http.routers.http-catchall.entrypoints=web"
-      - "traefik.http.routers.http-catchall.middlewares=redirect-to-me"
-      - "traefik.http.middlewares.redirect-to-me.redirectscheme.scheme=${VDM_HTTP_SCHEME}"
+${VDM_REMOVE_SECURE}      - "traefik.http.routers.http-catchall.rule=hostregexp(\`{host:.+}\`)"
+${VDM_REMOVE_SECURE}      - "traefik.http.routers.http-catchall.entrypoints=web"
+${VDM_REMOVE_SECURE}      - "traefik.http.routers.http-catchall.middlewares=redirect-to-me"
+${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.redirect-to-me.redirectscheme.scheme=${VDM_HTTP_SCHEME}"
     networks:
       - traefik
 
@@ -260,7 +260,7 @@ services:
       # Frontend
       - "traefik.enable=true"
       - "traefik.http.routers.portainer.rule=Host(\`port.${VDM_DOMAIN}\`)"
-      - "traefik.http.routers.portainer.entrypoints=${VDM_ENTRY_POINT}"
+${VDM_REMOVE_SECURE}      - "traefik.http.routers.portainer.entrypoints=${VDM_ENTRY_POINT}"
 ${VDM_REMOVE_SECURE}      - "traefik.http.routers.portainer.tls.certresolver=vdmresolver"
       - "traefik.http.routers.portainer.service=portainer"
       - "traefik.http.services.portainer.loadbalancer.server.port=9000"
@@ -518,7 +518,7 @@ services:
       # joomla
       - "traefik.enable=true"
       - "traefik.http.routers.joomla_${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}.${VDM_DOMAIN}\`)"
-      - "traefik.http.routers.joomla_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}"
+${VDM_REMOVE_SECURE}      - "traefik.http.routers.joomla_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}"
 ${VDM_REMOVE_SECURE}      - "traefik.http.routers.joomla_${VDM_KEY}.tls.certresolver=vdmresolver"
 ${VDM_REMOVE_SECURE}      - "traefik.http.routers.joomla_${VDM_KEY}.service=joomla_${VDM_KEY}"
 ${VDM_REMOVE_SECURE}      - "traefik.http.services.joomla_${VDM_KEY}.loadbalancer.server.port=80"
@@ -538,10 +538,10 @@ ${VDM_REMOVE_SECURE}      - "traefik.http.services.joomla_${VDM_KEY}.loadbalance
       # phpmyadmin
       - "traefik.enable=true"
       - "traefik.http.routers.phpmyadmin_${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}db.${VDM_DOMAIN}\`)"
-      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}"
+${VDM_REMOVE_SECURE}      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}"
 ${VDM_REMOVE_SECURE}      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.tls.certresolver=vdmresolver"
-      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.service=phpmyadmin_${VDM_KEY}"
-      - "traefik.http.services.phpmyadmin_${VDM_KEY}.loadbalancer.server.port=80"
+${VDM_REMOVE_SECURE}      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.service=phpmyadmin_${VDM_KEY}"
+${VDM_REMOVE_SECURE}      - "traefik.http.services.phpmyadmin_${VDM_KEY}.loadbalancer.server.port=80"
 
 networks:
   traefik:
