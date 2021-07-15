@@ -1698,40 +1698,61 @@ function showHelpMenu() {
 
 # show Joomla menu
 function showJoomla() {
+  # menu for dynamic addition
+  local menu_options=()
+  # our counter
+  local i=2
+  # load the back menu
+  menu_options+=("back" "<-- Return to the main menu.")
+  # setup new container
+  menu_options+=("setup" "Setup new container")
+  # enable existing container
+  hasDirectories 'joomla/available' &&
+    menu_options+=("enable" "Enable existing container") && i=$((i + 1))
+  # disable enabled container
+  hasDirectories 'joomla/enabled' &&
+    menu_options+=("disable" "Disable enabled container") && i=$((i + 1))
+  # delete a container
+  hasDirectories 'joomla/available' &&
+    menu_options+=("delete" "Delete a container") && i=$((i + 1))
+  # take all enabled containers down
+  hasDirectories 'joomla/enabled' &&
+    menu_options+=("down" "Take all enabled containers down") && i=$((i + 1))
+  # pull up all enabled containers
+  hasDirectories 'joomla/enabled' &&
+    menu_options+=("up" "Pull up all enabled containers") && i=$((i + 1))
+  # fix permissions
+  hasDirectories '' "${VDM_PROJECT_PATH}" &&
+    menu_options+=("fix" "Fix permissions of folders and files of a container") &&
+    i=$((i + 1))
+  # get the selection
   CHOICE=$(
-    whiptail --menu "Make your selection" 20 112 8 \
+    whiptail --menu "Make your selection" 20 112 $i \
       --title "Joomla | ${PROGRAM_NAME} v${_V}" --fb \
-      --backtitle "    Octoleo" \
-      "1)" "<-- Return to the main menu." \
-      "2)" "Setup new container" \
-      "3)" "Enable existing container" \
-      "4)" "Disable enabled container" \
-      "5)" "Delete a container" \
-      "6)" "Take all enabled containers down" \
-      "7)" "Pull up all enabled containers" \
-      "8)" "Fix permissions of folders and files of a container" 3>&2 2>&1 1>&3
+      --backtitle "    Octoleo" --nocancel --notags \
+      "${menu_options[@]}" 3>&2 2>&1 1>&3
   )
 
   case $CHOICE in
-  "2)")
+  "setup")
     setupContainer 'joomla'
     ;;
-  "3)")
+  "enable")
     enableContainer 'joomla'
     ;;
-  "4)")
+  "disable")
     disableContainer 'joomla'
     ;;
-  "5)")
+  "delete")
     deleteContainer 'joomla'
     ;;
-  "6)")
+  "down")
     downContainers 'joomla'
     ;;
-  "7)")
+  "up")
     upContainers 'joomla'
     ;;
-  "8)")
+  "fix")
     fixContainerPermissions
     ;;
   esac
@@ -1739,36 +1760,54 @@ function showJoomla() {
 
 # show Openssh menu
 function showOpenssh() {
+  # menu for dynamic addition
+  local menu_options=()
+  # our counter
+  local i=2
+  # load the back menu
+  menu_options+=("back" "<-- Return to the main menu.")
+  # setup new container
+  menu_options+=("setup" "Setup new container")
+  # enable existing container
+  hasDirectories 'openssh/available' &&
+    menu_options+=("enable" "Enable existing container") && i=$((i + 1))
+  # disable enabled container
+  hasDirectories 'openssh/enabled' &&
+    menu_options+=("disable" "Disable enabled container") && i=$((i + 1))
+  # delete a container
+  hasDirectories 'openssh/available' &&
+    menu_options+=("delete" "Delete a container") && i=$((i + 1))
+  # take all enabled containers down
+  hasDirectories 'openssh/enabled' &&
+    menu_options+=("down" "Take all enabled containers down") && i=$((i + 1))
+  # pull up all enabled containers
+  hasDirectories 'openssh/enabled' &&
+    menu_options+=("up" "Pull up all enabled containers") && i=$((i + 1))
+  # get the selection
   CHOICE=$(
-    whiptail --menu "Make your selection" 20 112 7 \
+    whiptail --menu "Make your selection" 20 112 $i \
       --title "Openssh | ${PROGRAM_NAME} v${_V}" --fb \
-      --backtitle "    Octoleo" \
-      "1)" "<-- Return to the main menu." \
-      "2)" "Setup new container" \
-      "3)" "Enable existing container" \
-      "4)" "Disable enabled container" \
-      "5)" "Delete a container" \
-      "6)" "Take all enabled containers down" \
-      "7)" "Pull up all enabled containers" 3>&2 2>&1 1>&3
+      --backtitle "    Octoleo" --nocancel --notags \
+      "${menu_options[@]}" 3>&2 2>&1 1>&3
   )
 
   case $CHOICE in
-  "2)")
+  "setup")
     setupContainer 'openssh'
     ;;
-  "3)")
+  "enable")
     enableContainer 'openssh'
     ;;
-  "4)")
+  "disable")
     disableContainer 'openssh'
     ;;
-  "5)")
+  "delete")
     deleteContainer 'openssh'
     ;;
-  "6)")
+  "down")
     downContainers 'openssh'
     ;;
-  "7)")
+  "up")
     upContainers 'openssh'
     ;;
   esac
@@ -1776,24 +1815,36 @@ function showOpenssh() {
 
 # show Traefik menu
 function showTraefik() {
+  # menu for dynamic addition
+  local menu_options=()
+  # our counter
+  local i=2
+  # load the back menu
+  menu_options+=("back" "<-- Return to the main menu.")
+  # setup new container
+  menu_options+=("setup" "Setup/Rebuild Traefik")
+  # enable existing container
+  [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
+    menu_options+=("enable" "Enable Traefik") && i=$((i + 1))
+  # disable enabled container
+  [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
+    menu_options+=("disable" "Disable Traefik") && i=$((i + 1))
+  # get the selection
   CHOICE=$(
-    whiptail --menu "Make your selection" 16 112 4 \
+    whiptail --menu "Make your selection" 16 112 $i \
       --title "Traefik | ${PROGRAM_NAME} v${_V}" --fb \
-      --backtitle "    Octoleo" \
-      "1)" "<-- Return to the main menu." \
-      "2)" "Setup Traefik" \
-      "3)" "Enable Traefik" \
-      "4)" "Disable Traefik" 3>&2 2>&1 1>&3
+      --backtitle "    Octoleo" --nocancel --notags \
+      "${menu_options[@]}" 3>&2 2>&1 1>&3
   )
 
   case $CHOICE in
-  "2)")
+  "setup")
     setupContainer 'traefik'
     ;;
-  "3)")
+  "enable")
     enableContainer 'traefik'
     ;;
-  "4)")
+  "disable")
     disableContainer 'traefik'
     ;;
   esac
@@ -1801,24 +1852,36 @@ function showTraefik() {
 
 # show Portainer menu
 function showPortainer() {
+  # menu for dynamic addition
+  local menu_options=()
+  # our counter
+  local i=2
+  # load the back menu
+  menu_options+=("back" "<-- Return to the main menu.")
+  # setup new container
+  menu_options+=("setup" "Setup/Rebuild Portainer")
+  # enable existing container
+  [ -f "${VDM_REPO_PATH}/portainer/docker-compose.yml" ] &&
+    menu_options+=("enable" "Enable Portainer") && i=$((i + 1))
+  # disable enabled container
+  [ -f "${VDM_REPO_PATH}/portainer/docker-compose.yml" ] &&
+    menu_options+=("disable" "Disable Portainer") && i=$((i + 1))
+  # get the selection
   CHOICE=$(
-    whiptail --menu "Make your selection" 16 112 4 \
+    whiptail --menu "Make your selection" 16 112 $i \
       --title "Portainer | ${PROGRAM_NAME} v${_V}" --fb \
-      --backtitle "    Octoleo" \
-      "1)" "<-- Return to the main menu." \
-      "2)" "Setup Portainer" \
-      "3)" "Enable Portainer" \
-      "4)" "Disable Portainer" 3>&2 2>&1 1>&3
+      --backtitle "    Octoleo" --nocancel --notags \
+     "${menu_options[@]}" 3>&2 2>&1 1>&3
   )
 
   case $CHOICE in
-  "2)")
+  "setup")
     setupContainer 'portainer'
     ;;
-  "3)")
+  "enable")
     enableContainer 'portainer'
     ;;
-  "4)")
+  "disable")
     disableContainer 'portainer'
     ;;
   esac
@@ -1826,52 +1889,69 @@ function showPortainer() {
 
 # MAIN MENU
 function mainMenu() {
+  # menu for dynamic addition
+  local menu_options=()
+  # our counter
+  local i=9
+  # Joomla containers
+  menu_options+=("joomla" "Joomla containers")
+  # Openssh containers
+  menu_options+=("openssh" "Openssh containers")
+  # Traefik container
+  menu_options+=("traefik" "Traefik container")
+  # Portainer container
+  menu_options+=("portainer" "Portainer container")
+  # Delete Persistent Volumes
+  hasDirectories '' "${VDM_PROJECT_PATH}" &&
+    menu_options+=("delete" "Delete Persistent Volumes") && i=$((i + 1))
+  # Update the whole script
+  menu_options+=("update" "Update ${PROGRAM_NAME,,}")
+  # Uninstall the whole script
+  menu_options+=("uninstall" "Uninstall ${PROGRAM_NAME,,}")
+  # Show command help
+  menu_options+=("command-help" "Show command help")
+  # Octoleo details
+  menu_options+=("octoleo" "Octoleo")
+  # Octoleo details
+  menu_options+=("quit" "Quit")
+  # get the selection
   while true; do
     CHOICE=$(
-      whiptail --menu "Make your selection" 20 112 10 \
+      whiptail --menu "Make your selection" 20 112 $i \
         --title "${PROGRAM_NAME} v${_V}" --fb \
-        --backtitle "    Octoleo" \
-        "1)" "Joomla containers" \
-        "2)" "Openssh containers" \
-        "3)" "Traefik container" \
-        "4)" "Portainer container" \
-        "5)" "Delete Persistent Volumes" \
-        "6)" "Update ${PROGRAM_NAME,,}" \
-        "7)" "Uninstall ${PROGRAM_NAME,,}" \
-        "8)" "Show command help" \
-        "9)" "Octoleo" \
-        "10)" "Quit" 3>&2 2>&1 1>&3
+        --backtitle "    Octoleo" --nocancel --notags \
+        "${menu_options[@]}" 3>&2 2>&1 1>&3
     )
 
     case $CHOICE in
-    "1)")
+    "joomla")
       showJoomla
       ;;
-    "2)")
+    "openssh")
       showOpenssh
       ;;
-    "3)")
+    "traefik")
       showTraefik
       ;;
-    "4)")
+    "portainer")
       showPortainer
       ;;
-    "5)")
+    "delete")
       deletePersistentVolumes
       ;;
-    "6)")
+    "update")
       runUpdate
       ;;
-    "7)")
+    "uninstall")
       runUninstall
       ;;
-    "8)")
+    "command-help")
       showHelpMenu
       ;;
-    "9)")
+    "octoleo")
       octoleoQuietly
       ;;
-    "10)") exit ;;
+    "quit") exit ;;
     esac
   done
 }
@@ -1899,6 +1979,16 @@ function getRandomPass() {
   # simple basic random
   # shellcheck disable=SC2046
   echo $(tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | dd bs="${1:-128}" count=1 status=none)
+}
+
+# check if a Directory exist and if it has sub-directories
+function hasDirectories(){
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ -d "${2:-$VDM_REPO_PATH}/${1:-}" ] && [ $(ls -A "${2:-$VDM_REPO_PATH}/${1:-}" | wc -l) -ne 0 ]; then
+    return 0
+  fi
+  return 1
 }
 
 # get input from user
