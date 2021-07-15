@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="2.0.2"
+_VERSION="2.0.4"
 _V="2.0"
 
 # The program full name
@@ -290,6 +290,15 @@ function joomla__TRuST__setup() {
   # load this container type globals
   # shellcheck disable=SC1090
   [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && source "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+  # we need to pull these values from the env if set
+  local vdm_key_db
+  local vdm_env_db
+  local vdm_key_user
+  local vdm_env_user
+  local vdm_key_pass
+  local vdm_env_pass
+  local vdm_key_root
+  local vdm_env_root
   # get the Joomla version if not set
   while [ ${#VDM_JV} -le 1 ]; do
     # get the value
@@ -357,10 +366,26 @@ function joomla__TRuST__setup() {
   if $VDM_SECURE; then
     VDM_REMOVE_SECURE=''
     VDM_ENTRY_POINT="websecure"
+    VDM_HTTP_SCHEME="https://"
   else
     VDM_REMOVE_SECURE="#"
     VDM_ENTRY_POINT="web"
+    VDM_HTTP_SCHEME="http://"
   fi
+  # set the details
+  vdm_key_db="VDM_${VDM_ENV_KEY^^}_DB"
+  vdm_env_db="${!vdm_key_db}"
+  vdm_key_user="VDM_${VDM_ENV_KEY^^}_DB_USER"
+  vdm_env_user="${!vdm_key_user}"
+  vdm_key_pass="VDM_${VDM_ENV_KEY^^}_DB_PASS"
+  vdm_env_pass="${!vdm_key_pass}"
+  vdm_key_root="VDM_${VDM_ENV_KEY^^}_DB_ROOT"
+  vdm_env_root="${!vdm_key_root}"
+  # now we check if its has been set
+  vdm_database_name="${vdm_database_name:-$vdm_env_db}"
+  vdm_database_user="${vdm_database_user:-$vdm_env_user}"
+  vdm_database_pass="${vdm_database_pass:-$vdm_env_pass}"
+  vdm_database_rootpass="${vdm_database_rootpass:-$vdm_env_root}"
   # check if env is already set
   # shellcheck disable=SC2015
   [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && grep -q "VDM_${VDM_ENV_KEY}_DB=" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || {
@@ -412,13 +437,13 @@ function joomla__TRuST__setup() {
   # add this value if not set variable
   setEnvVariable "VDM_SECURE=${VDM_SECURE}"
   # add this value if not set variable
-  setContainerEnvVariable "VDM_${VDM_ENV_KEY}_DB=\"${vdm_database_name}\""
+  [ ${#vdm_database_name} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY}_DB=\"${vdm_database_name}\""
   # add this value if not set variable
-  setContainerEnvVariable "VDM_${VDM_ENV_KEY}_DB_USER=\"${vdm_database_user}\""
+  [ ${#vdm_database_user} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY}_DB_USER=\"${vdm_database_user}\""
   # add this value if not set variable
-  setContainerEnvVariable "VDM_${VDM_ENV_KEY}_DB_PASS=\"${vdm_database_pass}\""
+  [ ${#vdm_database_pass} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY}_DB_PASS=\"${vdm_database_pass}\""
   # add this value if not set variable
-  setContainerEnvVariable "VDM_${VDM_ENV_KEY}_DB_ROOT=\"${vdm_database_rootpass}\""
+  [ ${#vdm_database_rootpass} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY}_DB_ROOT=\"${vdm_database_rootpass}\""
   # add the projects path
   setContainerEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
   ##########################
@@ -437,6 +462,7 @@ function joomla__TRuST__setup() {
   export VDM_ENV_KEY
   export VDM_REMOVE_SECURE
   export VDM_ENTRY_POINT
+  export VDM_HTTP_SCHEME
   # container lower
   export vdm_database_name
   export vdm_database_user
@@ -462,6 +488,8 @@ function joomla__TRuST__setup() {
     # then we enable it
     enableContainer "${VDM_CONTAINER_TYPE}"
   fi
+  # display the configurations
+  showJoomlaConfigDetails
   ##########################
   ### unset all no longer needed
   # container
@@ -471,6 +499,7 @@ function joomla__TRuST__setup() {
   unset VDM_ENV_KEY
   unset VDM_REMOVE_SECURE
   unset VDM_ENTRY_POINT
+  unset VDM_HTTP_SCHEME
   # container lower
   unset vdm_database_name
   unset vdm_database_user
@@ -992,10 +1021,7 @@ function portainer__TRuST__enable() {
 ######################################## DISABLE JOOMLA
 function joomla__TRuST__disable() {
   # check if this type has enabled containers
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2012
-  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" ] ||
-    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" | wc -l) = 0 ]; then
+  if ! hasDirectories "${VDM_CONTAINER_TYPE}/enabled/"; then
     showError "There are no ${VDM_CONTAINER_TYPE} containers to disable."
   elif [ ${#VDM_CONTAINER} -ge 1 ]; then
     # this means we have a single already selected container to enable if it exists
@@ -1038,10 +1064,7 @@ function joomla__TRuST__disable() {
 ######################################## DISABLE OPENSSH
 function openssh__TRuST__disable() {
   # check if this type has enabled containers
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2012
-  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" ] ||
-    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" | wc -l) = 0 ]; then
+  if ! hasDirectories "${VDM_CONTAINER_TYPE}/enabled/"; then
     showError "There are no ${VDM_CONTAINER_TYPE} containers to disable."
   elif [ ${#VDM_CONTAINER} -ge 1 ]; then
     # this means we have a single already selected container to enable if it exists
@@ -1108,10 +1131,7 @@ function portainer__TRuST__disable() {
 ########################################UP JOOMLA
 function joomla__TRuST__up() {
   # check if this type has enabled containers
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2012
-  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" ] ||
-    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" | wc -l) = 0 ]; then
+  if ! hasDirectories "${VDM_CONTAINER_TYPE}/enabled/"; then
     showError "There are no ${VDM_CONTAINER_TYPE} containers enabled, first enable some containers.\n\
       (UP and DOWN targets only enabled containers)"
   else
@@ -1142,10 +1162,7 @@ function joomla__TRuST__up() {
 ######################################## UP OPENSSH
 function openssh__TRuST__up() {
   # check if this type has enabled containers
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2012
-  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" ] ||
-    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" | wc -l) = 0 ]; then
+  if ! hasDirectories "${VDM_CONTAINER_TYPE}/enabled/"; then
     showError "There are no ${VDM_CONTAINER_TYPE} containers enabled, first enable some containers.\n\
       (UP and DOWN targets only enabled containers)"
   else
@@ -1176,10 +1193,7 @@ function openssh__TRuST__up() {
 ########################################DOWN JOOMLA
 function joomla__TRuST__down() {
   # check if this type has enabled containers
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2012
-  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" ] ||
-    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" | wc -l) = 0 ]; then
+  if ! hasDirectories "${VDM_CONTAINER_TYPE}/enabled/"; then
     showError "There are no ${VDM_CONTAINER_TYPE} containers to take down.\n\
       (UP and DOWN targets only enabled containers)"
   else
@@ -1194,10 +1208,7 @@ function joomla__TRuST__down() {
 ######################################## DOWN OPENSSH
 function openssh__TRuST__down() {
   # check if this type has enabled containers
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2012
-  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" ] ||
-    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" | wc -l) = 0 ]; then
+  if ! hasDirectories "${VDM_CONTAINER_TYPE}/enabled/"; then
     showError "There are no ${VDM_CONTAINER_TYPE} containers to take down."
   else
     # get all zip files
@@ -1211,11 +1222,8 @@ function openssh__TRuST__down() {
 ######################################## DELETE JOOMLA
 function joomla__TRuST__delete() {
   # check if this type has enabled containers
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2012
-  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" ] ||
-    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" | wc -l) = 0 ]; then
-    showError "There are no ${VDM_CONTAINER_TYPE} available containers."
+  if ! hasDirectories "${VDM_CONTAINER_TYPE}/available/"; then
+    showError "There are no ${VDM_CONTAINER_TYPE} containers available."
   else
     # set some local variables
     local vdm_delete_me
@@ -1248,7 +1256,7 @@ function joomla__TRuST__delete() {
       done
     fi
     # ask if there are volumes to delete
-    if [ -d "${VDM_PROJECT_PATH}" ] && [ $(ls -A "${VDM_PROJECT_PATH}" | wc -l) -ne 0 ] &&
+    if hasDirectories '' "${VDM_PROJECT_PATH}" &&
       (whiptail --yesno "Would you like to delete persistent volumes found in (${VDM_PROJECT_PATH})?" --title "Continue To Delete Persistent Volumes" 12 112); then
       # trigger the volumes removal script
       deletePersistentVolumes
@@ -1260,11 +1268,8 @@ function joomla__TRuST__delete() {
 ######################################## DELETE OPENSSH
 function openssh__TRuST__delete() {
   # check if this type has enabled containers
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2012
-  if [ ! -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" ] ||
-    [ $(ls -A "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" | wc -l) = 0 ]; then
-    showError "There are no ${VDM_CONTAINER_TYPE} available containers."
+  if ! hasDirectories "${VDM_CONTAINER_TYPE}/available/"; then
+    showError "There are no ${VDM_CONTAINER_TYPE} containers available."
   else
     # set some local variables
     local vdm_delete_me
@@ -1361,11 +1366,9 @@ function deleteContainer() {
 # To fix the permissions of Joomla containers
 function fixContainerPermissions() {
   # check if we have persistent volumes
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2012
   if [ ! -d "${VDM_PROJECT_PATH}" ]; then
     showError "The ${VDM_PROJECT_PATH} does not exist."
-  elif [ $(ls -A "${VDM_PROJECT_PATH}" | wc -l) = 0 ]; then
+  elif ! hasDirectories '' "${VDM_PROJECT_PATH}"; then
     showError "There are no persistent volumes in ${VDM_PROJECT_PATH} available."
   else
     # set some local variables
@@ -1405,11 +1408,17 @@ function fixContainerPermissions() {
           # Change the image folder permissions
           # chmod 707 "${VDM_PROJECT_PATH}/${persistent}/joomla/images"
           # chmod 707 "${VDM_PROJECT_PATH}/${persistent}/joomla/images/stories"
-          ### Fix the folder permissions so the active user (1000) can access the files
           #
-          echo "Fixing the folder permissions of ${persistent} joomla so user:$USER can access them"
-          #
-          sudo setfacl -R -m u:"$USER":rwx "${VDM_PROJECT_PATH}/${persistent}/joomla"
+          # Check if the setfacl command is installed
+          # shellcheck disable=SC2015
+          if command -v setfacl >/dev/null 2>&1; then
+            ### Fix the folder permissions so the active user (1000) can access the files
+            echo "Fixing the folder permissions of ${persistent} joomla so user:$USER can access them"
+            sudo setfacl -R -m u:"$USER":rwx "${VDM_PROJECT_PATH}/${persistent}/joomla"
+          else
+            echo "[ERROR] Could not fix the permissions of the ${persistent} joomla so user:$USER can access them."
+            echo "[ERROR] You will need to install: setfacl for this option to work, then run this fix again."
+          fi
           ### Fix the folder ownership of database folders
           #
           echo "Fixing the folder ownership of ${persistent} database folders"
@@ -1435,9 +1444,7 @@ function fixContainerPermissions() {
 # delete persistent volumes
 function deletePersistentVolumes() {
   # we first check if we have some volumes
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2012
-  if [ -d "${VDM_PROJECT_PATH}" ] && [ $(ls -A "${VDM_PROJECT_PATH}" | wc -l) -ne 0 ]; then
+  if hasDirectories '' "${VDM_PROJECT_PATH}"; then
     # set some local variables
     local vdm_delete_volumes
     local persistent
@@ -1479,7 +1486,7 @@ function runUpdate() {
   # some local values
   local branch
   # get the target branch to use in our update
-  branch=$( getTargetBranch )
+  branch=$(getTargetBranch)
   # pull the latest version. Master is always the latest
   if sudo curl --fail -L "https://git.vdm.dev/api/v1/repos/octoleo/docker-deploy/raw/src/docker-deploy?ref=${branch:-master}&access_token=${VDM_ACCESS_TOKEN}" -o /usr/local/bin/docker-deploy 2>/dev/null; then
     # give success message
@@ -1687,8 +1694,8 @@ octoleoQuietly() {
   whiptail --msgbox "${message}" --fb --backtitle "    Octoleo" 32 112
 }
 
-# show the help menu
-function showHelpMenu() {
+# show the commands help menu
+function showCommandsHelpMenu() {
   help=$(showHelp)
   whiptail --msgbox --scrolltext "${help}" --fb --backtitle "    Octoleo" 30 90
 }
@@ -1871,7 +1878,7 @@ function showPortainer() {
     whiptail --menu "Make your selection" 16 112 $i \
       --title "Portainer | ${PROGRAM_NAME} v${_V}" --fb \
       --backtitle "    Octoleo" --nocancel --notags \
-     "${menu_options[@]}" 3>&2 2>&1 1>&3
+      "${menu_options[@]}" 3>&2 2>&1 1>&3
   )
 
   case $CHOICE in
@@ -1887,6 +1894,56 @@ function showPortainer() {
   esac
 }
 
+# show systems help menu
+function showHelpMenu() {
+  # menu for dynamic addition
+  local menu_options=()
+  # our counter
+  local i=7
+  # load the back menu
+  menu_options+=("back" "<-- Return to the main menu.")
+  # Show command help
+  menu_options+=("command-help" "Help with commands")
+  # Show folder paths
+  menu_options+=("important-paths" "Important Paths")
+  # Report an Issue
+  menu_options+=("report-issue" "Report an Issue")
+  # Update the whole script
+  menu_options+=("update" "Update ${PROGRAM_NAME,,}")
+  # Uninstall the whole script
+  menu_options+=("uninstall" "Uninstall ${PROGRAM_NAME,,}")
+  # Octoleo details
+  menu_options+=("octoleo" "Octoleo")
+  # get the selection
+  CHOICE=$(
+    whiptail --menu "Make your selection" 16 112 $i \
+      --title "Portainer | ${PROGRAM_NAME} v${_V}" --fb \
+      --backtitle "    Octoleo" --nocancel --notags \
+      "${menu_options[@]}" 3>&2 2>&1 1>&3
+  )
+
+  case $CHOICE in
+    "command-help")
+      showCommandsHelpMenu
+      ;;
+    "important-paths")
+      showImportantPaths
+      ;;
+    "report-issue")
+      showLink "https://git.vdm.dev/octoleo/docker-deploy/issues" "To report an issue go to:" "Report an Issue"
+      ;;
+    "update")
+      runUpdate
+      ;;
+    "uninstall")
+      runUninstall
+      ;;
+    "octoleo")
+      octoleoQuietly
+      ;;
+  esac
+}
+
 # MAIN MENU
 function mainMenu() {
   # menu for dynamic addition
@@ -1894,26 +1951,20 @@ function mainMenu() {
   # our counter
   local i=9
   # Joomla containers
-  menu_options+=("joomla" "Joomla containers")
+  menu_options+=("joomla" "Joomla Containers")
   # Openssh containers
-  menu_options+=("openssh" "Openssh containers")
+  menu_options+=("openssh" "Openssh Containers")
   # Traefik container
-  menu_options+=("traefik" "Traefik container")
+  menu_options+=("traefik" "Traefik Container")
   # Portainer container
-  menu_options+=("portainer" "Portainer container")
+  menu_options+=("portainer" "Portainer Container")
   # Delete Persistent Volumes
   hasDirectories '' "${VDM_PROJECT_PATH}" &&
     menu_options+=("delete" "Delete Persistent Volumes") && i=$((i + 1))
-  # Update the whole script
-  menu_options+=("update" "Update ${PROGRAM_NAME,,}")
-  # Uninstall the whole script
-  menu_options+=("uninstall" "Uninstall ${PROGRAM_NAME,,}")
-  # Show command help
-  menu_options+=("command-help" "Show command help")
+  # Show help
+  menu_options+=("help" "Main Help Menu")
   # Octoleo details
-  menu_options+=("octoleo" "Octoleo")
-  # Octoleo details
-  menu_options+=("quit" "Quit")
+  menu_options+=("quit" "Quit Program")
   # get the selection
   while true; do
     CHOICE=$(
@@ -1939,17 +1990,8 @@ function mainMenu() {
     "delete")
       deletePersistentVolumes
       ;;
-    "update")
-      runUpdate
-      ;;
-    "uninstall")
-      runUninstall
-      ;;
-    "command-help")
+    "help")
       showHelpMenu
-      ;;
-    "octoleo")
-      octoleoQuietly
       ;;
     "quit") exit ;;
     esac
@@ -1974,6 +2016,70 @@ function showNotice() {
   whiptail --title "NOTICE | ${PROGRAM_NAME} v${_V}" --msgbox "${1}" 12 112
 }
 
+# show link
+function showLink() {
+  whiptail --title "${3:-Open Link} | ${PROGRAM_NAME} v${_V}" --msgbox "${2:-To open the link click here:} ${1}" 8 112
+}
+
+# show important paths
+function showImportantPaths() {
+  local message
+  # now set the message
+  message="                                                                      ${PROGRAM_NAME} v$_VERSION
+
+  We have a few important paths that you should know, and use to manually manage your setup.
+
+    DOCKER:  ${VDM_REPO_PATH}
+    SSH:     ${VDM_REPO_PATH}/openssh/.ssh
+    VOLUMES: ${VDM_PROJECT_PATH}
+    CONFIG:  ${VDM_SRC_PATH}
+
+  Then we have some key environment variable files that hold very useful and important information.
+  Since we do not store any passwords or other important details in the docker-deploy.yml files.
+  They are stored in these environment variable files and its permissions are (600) for security.
+
+    JOOMLA:    ${VDM_REPO_PATH}/joomla/.env
+    OPENSSH:   ${VDM_REPO_PATH}/openssh/.env
+    TRAEFIK:   ${VDM_REPO_PATH}/traefik/.env
+    PORTAINER: ${VDM_REPO_PATH}/portainer/.env
+
+
+  Not all these files or folders may exist, they are created only when needed.
+"
+
+  whiptail --msgbox "${message}" --fb --backtitle "    Octoleo" 32 112
+}
+
+# show show the Joomla config details
+function showJoomlaConfigDetails() {
+  # load the env back to show if set previously
+  # shellcheck disable=SC1090
+  # [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && source "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+  # set some locals
+  local message
+  # now set the message
+  message="                                                                      ${PROGRAM_NAME} v$_VERSION
+
+  Running the Joomla container for the first time you will need these details:
+  --------------------------------------------------------------------
+    URL:              ${VDM_HTTP_SCHEME}${VDM_SUBDOMAIN}.${VDM_DOMAIN}
+    DATABASE_HOST:    mariadb_${VDM_KEY}:3306
+  --------------------------------------------------------------------
+    VDM_${VDM_ENV_KEY^^}_DB:       ${vdm_database_name}
+    VDM_${VDM_ENV_KEY^^}_DB_USER:  ${vdm_database_user}
+    VDM_${VDM_ENV_KEY^^}_DB_PASS:  ${vdm_database_pass}
+    VDM_${VDM_ENV_KEY^^}_DB_ROOT:  ${vdm_database_rootpass}
+  --------------------------------------------------------------------
+  These details are securely stored in this environment variable file
+    ${VDM_REPO_PATH}/joomla/.env
+  --------------------------------------------------------------------
+
+  Do not remove these details from the file, as its used to deploy the container.
+"
+
+  whiptail --msgbox "${message}" --fb --backtitle "    Octoleo" 30 112
+}
+
 # we must get a random key
 function getRandomPass() {
   # simple basic random
@@ -1982,7 +2088,7 @@ function getRandomPass() {
 }
 
 # check if a Directory exist and if it has sub-directories
-function hasDirectories(){
+function hasDirectories() {
   # shellcheck disable=SC2046
   # shellcheck disable=SC2012
   if [ -d "${2:-$VDM_REPO_PATH}/${1:-}" ] && [ $(ls -A "${2:-$VDM_REPO_PATH}/${1:-}" | wc -l) -ne 0 ]; then
@@ -2014,9 +2120,7 @@ function getSelectedDirectory() {
   # our counter
   local i=0
   # now check if this dir has sub dirs
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2012
-  if [ -d "${path}" ] && [ $(ls -A "$path" | wc -l) -ne 0 ]; then
+  if hasDirectories '' "$path"; then
     # loop over the directory
     for dir_ in "${path%/}/"*; do
       # remove the full path
@@ -2046,9 +2150,7 @@ function getSelectedDirectories() {
   # our counter
   local i=0
   # now check if this dir has sub dirs
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2012
-  if [ -d "${path}" ] && [ $(ls -A "$path" | wc -l) -ne 0 ]; then
+  if hasDirectories '' "$path"; then
     # loop over the directory
     for dir_ in "${path%/}/"*; do
       # remove the full path
@@ -2129,7 +2231,7 @@ function getTargetBranch() {
     "You can select the update channel you would like to use." 10 80 2 \
     "master" "Stable Version" "ON" \
     "staging" "Developer Version" "OFF" \
-      3>&1 1>&2 2>&3)
+    3>&1 1>&2 2>&3)
   # return the answer (default master)
   echo "${answer:-master}"
 }
