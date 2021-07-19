@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="2.0.5"
-_V="2.0"
+_VERSION="2.1.0"
+_V="2.1"
 
 # The program full name
 PROGRAM_NAME="Docker Deployment"
@@ -44,52 +44,32 @@ function traefik__TRuST__setup() {
   # shellcheck disable=SC1090
   [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && source "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
   # check if we have secure switch set
-  if [ "${VDM_SECURE:-not}" = 'not' ]; then
-    # check the security switch
-    if (whiptail --yesno "Would you like to use Letsencrypt auto setup for your containers [only for server with public static IP]" --defaultno --title "Letsencrypt" 8 112); then
-      # we set the secure switch
-      VDM_SECURE=true
-    else
-      VDM_SECURE=false
-    fi
-  fi
+  setSecureState
   # setup letsencrypt stuff
   if $VDM_SECURE; then
     VDM_REMOVE_SECURE=''
     VDM_HTTP_SCHEME="https"
     # get the email if not set
-    [ ${#VDM_SECURE_EMAIL} -ge 1 ] || {
-      echo -n "[enter] Email: "
-      read -r VDM_SECURE_EMAIL
-      # make sure value was entered
-      [ ${#VDM_SECURE_EMAIL} -ge 1 ] || exit
-    }
+    while [ ${#VDM_SECURE_EMAIL} -le 1 ]; do
+      # get the value
+      VDM_SECURE_EMAIL=$(getInput 'Enter email for the Letsencrypt setup.' '' 'Enter Valid Email')
+      # keep asking
+      [ ${#VDM_SECURE_EMAIL} -ge 1 ] || {
+        showError "You must enter an email for the Letsencrypt setup."
+      }
+    done
   else
     VDM_REMOVE_SECURE="#"
     VDM_HTTP_SCHEME="http"
   fi
   # set the main domain if not set
-  while [ ${#VDM_DOMAIN} -le 1 ]; do
-    # get the value
-    VDM_DOMAIN=$(getInput "Enter main domain of all your containers.\n[only one main domain allowed for now, must have at least one dot]" \
-      "${USER}.vdm" 'Enter Main Domain')
-    # keep asking if empty or does exist
-    [ ${#VDM_DOMAIN} -ge 1 ] || {
-      showError "You must enter a domain name!"
-    }
-  done
-  # add this value if not set variable
-  setEnvVariable "VDM_DOMAIN=\"${VDM_DOMAIN}\""
-  # add this value if not set variable
-  setEnvVariable "VDM_SECURE=${VDM_SECURE}"
+  setMainDomain
   ##########################
   ### export all we need
   # global
   export VDM_CONTAINER_TYPE
   export VDM_REPO_PATH
   export VDM_PROJECT_PATH
-  export VDM_DOMAIN
-  export VDM_SECURE
   # container
   export VDM_REMOVE_SECURE
   export VDM_HTTP_SCHEME
@@ -174,15 +154,7 @@ function portainer__TRuST__setup() {
   # shellcheck disable=SC1090
   [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && source "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
   # check if we have secure switch set
-  if [ "${VDM_SECURE:-not}" = 'not' ]; then
-    # check the security switch
-    if (whiptail --yesno "Would you like to use Letsencrypt auto setup for your containers [only for server with public static IP]" --defaultno --title "Letsencrypt" 8 112); then
-      # we set the secure switch
-      VDM_SECURE=true
-    else
-      VDM_SECURE=false
-    fi
-  fi
+  setSecureState
   # setup letsencrypt stuff
   if $VDM_SECURE; then
     VDM_REMOVE_SECURE=''
@@ -191,34 +163,23 @@ function portainer__TRuST__setup() {
     VDM_REMOVE_SECURE="#"
     VDM_ENTRY_POINT="web"
   fi
-  # set the main domain if not set
-  while [ ${#VDM_DOMAIN} -le 1 ]; do
-    # get the value
-    VDM_DOMAIN=$(getInput "Enter main domain of all your containers.\n[only one main domain allowed for now, must have at least one dot]" \
-      "${USER}.vdm" 'Enter Main Domain')
-    # keep asking if empty or does exist
-    [ ${#VDM_DOMAIN} -ge 1 ] || {
-      showError "You must enter a domain name!"
-    }
-  done
-  # add this value if not set variable
-  setEnvVariable "VDM_DOMAIN=\"${VDM_DOMAIN}\""
-  # add this value if not set variable
-  setEnvVariable "VDM_SECURE=${VDM_SECURE}"
+  # set the domain
+  setDomain
+  # get the sub domain if not set
+  setSubDomain 'port' '' 'joomla'
   ##########################
   ### export all we need
   # global
   export VDM_CONTAINER_TYPE
   export VDM_REPO_PATH
   export VDM_PROJECT_PATH
-  export VDM_DOMAIN
-  export VDM_SECURE
-  export VDM_UPDATE_HOST
   # container
   export VDM_REMOVE_SECURE
   export VDM_ENTRY_POINT
+  # set the update of the host file once
+  setUpdateHostFile
   # set host file if needed
-  updateHostFile "port"
+  updateHostFile
   ## create the directory if it does not yet already exist
   # shellcheck disable=SC2174
   mkdir -p -m 700 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}"
@@ -235,6 +196,7 @@ function portainer__TRuST__setup() {
   ##########################
   ### unset all no longer needed
   # container
+  unset VDM_SUBDOMAIN
   unset VDM_REMOVE_SECURE
   unset VDM_ENTRY_POINT
   # return a success
@@ -259,14 +221,14 @@ services:
     labels:
       # Frontend
       - "traefik.enable=true"
-      - "traefik.http.routers.portainer.rule=Host(\`port.${VDM_DOMAIN}\`)"
+      - "traefik.http.routers.portainer.rule=Host(\`${VDM_SUBDOMAIN}.${VDM_DOMAIN}\`)"
 ${VDM_REMOVE_SECURE}      - "traefik.http.routers.portainer.entrypoints=${VDM_ENTRY_POINT}"
 ${VDM_REMOVE_SECURE}      - "traefik.http.routers.portainer.tls.certresolver=vdmresolver"
       - "traefik.http.routers.portainer.service=portainer"
       - "traefik.http.services.portainer.loadbalancer.server.port=9000"
 
       # Edge
-#      - "traefik.http.routers.portaineredge.rule=Host(\`edge.${VDM_DOMAIN}\`)"
+#      - "traefik.http.routers.portaineredge.rule=Host(\`${VDM_SUBDOMAIN}edge.${VDM_DOMAIN}\`)"
 #      - "traefik.http.routers.portaineredge.entrypoints=${VDM_ENTRY_POINT}"
 #      - "traefik.http.routers.portaineredge.tls.certresolver=vdmresolver"
 #      - "traefik.http.routers.portaineredge.service=portaineredge"
@@ -302,78 +264,27 @@ function joomla__TRuST__setup() {
   # get the Joomla version if not set
   while [ ${#VDM_JV} -le 1 ]; do
     # get the value
-    VDM_JV=$(getInput 'Enter Joomla version on this container.\n[Numbers only like 3.10.2]' '3.10' 'Enter Version')
+    VDM_JV=$(getInput 'Enter Joomla version tag for this container.\n[See available tags here https://hub.docker.com/_/joomla]' '3.10' 'Enter Version Tag')
     # keep asking
     [ ${#VDM_JV} -ge 1 ] || {
-      showError "You must enter a version number. See available tags here https://hub.docker.com/_/joomla"
+      showError "You must enter a version tag. See available tags here https://hub.docker.com/_/joomla"
     }
   done
   # get the key if not set
-  while [ ${#VDM_KEY} -le 1 ] || [ -d "${VDM_PROJECT_PATH}/${VDM_KEY}" ]; do
-    # get the value
-    VDM_KEY=$(getInput "Enter key used for container naming and name of the persistent volume folder.\n[Text with no spaces that is only alphabetical]" \
-      '' 'Enter Key')
-    # keep asking if empty or does exist
-    if [ ${#VDM_KEY} -ge 1 ] && [ -d "${VDM_PROJECT_PATH}/${VDM_KEY}" ]; then
-      showError "The key:${VDM_KEY} is already used. Select another"
-    elif [ ${#VDM_KEY} -le 1 ]; then
-      showError "You must enter a key!"
-    fi
-  done
+  setUniqueKey
   # get the env key if not set
-  while [ ${#VDM_ENV_KEY} -le 1 ]; do
-    # get the value
-    VDM_ENV_KEY=$(getInput "Enter environment key used to load the container environment variables.\n[Text with no spaces that is only alphabetical UPPERCASE]" \
-      "${VDM_KEY^^}" 'Enter ENV Key')
-    # keep asking if empty or does exist
-    [ ${#VDM_ENV_KEY} -ge 1 ] || {
-      showError "You must enter an environment key!"
-    }
-  done
-  # set the main domain if not set
-  while [ ${#VDM_DOMAIN} -le 1 ]; do
-    # get the value
-    VDM_DOMAIN=$(getInput "Enter main domain of all your containers.\n[only one main domain allowed for now, must have at least one dot]" \
-      "${USER}.vdm" 'Enter Main Domain')
-    # keep asking if empty or does exist
-    [ ${#VDM_DOMAIN} -ge 1 ] || {
-      showError "You must enter a domain name!"
-    }
-  done
-  # get the sub domain if not set
-  # make sure it has not been used before,
-  # also make sure its not a port or a ....db
-  while [ ${#VDM_SUBDOMAIN} -le 1 ] ||
-    [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}" ] ||
-    [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN%db}.${VDM_DOMAIN}" ] ||
-    [ "${VDM_SUBDOMAIN}" = 'port' ]; do
-    # get the value
-    VDM_SUBDOMAIN=$(getInput "Enter sub-domain used for this container.\n[Text with no spaces that is only alphabetical]" \
-      "${VDM_KEY,,}" 'Enter Sub-Domain')
-    # keep asking if empty or does exist
-    if [ ${#VDM_SUBDOMAIN} -ge 1 ] && [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}" ] ||
-      [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN%db}.${VDM_DOMAIN}" ] || [ "${VDM_SUBDOMAIN}" = 'port' ]; then
-      showError "The sub-domain:${VDM_SUBDOMAIN} is already used. Select another"
-    elif [ ${#VDM_KEY} -le 1 ]; then
-      showError "You must enter a sub-domain!"
-    fi
-  done
+  setEnvironmentKey
+  # set the domain
+  setDomain
+  # get the sub domain if not set TODO get dynamic port domain name
+  setSubDomain "${VDM_KEY,,}" "port"
   # check if we have secure switch set
-  if [ "${VDM_SECURE:-not}" = 'not' ]; then
-    # check the security switch
-    if (whiptail --yesno "Would you like to use Letsencrypt auto setup for your containers [only for server with public static IP]" --defaultno --title "Letsencrypt" 8 112); then
-      # we set the secure switch
-      VDM_SECURE=true
-    else
-      VDM_SECURE=false
-    fi
-  fi
+  setSecureState
   # setup letsencrypt stuff
   if $VDM_SECURE; then
     VDM_REMOVE_SECURE=''
     VDM_ENTRY_POINT="websecure"
     VDM_HTTP_SCHEME="https://"
-    # when we have secure we can also have multiple domains TODO
   else
     VDM_REMOVE_SECURE="#"
     VDM_ENTRY_POINT="web"
@@ -439,10 +350,8 @@ function joomla__TRuST__setup() {
       }
     done
   }
-  # add this value if not set variable
-  setEnvVariable "VDM_DOMAIN=\"${VDM_DOMAIN}\""
-  # add this value if not set variable
-  setEnvVariable "VDM_SECURE=${VDM_SECURE}"
+  # add the projects path
+  setContainerEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
   # add this value if not set variable
   [ ${#vdm_database_name} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB=\"${vdm_database_name}\""
   # add this value if not set variable
@@ -451,22 +360,14 @@ function joomla__TRuST__setup() {
   [ ${#vdm_database_pass} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_PASS=\"${vdm_database_pass}\""
   # add this value if not set variable
   [ ${#vdm_database_rootpass} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_ROOT=\"${vdm_database_rootpass}\""
-  # add the projects path
-  setContainerEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
   ##########################
   ### export all we need
   # global
   export VDM_CONTAINER_TYPE
   export VDM_REPO_PATH
   export VDM_PROJECT_PATH
-  export VDM_DOMAIN
-  export VDM_SECURE
-  export VDM_UPDATE_HOST
   # container
-  export VDM_SUBDOMAIN
   export VDM_JV
-  export VDM_KEY
-  export VDM_ENV_KEY
   export VDM_REMOVE_SECURE
   export VDM_ENTRY_POINT
   export VDM_HTTP_SCHEME
@@ -475,6 +376,8 @@ function joomla__TRuST__setup() {
   export vdm_database_user
   export vdm_database_pass
   export vdm_database_rootpass
+  # set the update of the host file once
+  setUpdateHostFile
   # set host file if needed
   updateHostFile
   # also set the database domain
@@ -602,15 +505,7 @@ function openssh__TRuST__setup() {
     }
   done
   # set the main domain if not set
-  while [ ${#VDM_DOMAIN} -le 1 ]; do
-    # get the value
-    VDM_DOMAIN=$(getInput "Enter main domain of all your containers.\n[only one main domain allowed for now, must have at least one dot]" \
-      "${USER}.vdm" 'Enter Main Domain')
-    # keep asking if empty or does exist
-    [ ${#VDM_DOMAIN} -ge 1 ] || {
-      showError "You must enter a domain name!"
-    }
-  done
+  setMainDomain
   # get the username if not set
   while [ ${#VDM_USER_NAME} -le 1 ] || [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_USER_NAME}.${VDM_DOMAIN}" ]; do
     # get the value
@@ -623,25 +518,9 @@ function openssh__TRuST__setup() {
     fi
   done
   # get the key if not set
-  while [ ${#VDM_KEY} -le 1 ]; do
-    # get the value
-    VDM_KEY=$(getInput "Enter key used for container naming.\n[Text with no spaces that is only alphabetical]" \
-      '' 'Enter Key')
-    # keep asking if empty
-    if [ ${#VDM_KEY} -le 1 ]; then
-      showError "You must enter a key!"
-    fi
-  done
+  setUniqueKey "Enter key used for container naming."
   # get the env key if not set
-  while [ ${#VDM_ENV_KEY} -le 1 ]; do
-    # get the value
-    VDM_ENV_KEY=$(getInput "Enter environment key used to load the container environment variables.\n[Text with no spaces that is only alphabetical UPPERCASE]" \
-      "${VDM_KEY^^}" 'Enter ENV Key')
-    # keep asking if empty or does exist
-    [ ${#VDM_ENV_KEY} -ge 1 ] || {
-      showError "You must enter an environment key!"
-    }
-  done
+  setEnvironmentKey
   # we check if it was set
   [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -le 1 ] && VDM_PUBLIC_KEY_GLOBAL_DIR="${VDM_PUBLIC_KEY_DIR:-}"
   # get the global directory of the ssh public keys if not set
@@ -745,8 +624,6 @@ function openssh__TRuST__setup() {
     fi
   done
   # add this value if not set variable
-  setEnvVariable "VDM_DOMAIN=\"${VDM_DOMAIN}\""
-  # add this value if not set variable
   setContainerEnvVariable "${VDM_ENV_PROJECT_DIR}=\"${VDM_PROJECT_U_DIR}\""
   # add this value if not set variable
   setContainerEnvVariable "VDM_PUBLIC_KEY_GLOBAL_DIR=\"${VDM_PUBLIC_KEY_GLOBAL_DIR}\""
@@ -758,12 +635,9 @@ function openssh__TRuST__setup() {
   export VDM_CONTAINER_TYPE
   export VDM_REPO_PATH
   export VDM_PROJECT_PATH
-  export VDM_DOMAIN
   # container
   export VDM_PORT
   export VDM_USER_NAME
-  export VDM_KEY
-  export VDM_ENV_KEY
   export VDM_PUBLIC_KEY_GLOBAL_DIR
   export VDM_PUBLIC_KEY_U_DIR
   export VDM_PROJECT_U_DIR
@@ -1237,7 +1111,7 @@ function portainer__TRuST__disable() {
 }
 
 #####################################################################################################################VDM
-########################################UP JOOMLA
+######################################## UP JOOMLA
 function joomla__TRuST__up() {
   # check if this type has enabled containers
   if ! hasDirectories "${VDM_CONTAINER_TYPE}/enabled/"; then
@@ -1299,7 +1173,7 @@ function openssh__TRuST__up() {
 }
 
 #####################################################################################################################VDM
-########################################DOWN JOOMLA
+######################################## DOWN JOOMLA
 function joomla__TRuST__down() {
   # check if this type has enabled containers
   if ! hasDirectories "${VDM_CONTAINER_TYPE}/enabled/"; then
@@ -1530,7 +1404,7 @@ function fixContainerPermissions() {
     vdm_fix_me=$(getSelectedDirectories "Select persistent volume to fix." \
       "${VDM_PROJECT_PATH}" "Fix Joomla Permissions")
     # check that we have something, else return to main menu
-    if [ ${#vdm_fix_me} -ge 1 ]; then
+    if [ ${#vdm_fix_me} -ge 1 ] && (whiptail --yesno "${USER^}, to fix these permissions we need sudo privileges." --title "Give sudo Privileges" 8 112); then
       # convert the string to and array
       IFS=' ' read -r -a vdm_fix_me_array <<<"${vdm_fix_me[@]}"
       # loop over the directories to build the
@@ -1540,10 +1414,11 @@ function fixContainerPermissions() {
         # make sure this is a joomla system
         if [ -d "${VDM_PROJECT_PATH}/${persistent}/joomla" ]; then
           ### Fix the folder ownership of Joomla folders
+          # id -u www-data
+          # getent group www-data | awk -F: '{printf "Group %s with GID=%d\n", $1, $3}'
+          echo "Fixing the folder ownership of ${persistent} Joomla folders to belong to 33:www-data"
           #
-          echo "Fixing the folder ownership of ${persistent} Joomla folders"
-          #
-          sudo chown -R www-data:www-data "${VDM_PROJECT_PATH}/${persistent}/joomla"
+          sudo chown -R 33:33 "${VDM_PROJECT_PATH}/${persistent}/joomla"
           ### Fix the folder permissions for the Joomla websites
           #
           echo "Fixing the file and folder permissions for the ${persistent} Joomla website"
@@ -1572,10 +1447,11 @@ function fixContainerPermissions() {
             echo "[ERROR] You will need to install: setfacl for this option to work, then run this fix again."
           fi
           ### Fix the folder ownership of database folders
+          # id -u systemd-coredump
+          # getent group systemd-coredump | awk -F: '{printf "Group %s with GID=%d\n", $1, $3}'
+          echo "Fixing the folder ownership of ${persistent} database folders to belong to 999:systemd-coredump"
           #
-          echo "Fixing the folder ownership of ${persistent} database folders"
-          #
-          sudo chown -R systemd-coredump:systemd-coredump "${VDM_PROJECT_PATH}/${persistent}/db"
+          sudo chown -R 999:999 "${VDM_PROJECT_PATH}/${persistent}/db"
           ### Fix the folder permissions for the database files
           #
           echo "Fixing the file and folder permissions for the ${persistent} database files"
@@ -1615,7 +1491,7 @@ function deletePersistentVolumes() {
         persistent="${volumes//\"/}"
         # last serious check and then its gone
         if [ -d "${VDM_PROJECT_PATH}/${persistent}" ] &&
-          (whiptail --yesno "Are you absolutely sure you would like to delete this (${persistent}) persistent volume? THIS CAN'T BE UNDONE!" --title "Delete Persistent Volume" 15 112); then
+          (whiptail --yesno "Are you absolutely sure you would like to delete this (${persistent}) persistent volume? THIS CAN'T BE UNDONE!\n(we need sudo privileges)" --title "Delete Persistent Volume" 15 112); then
           # then remove soft link
           sudo rm -rf "${VDM_PROJECT_PATH}/${persistent}"
         fi
@@ -1628,42 +1504,45 @@ function deletePersistentVolumes() {
 
 # make an update
 function runUpdate() {
-  # check that we have an access token
-  getAccessToken || return 1
-  # remove the current version
-  if [ -f /usr/local/bin/docker-deploy ]; then
-    # just backup in case of failure
-    sudo mv /usr/local/bin/docker-deploy /usr/local/bin/docker-deploy.bak
-  fi
-  # some local values
-  local branch
-  # get the target branch to use in our update
-  branch=$(getTargetBranch)
-  # pull the latest version. Master is always the latest
-  if sudo curl --fail -L "https://git.vdm.dev/api/v1/repos/octoleo/docker-deploy/raw/src/docker-deploy?ref=${branch:-master}&access_token=${VDM_ACCESS_TOKEN}" -o /usr/local/bin/docker-deploy 2>/dev/null; then
-    # give success message
-    echo "SUCCESS: Update was successful."
-    # do we have a backup
-    if [ -f /usr/local/bin/docker-deploy.bak ]; then
-      # lets remove it now
-      sudo rm -f /usr/local/bin/docker-deploy.bak
+  # we need sudo permissions
+  if (whiptail --yesno "${USER^}, to update ${PROGRAM_NAME} we need sudo privileges." --title "Give sudo Privileges" 8 112); then
+    # check that we have an access token
+    getAccessToken || return 1
+    # remove the current version
+    if [ -f /usr/local/bin/docker-deploy ]; then
+      # just backup in case of failure
+      sudo mv /usr/local/bin/docker-deploy /usr/local/bin/docker-deploy.bak
     fi
-  else
-    # show the error
-    echo >&2 "ERROR: Update failed! Please try again later."
-    # do we have a backup
-    if [ -f /usr/local/bin/docker-deploy.bak ]; then
-      # move backup back
-      sudo mv /usr/local/bin/docker-deploy.bak /usr/local/bin/docker-deploy
+    # some local values
+    local branch
+    # get the target branch to use in our update
+    branch=$(getTargetBranch)
+    # pull the latest version. Master is always the latest
+    if sudo curl --fail -L "https://git.vdm.dev/api/v1/repos/octoleo/docker-deploy/raw/src/docker-deploy?ref=${branch:-master}&access_token=${VDM_ACCESS_TOKEN}" -o /usr/local/bin/docker-deploy 2>/dev/null; then
+      # give success message
+      echo "SUCCESS: Update was successful."
+      # do we have a backup
+      if [ -f /usr/local/bin/docker-deploy.bak ]; then
+        # lets remove it now
+        sudo rm -f /usr/local/bin/docker-deploy.bak
+      fi
+    else
+      # show the error
+      echo >&2 "ERROR: Update failed! Please try again later."
+      # do we have a backup
+      if [ -f /usr/local/bin/docker-deploy.bak ]; then
+        # move backup back
+        sudo mv /usr/local/bin/docker-deploy.bak /usr/local/bin/docker-deploy
+      fi
     fi
+    # always set the permission again if we have a file
+    if [ -f /usr/local/bin/docker-deploy ]; then
+      # the we make sure its executable
+      sudo chmod +x /usr/local/bin/docker-deploy
+    fi
+    # always exit so the new script can load
+    exit 0
   fi
-  # always set the permission again if we have a file
-  if [ -f /usr/local/bin/docker-deploy ]; then
-    # the we make sure its executable
-    sudo chmod +x /usr/local/bin/docker-deploy
-  fi
-  # always exit so the new script can load
-  exit 0
 }
 
 # make an uninstall
@@ -1672,7 +1551,7 @@ function runUninstall() {
   showNotice "We have three uninstall options: 1) Complete. 2) Just Script. 3) Make your selection."
   # first safety check
   if (whiptail --yesno "We are just trying to be careful here, therefore we have a few questions. Please remember there is an auto update option!\n\
-    Are you absolutely sure you want to continue with the uninstalling process?" --defaultno --title "Uninstalling ${PROGRAM_NAME} v${_VERSION} " 12 112); then
+    Are you absolutely sure you want to continue with the uninstalling process?\n(we need sudo privileges)" --defaultno --title "Uninstalling ${PROGRAM_NAME} v${_VERSION} " 15 112); then
     # we have four main options
     if (whiptail --yesno "Okay, So do you want to completely remove everything? This is the most dangerous option! IT CAN'T BE UNDONE!\
       We will remove literally everything like this script was never here." --defaultno --title "Complete Uninstall of ${PROGRAM_NAME} v${_VERSION} " 12 112); then
@@ -1745,7 +1624,7 @@ function runUninstall() {
         # take down all joomla containers
         downContainers 'joomla'
         # remove all enabled
-        rm -fr "${VDM_REPO_PATH}/joomla/enabled"
+        sudo rm -fr "${VDM_REPO_PATH}/joomla/enabled"
       fi
       # Remove all of Openssh Docker stuff
       if [ -d "${VDM_REPO_PATH}/openssh" ] &&
@@ -1761,7 +1640,7 @@ function runUninstall() {
         # take down all joomla containers
         downContainers 'openssh'
         # remove all enabled
-        rm -fr "${VDM_REPO_PATH}/openssh/enabled"
+        sudo rm -fr "${VDM_REPO_PATH}/openssh/enabled"
       fi
       # ----------------------------------------------------- SINGLE CONTAINER
       # Remove all of Portainer Docker stuff
@@ -1865,9 +1744,6 @@ function showJoomla() {
   menu_options+=("back" "<-- Return to the main menu.")
   # setup new container
   menu_options+=("setup" "Setup new container")
-  # list available container
-  hasDirectories 'joomla/available' &&
-    menu_options+=("edit" "Edit available container") && i=$((i + 1))
   # enable existing container
   hasDirectories 'joomla/available' &&
     menu_options+=("enable" "Enable existing container") && i=$((i + 1))
@@ -1880,6 +1756,9 @@ function showJoomla() {
   # pull up all enabled containers
   hasDirectories 'joomla/enabled' &&
     menu_options+=("up" "Pull up all enabled containers") && i=$((i + 1))
+  # edit available container
+  hasDirectories 'joomla/available' &&
+    menu_options+=("edit" "Edit available container") && i=$((i + 1))
   # fix permissions
   hasDirectories '' "${VDM_PROJECT_PATH}" &&
     menu_options+=("fix" "Fix permissions of folders and files of a container") &&
@@ -1933,9 +1812,6 @@ function showOpenssh() {
   menu_options+=("back" "<-- Return to the main menu.")
   # setup new container
   menu_options+=("setup" "Setup new container")
-  # list available container
-  hasDirectories 'openssh/available' &&
-    menu_options+=("edit" "Edit available container") && i=$((i + 1))
   # enable existing container
   hasDirectories 'openssh/available' &&
     menu_options+=("enable" "Enable existing container") && i=$((i + 1))
@@ -1948,6 +1824,9 @@ function showOpenssh() {
   # pull up all enabled containers
   hasDirectories 'openssh/enabled' &&
     menu_options+=("up" "Pull up all enabled containers") && i=$((i + 1))
+  # edit available container
+  hasDirectories 'openssh/available' &&
+    menu_options+=("edit" "Edit available container") && i=$((i + 1))
   # delete a container
   hasDirectories 'openssh/available' &&
     menu_options+=("delete" "Delete a container") && i=$((i + 1))
@@ -1994,15 +1873,15 @@ function showTraefik() {
   menu_options+=("back" "<-- Return to the main menu.")
   # setup new container
   menu_options+=("setup" "Setup or rebuild Traefik")
-  # edit available container
-  [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
-    menu_options+=("edit" "Edit Traefik") && i=$((i + 1))
   # enable existing container
   [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
     menu_options+=("enable" "Enable Traefik") && i=$((i + 1))
   # disable enabled container
   [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
     menu_options+=("disable" "Disable Traefik") && i=$((i + 1))
+  # edit available container
+  [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
+    menu_options+=("edit" "Edit Traefik") && i=$((i + 1))
   # delete traefik container
   [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
     menu_options+=("delete" "Delete Traefik") && i=$((i + 1))
@@ -2043,15 +1922,15 @@ function showPortainer() {
   menu_options+=("back" "<-- Return to the main menu.")
   # setup new container
   menu_options+=("setup" "Setup or rebuild Portainer")
-  # edit available container
-  [ -f "${VDM_REPO_PATH}/portainer/docker-compose.yml" ] &&
-    menu_options+=("edit" "Edit Portainer") && i=$((i + 1))
   # enable existing container
   [ -f "${VDM_REPO_PATH}/portainer/docker-compose.yml" ] &&
     menu_options+=("enable" "Enable Portainer") && i=$((i + 1))
   # disable enabled container
   [ -f "${VDM_REPO_PATH}/portainer/docker-compose.yml" ] &&
     menu_options+=("disable" "Disable Portainer") && i=$((i + 1))
+  # edit available container
+  [ -f "${VDM_REPO_PATH}/portainer/docker-compose.yml" ] &&
+    menu_options+=("edit" "Edit Portainer") && i=$((i + 1))
   # delete traefik container
   [ -f "${VDM_REPO_PATH}/portainer/docker-compose.yml" ] &&
     menu_options+=("delete" "Delete Portainer") && i=$((i + 1))
@@ -2132,6 +2011,37 @@ function showHelpMenu() {
   esac
 }
 
+# show domains menu
+function domainsMenu() {
+  # menu for dynamic addition
+  local menu_options=()
+  # our counter
+  local i=2
+  # load the back menu
+  menu_options+=("back" "<-- Return to the main menu.")
+  # add more domains
+  menu_options+=("add" "Add Domain")
+  # remove existing domains
+  [ -f "${VDM_SRC_PATH}/.domains" ] &&
+    menu_options+=("delete" "Delete Domain") && i=$((i + 1))
+  # get the selection
+  CHOICE=$(
+    whiptail --menu "Make your selection" 16 112 $i \
+      --title "Help Menu | ${PROGRAM_NAME} v${_V}" --fb \
+      --backtitle "    Octoleo" --nocancel --notags \
+      "${menu_options[@]}" 3>&2 2>&1 1>&3
+  )
+
+  case $CHOICE in
+  "add")
+    setMultiDomains
+    ;;
+  "delete")
+    deleteMultiDomains
+    ;;
+  esac
+}
+
 # MAIN MENU
 function mainMenu() {
   # menu for dynamic addition
@@ -2146,6 +2056,9 @@ function mainMenu() {
   menu_options+=("traefik" "Traefik Container")
   # Portainer container
   menu_options+=("portainer" "Portainer Container")
+  # Manage Domains
+  allowMultiDomains &&
+    menu_options+=("domains" "Manage Domains") && i=$((i + 1))
   # Delete Persistent Volumes
   hasDirectories '' "${VDM_PROJECT_PATH}" &&
     menu_options+=("delete" "Delete Persistent Volumes") && i=$((i + 1))
@@ -2174,6 +2087,9 @@ function mainMenu() {
       ;;
     "portainer")
       showPortainer
+      ;;
+    "domains")
+      domainsMenu
       ;;
     "delete")
       deletePersistentVolumes
@@ -2268,13 +2184,6 @@ function showJoomlaConfigDetails() {
   whiptail --msgbox "${message}" --fb --backtitle "    Octoleo" 30 112
 }
 
-# we must get a random key
-function getRandomPass() {
-  # simple basic random
-  # shellcheck disable=SC2046
-  echo $(tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | dd bs="${1:-128}" count=1 status=none)
-}
-
 # check if a Directory exist and if it has sub-directories
 function hasDirectories() {
   # shellcheck disable=SC2046
@@ -2283,6 +2192,13 @@ function hasDirectories() {
     return 0
   fi
   return 1
+}
+
+# we must get a random key
+function getRandomPass() {
+  # simple basic random
+  # shellcheck disable=SC2046
+  echo $(tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | dd bs="${1:-128}" count=1 status=none)
 }
 
 # get input from user
@@ -2424,6 +2340,294 @@ function getTargetBranch() {
   echo "${answer:-master}"
 }
 
+# get a list of domains locally set
+function getListDomains() {
+  # get the separator
+  local separator="${1}"
+  # menu for dynamic addition
+  local menu_options=()
+  local domains
+  # get existing domains
+  if [ -f "${VDM_SRC_PATH}/.domains" ] && readarray -t domains <"${VDM_SRC_PATH}/.domains"; then
+    # check that we have values
+    if [ "${#domains[@]}" -gt 0 ]; then
+      # build the menu
+      for domain in "${domains[@]}"; do
+        # load the back menu
+        menu_options+=("${domain}")
+      done
+      # we show a list of options including the option to add another
+      echo "$(printf "${separator}%s" "${menu_options[@]}")"
+    fi
+  fi
+}
+
+# to set a global multiple domains file and values
+function getMultiDomain() {
+  # we set some local stuff
+  local domain_name
+  local domains
+  # menu for dynamic addition
+  local menu_options=()
+  # our counter
+  local i=0
+  # always add the main domain or (default) first
+  # so we should always have a selection
+  setMultiDomain "${VDM_DOMAIN:-${USER:-joomla}.vdm}"
+  # now clear the main domain (in case we use getDomain)
+  unset VDM_DOMAIN
+  # get existing domains
+  if [ -f "${VDM_SRC_PATH}/.domains" ] && readarray -t domains <"${VDM_SRC_PATH}/.domains"; then
+    # build the menu
+    if [ "${#domains[@]}" -gt 0 ]; then
+      for domain in "${domains[@]}"; do
+        # load the back menu
+        menu_options+=("${domain}" "${domain}" "OFF")
+        # increment our counter
+        i=$((i + 1))
+      done
+      # we show a list of options including the option to add another
+      domain_name=$(whiptail --title "Select a Domain" --radiolist --nocancel --notags \
+        "Select a domain, or none to add another." 30 80 $i \
+        "${menu_options[@]}" 3>&1 1>&2 2>&3)
+    fi
+  fi
+  # check if we have a selection
+  if [ "${domain_name:-none}" = 'none' ]; then
+    # we must let them enter the new domain name
+    domain_name=$(getDomain "Enter a domain name" "Enter a Domain Name")
+  fi
+  # add for next time
+  setMultiDomain "${domain_name:-${USER:-joomla}.vdm}"
+  # update the main domain
+  echo "${domain_name:-${USER:-joomla}.vdm}"
+}
+
+# set the VDM domain value
+function getDomain() {
+  # get the VDM Domain value if not already set
+  while [ ${#VDM_DOMAIN} -le 1 ] || [[ "${VDM_DOMAIN}" != *.* ]]; do
+    # get the value
+    VDM_DOMAIN=$(getInput "${1:-Enter main domain name.}\n[must have at least one dot]" \
+      "${3:-${USER:-joomla}.vdm}" "${2:-Enter Main Domain}")
+    # keep asking if empty or does exist
+    if [ ${#VDM_DOMAIN} -le 1 ]; then
+      showError "${4:-You must enter a domain name!}"
+    elif [[ "${VDM_DOMAIN}" != *.* ]]; then
+      showError "${5:-You must enter a domain name with at least one dot!}"
+    fi
+  done
+  # return what we found
+  echo "${VDM_DOMAIN}"
+}
+
+# set the main domain
+function getMainDomain() {
+  # we first check if we have a main domain passed as command argument
+  if $VDM_ARG_DOMAIN; then
+    # if domain passed by arg we just return it
+    VDM_DOMAIN=$(getDomain "Enter a domain name" "Enter a Domain Name")
+  else
+    # update the main domain with a selection
+    VDM_DOMAIN=$(getMultiDomain)
+  fi
+  # make sure it is available
+  export VDM_DOMAIN
+}
+
+# set the domain
+function setDomain() {
+  # allow multi domain setup
+  if allowMultiDomains; then
+    # select a domain name
+    getMainDomain
+  else
+    # set the main domain if not set
+    setMainDomain
+  fi
+}
+
+# set the main domain
+function setMainDomain() {
+  # set the main domain if not set
+  VDM_DOMAIN=$(getDomain)
+  # add this value if not set variable
+  setEnvVariable "VDM_DOMAIN=\"${VDM_DOMAIN}\""
+  # make sure it is available
+  export VDM_DOMAIN
+}
+
+# set the sub domain
+function setSubDomain() {
+  # make sure it has not been used before,
+  # also make sure its not a port or a ....db
+  while [ ${#VDM_SUBDOMAIN} -le 1 ] || [[ "${VDM_SUBDOMAIN}" =~ [^a-zA-Z] ]] ||
+    [ -d "${VDM_REPO_PATH}/${3:-$VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}" ] ||
+    [ -d "${VDM_REPO_PATH}/${3:-$VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN%db}.${VDM_DOMAIN}" ] ||
+    [ "${VDM_SUBDOMAIN}" = "${2:-}" ]; do
+    # get the value
+    VDM_SUBDOMAIN=$(getInput "Enter sub-domain used for this ${VDM_CONTAINER_TYPE^} container.\n[Text with no spaces that is only alphabetical]" \
+      "${1:-}" 'Enter Sub-Domain')
+    # keep asking if empty or does exist
+    if [ ${#VDM_SUBDOMAIN} -ge 1 ] && [ -d "${VDM_REPO_PATH}/${3:-$VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}" ] ||
+      [ -d "${VDM_REPO_PATH}/${3:-$VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN%db}.${VDM_DOMAIN}" ]; then
+      showError "The sub-domain:${VDM_SUBDOMAIN} is already used. Select another"
+    elif [[ "${VDM_SUBDOMAIN}" =~ [^a-zA-Z] ]]; then
+      showError "You must enter a sub-domain that is only alphabetical!"
+    elif [ ${#VDM_SUBDOMAIN} -le 1 ]; then
+      showError "You must enter a sub-domain!"
+    fi
+  done
+  # make sure it is available
+  export VDM_SUBDOMAIN
+}
+
+# to set a global multiple domains file and values
+function setMultiDomains() {
+  # set some locals
+  local domain_name
+  local list_domains
+  local question
+  # allow multi domain setup
+  if allowMultiDomains; then
+    # get the list of domains
+    list_domains=$(getListDomains "\n")
+    # the question based on current state
+    [ -f "${VDM_SRC_PATH}/.domains" ] && question="Would you like to add another domain to ${PROGRAM_NAME}?\nThese Domains already set:\n${list_domains}" ||
+      question="Would you like to add a domain to ${PROGRAM_NAME}?"
+    # get the key if not set
+    while (whiptail --yesno "${question}" --scrolltext --defaultno --title "Add Domain" 20 112); do
+      # now clear the main domain each time
+      unset VDM_DOMAIN
+      # we must let them enter the new domain name
+      domain_name=$(getDomain "Enter a domain name" "Enter a Domain Name")
+      # add for next time
+      setMultiDomain "${domain_name:-${USER:-joomla}.vdm}" || {
+        # return an error
+        return $?
+      }
+      # get the list of domains
+      list_domains=$(getListDomains "\n")
+      # update the question
+      question="Would you like to add another domain to ${PROGRAM_NAME}?\nThese Domains already set:\n${list_domains}"
+    done
+  fi
+}
+
+# to set a global multiple domain file and values
+function setMultiDomain() {
+  # check if the env file exist
+  if [ -f "${VDM_SRC_PATH}/.domains" ]; then
+    grep -q "${1}" "${VDM_SRC_PATH}/.domains" || echo "${1}" >>"${VDM_SRC_PATH}/.domains"
+  elif (whiptail --yesno "Can we create the ${VDM_SRC_PATH}/.domains file" --title "Multi Domain File" 8 112); then
+    # make sure the folder exist
+    mkdir -p "${VDM_SRC_PATH}"
+    # so we creat the file
+    echo "${1}" >"${VDM_SRC_PATH}/.domains"
+    # make sure the permissions are secured
+    chmod 600 "${VDM_SRC_PATH}/.domains"
+  else
+    showError "The ${VDM_SRC_PATH}/.domains file does not exist. So ${1} could not be added!"
+    # we return false
+    return 12
+  fi
+  # we return true
+  return 0
+}
+
+# set the multi domain switch
+function setMultiDomainSwitch() {
+  # Allow multiple domains
+  if [ "${VDM_MULTI_DOMAIN:-not}" = 'not' ]; then
+    # explain the pros and cons...
+    showNotice "The down side to allowing multiple domains is that you will need to select a main domain each time you setup a new container. The advantage is that you can have multiple domains ;)"
+    # check the security switch
+    if (whiptail --yesno "Would you like to allow for multiple domains?" --defaultno --title "Allow Multi Domains" 8 112); then
+      # we set the secure switch
+      VDM_MULTI_DOMAIN=true
+    else
+      VDM_MULTI_DOMAIN=false
+    fi
+  fi
+  # add this value if not set variable
+  setEnvVariable "VDM_MULTI_DOMAIN=${VDM_MULTI_DOMAIN}"
+  # make sure it is available
+  export VDM_MULTI_DOMAIN
+}
+
+# set the unique key
+function setUniqueKey() {
+  # get the key if not set
+  while [ ${#VDM_KEY} -le 1 ] || [ -d "${VDM_PROJECT_PATH}/${VDM_KEY}" ] || [[ "${VDM_KEY}" =~ [^a-zA-Z] ]]; do
+    # get the value
+    VDM_KEY=$(getInput "${1:-Enter key used for container naming and name of the persistent volume folder.}\n[Text with no spaces that is only alphabetical]" \
+      '' 'Enter Key')
+    # keep asking if empty or does exist
+    if [ ${#VDM_KEY} -ge 1 ] && [ -d "${VDM_PROJECT_PATH}/${VDM_KEY}" ]; then
+      showError "The key:${VDM_KEY} is already used. Select another"
+    elif [[ "${VDM_KEY}" =~ [^a-zA-Z] ]]; then
+      showError "You must enter a key with no spaces that is only alphabetical!"
+    elif [ ${#VDM_KEY} -le 1 ]; then
+      showError "You must enter a key!"
+    fi
+  done
+  # make sure it is available
+  export VDM_KEY
+}
+
+# set the Environment key
+function setEnvironmentKey() {
+  # get the env key if not set
+  while [ ${#VDM_ENV_KEY} -le 1 ] || [[ "${VDM_ENV_KEY}" =~ [^a-zA-Z] ]]; do
+    # get the value
+    VDM_ENV_KEY=$(getInput "Enter environment key used to load the container environment variables.\n[Text with no spaces that is only alphabetical UPPERCASE]" \
+      "${VDM_KEY^^}" 'Enter ENV Key')
+    # keep asking if empty or does exist
+    if [ ${#VDM_ENV_KEY} -le 1 ]; then
+      showError "You must enter an environment key!"
+    elif [[ "${VDM_ENV_KEY}" =~ [^a-zA-Z] ]]; then
+      showError "You must enter an environment key with no spaces that is only alphabetical!"
+    fi
+  done
+  # make sure it is available
+  export VDM_ENV_KEY
+}
+
+# set the update of host files
+function setUpdateHostFile() {
+  # check if we have secure switch set
+  if [ "${VDM_UPDATE_HOST:-not}" = 'not' ]; then
+    # check the security switch
+    if (whiptail --yesno "Would you like to update your host file with each new domain you add?" --defaultno --title "Update /etc/hosts" 8 112); then
+      # we set the secure switch
+      VDM_UPDATE_HOST=true
+    else
+      VDM_UPDATE_HOST=false
+    fi
+  fi
+  # add this value since its not set variable
+  setEnvVariable "VDM_UPDATE_HOST=${VDM_UPDATE_HOST}"
+  # make sure it is available
+  export VDM_UPDATE_HOST
+}
+
+# set the secure state
+function setSecureState() {
+  if [ "${VDM_SECURE:-not}" = 'not' ]; then
+    # check the security switch
+    if (whiptail --yesno "Would you like to use Letsencrypt auto setup for your containers [only for server with public static IP]" --defaultno --title "Letsencrypt" 8 112); then
+      # we set the secure switch
+      VDM_SECURE=true
+    else
+      VDM_SECURE=false
+    fi
+  fi
+  # add this value if not set variable
+  setEnvVariable "VDM_SECURE=${VDM_SECURE}"
+  # make sure it is available
+  export VDM_SECURE
+}
+
 # set the networks in place
 function setNetworks() {
   # we create the networks
@@ -2468,18 +2672,75 @@ function setContainerEnvVariable() {
     chmod 600 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
   else
     showError "The ${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env file does not exist. So ${1} could not be added!"
+    # we return false
+    return 12
   fi
+  # we return true
+  return 0
 }
 
 # take down apache
 function downApache() {
   # make sure port 80 is not used by apache
   command -v apache2 >/dev/null 2>&1 && [[ $(service apache2 status) == *"active (running)"* ]] && {
-    if (whiptail --yesno "Traefik needs port 80/443 and since Apache is also enabled we don't know if is using these ports, so Traefik may not work. Can we disable Apache?" --defaultno --title "Disable Apache" 12 112); then
+    if (whiptail --yesno "Traefik needs port 80/443 and since Apache is also enabled we don't know if is using these ports, so Traefik may not work. Can we disable Apache?\n(we need sudo privileges)" --defaultno --title "Disable Apache" 12 112); then
       sudo systemctl stop apache2.service
       sudo systemctl disable apache2.service
     fi
   }
+}
+
+# do we allow multiple domains
+function allowMultiDomains() {
+  # Allow multiple domains
+  setMultiDomainSwitch
+  # allow multi domain setup
+  if $VDM_MULTI_DOMAIN; then
+    # yes we do
+    return 0
+  fi
+  # now we don't
+  return 12
+}
+
+# delete multiple domains
+function deleteMultiDomains() {
+  # menu for dynamic addition
+  local menu_options=()
+  local domains
+  # our counter
+  local i=0
+  # get existing domains
+  if [ -f "${VDM_SRC_PATH}/.domains" ] && readarray -t domains <"${VDM_SRC_PATH}/.domains"; then
+    # check that we have values
+    if [ "${#domains[@]}" -gt 0 ]; then
+      # build the menu
+      for domain in "${domains[@]}"; do
+        # load the back menu
+        menu_options+=("${domain}" "${domain}" "OFF")
+        # increment our pointer
+        i=$((i + 1))
+      done
+      # now make the selection
+      answer=$(whiptail --title "Delete Domains" --checklist \
+        "Select the domain/s you would like to delete" 20 112 $i \
+        "${menu_options[@]}" --nocancel --notags 3>&1 1>&2 2>&3)
+      # check that we have a selection
+      if [ "${#answer}" -gt 0 ]; then
+        # convert the string to and array
+        IFS=' ' read -r -a array_answer <<<"${answer[@]}"
+        # remove the domains
+        for remove in "${array_answer[@]}"; do
+          # set the full path
+          remove_domain="${remove//\"/}"
+          # shellcheck disable=SC2015
+          grep -vx "${remove_domain}" "${VDM_SRC_PATH}/.domains" >"${VDM_SRC_PATH}/.domains_tmp" &&
+            mv "${VDM_SRC_PATH}/.domains_tmp" "${VDM_SRC_PATH}/.domains" ||
+            rm "${VDM_SRC_PATH}/.domains_tmp"
+        done
+      fi
+    fi
+  fi
 }
 
 # check if some thing is a function
@@ -2489,18 +2750,6 @@ function isFunc() {
 
 # update the host file
 function updateHostFile() {
-  # check if we have secure switch set
-  if [ "${VDM_UPDATE_HOST:-not}" = 'not' ]; then
-    # check the security switch
-    if (whiptail --yesno "Would you like to update your host file with each new domain you add?" --defaultno --title "Update /etc/hosts" 8 112); then
-      # we set the secure switch
-      VDM_UPDATE_HOST=true
-    else
-      VDM_UPDATE_HOST=false
-    fi
-    # add this value since its not set variable
-    setEnvVariable "VDM_UPDATE_HOST=${VDM_UPDATE_HOST}"
-  fi
   # check if we should add to host file
   if $VDM_UPDATE_HOST; then
     # check if already in host file
@@ -2570,22 +2819,21 @@ Usage: ${0##*/:-} [OPTION...]
    -d|--domain <domain.com>
 	set key website domain
 	!! must be domain.tld !!
-	example: ${0##*/:-} -d="vdm.dev"
-	example: ${0##*/:-} --domain="vdm.dev"
-	======================================================
-	AVAILABLE FOR JOOMLA CONTAINER
-	======================================================
-   -j|--joomla-version <version>
-	set Joomla version number
-	!! only number allowed !!
-	example: ${0##*/:-} -j=3.10
-	example: ${0##*/:-} --joomla-version=3.10
+	example: ${0##*/:-} -d="joomla.org"
+	example: ${0##*/:-} --domain="joomla.org"
 	======================================================
    -s|--sub-domain <domain.com>
 	set key website sub domain
 	!! no spaces allowed in the sub domain !!
 	example: ${0##*/:-} -s="jcb"
 	example: ${0##*/:-} --sub-domain="jcb"
+	======================================================
+	AVAILABLE FOR JOOMLA CONTAINER
+	======================================================
+   -j|--joomla-version <version-tag>
+	see available tags here https://hub.docker.com/_/joomla
+	example: ${0##*/:-} -j=3.10
+	example: ${0##*/:-} --joomla-version=3.10
 	======================================================
 	AVAILABLE FOR OPENSSH CONTAINER
 	======================================================
@@ -2641,6 +2889,9 @@ EOF
 
 #####################################################################################################################VDM
 ######################################## CLI INPUT ¯\_(ツ)_/¯
+
+# defaults
+VDM_ARG_DOMAIN=false
 
 # check if we have options
 while :; do
@@ -2772,6 +3023,8 @@ while :; do
   -d | --domain) # Takes an option argument; ensure it has been specified.
     if [ "$2" ]; then
       VDM_DOMAIN=$2
+      # set the ARG domain as true
+      VDM_ARG_DOMAIN=true
       shift
     else
       showError '"--domain" requires a non-empty option argument.'
@@ -2780,6 +3033,8 @@ while :; do
     ;;
   -d=?* | --domain=?*)
     VDM_DOMAIN=${1#*=} # Delete everything up to "=" and assign the remainder.
+    # set the ARG domain as true
+    VDM_ARG_DOMAIN=true
     ;;
   -d= | --domain=) # Handle the case of an empty --domain=
     showError '"--domain=" requires a non-empty option argument.'
@@ -2993,6 +3248,9 @@ while [ ${#VDM_PROJECT_PATH} -le 1 ] || [ ! -d "${VDM_PROJECT_PATH}" ]; do
 done
 # add this value if not set variable
 setEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
+# set these globally
+export VDM_REPO_PATH
+export VDM_PROJECT_PATH
 
 #####################################################################################################################VDM
 ######################################## MAIN ┬┴┬┴┤(･_├┬┴┬┴
@@ -3005,6 +3263,7 @@ unset VDM_SRC_PATH
 unset VDM_REPO_PATH
 unset VDM_PROJECT_PATH
 unset VDM_DOMAIN
+unset VDM_MULTI_DOMAIN
 unset VDM_SECURE
 unset VDM_UPDATE_HOST
 unset VDM_CONTAINER

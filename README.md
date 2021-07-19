@@ -81,22 +81,21 @@ Usage: docker-deploy [OPTION...]
    -d|--domain <domain.com>
 	set key website domain
 	!! must be domain.tld !!
-	example: docker-deploy -d="vdm.dev"
-	example: docker-deploy --domain="vdm.dev"
-	======================================================
-	AVAILABLE FOR JOOMLA CONTAINER
-	======================================================
-   -j|--joomla-version <version>
-	set Joomla version number
-	!! only number allowed !!
-	example: docker-deploy -j=3.10
-	example: docker-deploy --joomla-version=3.10
+	example: docker-deploy -d="joomla.org"
+	example: docker-deploy --domain="joomla.org"
 	======================================================
    -s|--sub-domain <domain.com>
 	set key website sub domain
 	!! no spaces allowed in the sub domain !!
 	example: docker-deploy -s="jcb"
 	example: docker-deploy --sub-domain="jcb"
+	======================================================
+	AVAILABLE FOR JOOMLA CONTAINER
+	======================================================
+   -j|--joomla-version <version-tag>
+	see available tags here https://hub.docker.com/_/joomla
+	example: docker-deploy -j=3.10
+	example: docker-deploy --joomla-version=3.10
 	======================================================
 	AVAILABLE FOR OPENSSH CONTAINER
 	======================================================
@@ -145,7 +144,7 @@ Usage: docker-deploy [OPTION...]
 	example: docker-deploy -h
 	example: docker-deploy --help
 	======================================================
-			Docker Deploy v2.0
+			Docker Deployment v2.1.0
 	======================================================
 ```
 ---
