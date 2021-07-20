@@ -176,8 +176,6 @@ function portainer__TRuST__setup() {
   # container
   export VDM_REMOVE_SECURE
   export VDM_ENTRY_POINT
-  # set the update of the host file once
-  setUpdateHostFile
   # set host file if needed
   updateHostFile
   ## create the directory if it does not yet already exist
@@ -376,8 +374,6 @@ function joomla__TRuST__setup() {
   export vdm_database_user
   export vdm_database_pass
   export vdm_database_rootpass
-  # set the update of the host file once
-  setUpdateHostFile
   # set host file if needed
   updateHostFile
   # also set the database domain
@@ -2020,14 +2016,18 @@ function domainsMenu() {
   # load the back menu
   menu_options+=("back" "<-- Return to the main menu.")
   # add more domains
-  menu_options+=("add" "Add Domain")
+  allowMultiDomains &&
+    menu_options+=("add" "Add Domain") && i=$((i + 1))
   # remove existing domains
   [ -f "${VDM_SRC_PATH}/.domains" ] &&
     menu_options+=("delete" "Delete Domain") && i=$((i + 1))
+  # edit available container
+  allowEditHostFile &&
+    menu_options+=("edit" "Edit Host File") && i=$((i + 1))
   # get the selection
   CHOICE=$(
     whiptail --menu "Make your selection" 16 112 $i \
-      --title "Help Menu | ${PROGRAM_NAME} v${_V}" --fb \
+      --title "Domains Menu | ${PROGRAM_NAME} v${_V}" --fb \
       --backtitle "    Octoleo" --nocancel --notags \
       "${menu_options[@]}" 3>&2 2>&1 1>&3
   )
@@ -2039,6 +2039,9 @@ function domainsMenu() {
   "delete")
     deleteMultiDomains
     ;;
+  "edit")
+    editHostFile
+    ;;
   esac
 }
 
@@ -2047,7 +2050,7 @@ function mainMenu() {
   # menu for dynamic addition
   local menu_options=()
   # our counter
-  local i=9
+  local i=6
   # Joomla containers
   menu_options+=("joomla" "Joomla Containers")
   # Openssh containers
@@ -2057,8 +2060,10 @@ function mainMenu() {
   # Portainer container
   menu_options+=("portainer" "Portainer Container")
   # Manage Domains
-  allowMultiDomains &&
-    menu_options+=("domains" "Manage Domains") && i=$((i + 1))
+  if allowEditHostFile || allowMultiDomains; then
+    menu_options+=("domains" "Manage Domains")
+    i=$((i + 1))
+  fi
   # Delete Persistent Volumes
   hasDirectories '' "${VDM_PROJECT_PATH}" &&
     menu_options+=("delete" "Delete Persistent Volumes") && i=$((i + 1))
@@ -2198,6 +2203,7 @@ function hasDirectories() {
 function getRandomPass() {
   # simple basic random
   # shellcheck disable=SC2046
+  # shellcheck disable=SC2005
   echo $(tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | dd bs="${1:-128}" count=1 status=none)
 }
 
@@ -2357,6 +2363,7 @@ function getListDomains() {
         menu_options+=("${domain}")
       done
       # we show a list of options including the option to add another
+      # shellcheck disable=SC2005
       echo "$(printf "${separator}%s" "${menu_options[@]}")"
     fi
   fi
@@ -2703,6 +2710,19 @@ function allowMultiDomains() {
   return 12
 }
 
+# do we allow multiple domains
+function allowEditHostFile() {
+  # check if we allow host file updates
+  setUpdateHostFile
+  # allow multi domain setup
+  if $VDM_UPDATE_HOST; then
+    # yes we do
+    return 0
+  fi
+  # now we don't
+  return 12
+}
+
 # delete multiple domains
 function deleteMultiDomains() {
   # menu for dynamic addition
@@ -2751,7 +2771,7 @@ function isFunc() {
 # update the host file
 function updateHostFile() {
   # check if we should add to host file
-  if $VDM_UPDATE_HOST; then
+  if allowEditHostFile; then
     # check if already in host file
     if grep -q "${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN}" /etc/hosts; then
       showNotice "${USER^}, ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} is already in the /etc/hosts file."
@@ -2760,6 +2780,18 @@ function updateHostFile() {
       echo "127.0.0.1       ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN}" | sudo tee -a /etc/hosts >/dev/null
       # show notice
       showNotice "${USER^}, ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} was added to the /etc/hosts file."
+    fi
+  fi
+}
+
+# the manually edit the host file
+function editHostFile() {
+  # check if we should add to host file
+  if allowEditHostFile; then
+    # if this container is enabled ask if it should be redeployed
+    if (whiptail --yesno "To edit the host file we need sudo privileges." --title "Give sudo Privileges" 8 112); then
+      # lets open the file with nano for now
+      sudo "${EDITOR:-nano}" /etc/hosts
     fi
   fi
 }
