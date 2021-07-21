@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="2.1.0"
+_VERSION="2.1.1"
 _V="2.1"
 
 # The program full name
@@ -712,7 +712,7 @@ function joomla__TRuST__edit() {
     local vdm_edit_me
     local container
     # list containers... and allow selection to edit
-    container=$(getSelectedDirectory "Select a container to manually edit if you like." \
+    container=$(getSelectedDirectory "Select a container to manually edit the docker-composer.yml file.\n[Only continue if you know what your doing!]" \
       "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" '' "Edit ${VDM_CONTAINER_TYPE^} Container")
     # check that we have something, else return to main menu
     if [ ${#container} -ge 1 ]; then
@@ -720,6 +720,8 @@ function joomla__TRuST__edit() {
       vdm_edit_me="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}/docker-compose.yml"
       # check if this docker-composer.yml exist
       if [ -f "${vdm_edit_me}" ]; then
+        # give little heads-up
+         showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
         # lets open the file with nano for now
         "${EDITOR:-nano}" "${vdm_edit_me}"
         # if this container is enabled ask if it should be redeployed
@@ -746,7 +748,7 @@ function openssh__TRuST__edit() {
     local vdm_edit_me
     local container
     # list containers... and allow selection to edit
-    container=$(getSelectedDirectory "Select a container to manually edit if you like." \
+    container=$(getSelectedDirectory "Select a container to manually edit the docker-composer.yml file.\n[Only continue if you know what your doing!]" \
       "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" '' "Edit ${VDM_CONTAINER_TYPE^} Container")
     # check that we have something, else return to main menu
     if [ ${#container} -ge 1 ]; then
@@ -754,6 +756,8 @@ function openssh__TRuST__edit() {
       vdm_edit_me="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}/docker-compose.yml"
       # check if this docker-composer.yml exist
       if [ -f "${vdm_edit_me}" ]; then
+        # give little heads-up
+         showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
         # lets open the file with nano for now
         "${EDITOR:-nano}" "${vdm_edit_me}"
         # if this container is enabled ask if it should be redeployed
@@ -776,12 +780,17 @@ function traefik__TRuST__edit() {
   if [ ! -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" ]; then
     showError "There is no ${VDM_CONTAINER_TYPE^} container to edit."
   else
-    # lets open the file with nano for now
-    "${EDITOR:-nano}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml"
-    # if this container is enabled ask if it should be redeployed
-    if (whiptail --yesno "Would you like to deploy or re-deploy the ${VDM_CONTAINER_TYPE^} container that you opened to edit?" --title "Deploy or Re-Deploy Container" 8 112); then
-      # then we enable it
-      enableContainer "${VDM_CONTAINER_TYPE}"
+    # give little warning for less command ready people
+    if (whiptail --yesno "Only continue if you know what your doing!\n\n\
+    ${USER^}, to save the changes you've made or to just close the file again press:\n\n\
+      [ctrl+x] with nano on ubuntu." --title "Continue to edit ${VDM_CONTAINER_TYPE^} config." 15 112); then
+      # lets open the file with nano for now
+      "${EDITOR:-nano}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml"
+      # if this container is enabled ask if it should be redeployed
+      if (whiptail --yesno "Would you like to deploy or re-deploy the ${VDM_CONTAINER_TYPE^} container that you opened to edit?" --title "Deploy or Re-Deploy Container" 8 112); then
+        # then we enable it
+        enableContainer "${VDM_CONTAINER_TYPE}"
+      fi
     fi
   fi
 }
@@ -793,12 +802,17 @@ function portainer__TRuST__edit() {
   if [ ! -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" ]; then
     showError "There is no ${VDM_CONTAINER_TYPE^} container to edit."
   else
-    # lets open the file with nano for now
-    "${EDITOR:-nano}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml"
-    # if this container is enabled ask if it should be redeployed
-    if (whiptail --yesno "Would you like to deploy or re-deploy the ${VDM_CONTAINER_TYPE^} container that you opened to edit?" --title "Deploy or Re-Deploy Container" 8 112); then
-      # then we enable it
-      enableContainer "${VDM_CONTAINER_TYPE}"
+    # give little warning for less command ready people
+    if (whiptail --yesno "Only continue if you know what your doing!\n\n\
+    ${USER^}, to save the changes you've made or to just close the file again press:\n\n\
+      [ctrl+x] with nano on ubuntu." --title "Continue to edit ${VDM_CONTAINER_TYPE^} config." 15 112); then
+      # lets open the file with nano for now
+      "${EDITOR:-nano}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml"
+      # if this container is enabled ask if it should be redeployed
+      if (whiptail --yesno "Would you like to deploy or re-deploy the ${VDM_CONTAINER_TYPE^} container that you opened to edit?" --title "Deploy or Re-Deploy Container" 8 112); then
+        # then we enable it
+        enableContainer "${VDM_CONTAINER_TYPE}"
+      fi
     fi
   fi
 }
@@ -1969,6 +1983,9 @@ function showHelpMenu() {
   menu_options+=("command-help" "Help with commands")
   # Show folder paths
   menu_options+=("important-paths" "Important paths")
+  # Edit the global config
+  [ -f "${VDM_SRC_PATH}/.env" ] &&
+    menu_options+=("edit-config" "Edit Config") && i=$((i + 1))
   # Report an Issue
   menu_options+=("report-issue" "Report an issue")
   # Update the whole script
@@ -1991,6 +2008,9 @@ function showHelpMenu() {
     ;;
   "important-paths")
     showImportantPaths
+    ;;
+  "edit-config")
+    editConfigFile
     ;;
   "report-issue")
     showLink "https://git.vdm.dev/octoleo/docker-deploy/issues" "To report an issue go to:" "Report an Issue"
@@ -2112,17 +2132,17 @@ function mainMenu() {
 
 # show error
 function showError() {
-  whiptail --title "ERROR | ${PROGRAM_NAME} v${_V}" --msgbox "${1}" 12 112
+  whiptail --title "ERROR | ${PROGRAM_NAME} v${_V}" --msgbox "${1}" "${2:-12}" 112
 }
 
 # show info
 function showInfo() {
-  whiptail --title "INFO | ${PROGRAM_NAME} v${_V}" --infobox "${1}" 12 112
+  whiptail --title "INFO | ${PROGRAM_NAME} v${_V}" --infobox "${1}" "${2:-12}" 112
 }
 
 # show notice
 function showNotice() {
-  whiptail --title "NOTICE | ${PROGRAM_NAME} v${_V}" --msgbox "${1}" 12 112
+  whiptail --title "NOTICE | ${PROGRAM_NAME} v${_V}" --msgbox "${1}" "${2:-12}" 112
 }
 
 # show link
@@ -2360,7 +2380,7 @@ function getListDomains() {
       # build the menu
       for domain in "${domains[@]}"; do
         # load the back menu
-        menu_options+=("${domain}")
+        [ "${#domain}" -ge 1 ] && menu_options+=("${domain}")
       done
       # we show a list of options including the option to add another
       # shellcheck disable=SC2005
@@ -2380,52 +2400,66 @@ function getMultiDomain() {
   local i=0
   # always add the main domain or (default) first
   # so we should always have a selection
-  setMultiDomain "${VDM_DOMAIN:-${USER:-joomla}.vdm}"
+  saveMultiDomain "${VDM_DOMAIN}"
   # now clear the main domain (in case we use getDomain)
   unset VDM_DOMAIN
   # get existing domains
   if [ -f "${VDM_SRC_PATH}/.domains" ] && readarray -t domains <"${VDM_SRC_PATH}/.domains"; then
     # build the menu
     if [ "${#domains[@]}" -gt 0 ]; then
+      # loop domains
       for domain in "${domains[@]}"; do
-        # load the back menu
-        menu_options+=("${domain}" "${domain}" "OFF")
+        # load the domain if it has a length
+        [ "${#domain}" -ge 1 ] && menu_options+=("${domain}" "${domain}" "OFF")
         # increment our counter
-        i=$((i + 1))
+        [ "${#domain}" -ge 1 ] && i=$((i + 1))
       done
-      # we show a list of options including the option to add another
-      domain_name=$(whiptail --title "Select a Domain" --radiolist --nocancel --notags \
-        "Select a domain, or none to add another." 30 80 $i \
-        "${menu_options[@]}" 3>&1 1>&2 2>&3)
+      # make sure we have domains
+      if [ "${#menu_options[@]}" -gt 0 ]; then
+        # we show a list of options including the option to add another
+        domain_name=$(whiptail --title "Select a Domain" --radiolist --nocancel --notags \
+          "Select a domain, or none to add another." 30 80 $i \
+          "${menu_options[@]}" 3>&1 1>&2 2>&3)
+      fi
     fi
   fi
   # check if we have a selection
   if [ "${domain_name:-none}" = 'none' ]; then
     # we must let them enter the new domain name
-    domain_name=$(getDomain "Enter a domain name" "Enter a Domain Name")
+    getDomain 'Enter a domain name' 'Enter a Domain Name'
+  else
+    # set the new main domain
+    VDM_DOMAIN="${domain_name}"
+    # update the main domain
+    export VDM_DOMAIN
   fi
   # add for next time
-  setMultiDomain "${domain_name:-${USER:-joomla}.vdm}"
-  # update the main domain
-  echo "${domain_name:-${USER:-joomla}.vdm}"
+  saveMultiDomain "${VDM_DOMAIN}"
 }
 
 # set the VDM domain value
 function getDomain() {
+  # set some locals
+  local message="Enter main domain name"
+  local title="Enter Main Domain"
+  local tld="${VDM_CONTAINER_TYPE:-vdm}"
+  # get the arg passed if any
+  message="${1:-$message}"
+  title="${2:-$title}"
   # get the VDM Domain value if not already set
   while [ ${#VDM_DOMAIN} -le 1 ] || [[ "${VDM_DOMAIN}" != *.* ]]; do
     # get the value
-    VDM_DOMAIN=$(getInput "${1:-Enter main domain name.}\n[must have at least one dot]" \
-      "${3:-${USER:-joomla}.vdm}" "${2:-Enter Main Domain}")
+    VDM_DOMAIN=$(getInput "${message}\n[must have at least one dot]" \
+      "${USER:-octoleo}.${tld,,}" "${title}")
     # keep asking if empty or does exist
     if [ ${#VDM_DOMAIN} -le 1 ]; then
-      showError "${4:-You must enter a domain name!}"
+      showError "You must enter a domain name!"
     elif [[ "${VDM_DOMAIN}" != *.* ]]; then
-      showError "${5:-You must enter a domain name with at least one dot!}"
+      showError "You must enter a domain name with at least one dot"
     fi
   done
-  # return what we found
-  echo "${VDM_DOMAIN}"
+  # update the main domain
+  export VDM_DOMAIN
 }
 
 # set the main domain
@@ -2433,13 +2467,11 @@ function getMainDomain() {
   # we first check if we have a main domain passed as command argument
   if $VDM_ARG_DOMAIN; then
     # if domain passed by arg we just return it
-    VDM_DOMAIN=$(getDomain "Enter a domain name" "Enter a Domain Name")
+    getDomain 'Enter a domain name' 'Enter a Domain Name'
   else
     # update the main domain with a selection
-    VDM_DOMAIN=$(getMultiDomain)
+    getMultiDomain
   fi
-  # make sure it is available
-  export VDM_DOMAIN
 }
 
 # set the domain
@@ -2457,11 +2489,9 @@ function setDomain() {
 # set the main domain
 function setMainDomain() {
   # set the main domain if not set
-  VDM_DOMAIN=$(getDomain)
+  getDomain
   # add this value if not set variable
   setEnvVariable "VDM_DOMAIN=\"${VDM_DOMAIN}\""
-  # make sure it is available
-  export VDM_DOMAIN
 }
 
 # set the sub domain
@@ -2471,10 +2501,10 @@ function setSubDomain() {
   while [ ${#VDM_SUBDOMAIN} -le 1 ] || [[ "${VDM_SUBDOMAIN}" =~ [^a-zA-Z] ]] ||
     [ -d "${VDM_REPO_PATH}/${3:-$VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}" ] ||
     [ -d "${VDM_REPO_PATH}/${3:-$VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN%db}.${VDM_DOMAIN}" ] ||
-    [ "${VDM_SUBDOMAIN}" = "${2:-}" ]; do
+    [ "${VDM_SUBDOMAIN}" = "${2}" ]; do
     # get the value
     VDM_SUBDOMAIN=$(getInput "Enter sub-domain used for this ${VDM_CONTAINER_TYPE^} container.\n[Text with no spaces that is only alphabetical]" \
-      "${1:-}" 'Enter Sub-Domain')
+      "${1}" 'Enter Sub-Domain')
     # keep asking if empty or does exist
     if [ ${#VDM_SUBDOMAIN} -ge 1 ] && [ -d "${VDM_REPO_PATH}/${3:-$VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}" ] ||
       [ -d "${VDM_REPO_PATH}/${3:-$VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN%db}.${VDM_DOMAIN}" ]; then
@@ -2507,12 +2537,9 @@ function setMultiDomains() {
       # now clear the main domain each time
       unset VDM_DOMAIN
       # we must let them enter the new domain name
-      domain_name=$(getDomain "Enter a domain name" "Enter a Domain Name")
+      getDomain 'Enter a domain name' 'Enter a Domain Name'
       # add for next time
-      setMultiDomain "${domain_name:-${USER:-joomla}.vdm}" || {
-        # return an error
-        return $?
-      }
+      saveMultiDomain "${VDM_DOMAIN}"
       # get the list of domains
       list_domains=$(getListDomains "\n")
       # update the question
@@ -2521,35 +2548,17 @@ function setMultiDomains() {
   fi
 }
 
-# to set a global multiple domain file and values
-function setMultiDomain() {
-  # check if the env file exist
-  if [ -f "${VDM_SRC_PATH}/.domains" ]; then
-    grep -q "${1}" "${VDM_SRC_PATH}/.domains" || echo "${1}" >>"${VDM_SRC_PATH}/.domains"
-  elif (whiptail --yesno "Can we create the ${VDM_SRC_PATH}/.domains file" --title "Multi Domain File" 8 112); then
-    # make sure the folder exist
-    mkdir -p "${VDM_SRC_PATH}"
-    # so we creat the file
-    echo "${1}" >"${VDM_SRC_PATH}/.domains"
-    # make sure the permissions are secured
-    chmod 600 "${VDM_SRC_PATH}/.domains"
-  else
-    showError "The ${VDM_SRC_PATH}/.domains file does not exist. So ${1} could not be added!"
-    # we return false
-    return 12
-  fi
-  # we return true
-  return 0
-}
-
 # set the multi domain switch
 function setMultiDomainSwitch() {
   # Allow multiple domains
   if [ "${VDM_MULTI_DOMAIN:-not}" = 'not' ]; then
     # explain the pros and cons...
-    showNotice "The down side to allowing multiple domains is that you will need to select a main domain each time you setup a new container. The advantage is that you can have multiple domains ;)"
+    showNotice "Next you should make the selection of using a single or multiple domain setup.\n\n\
+      With multiple domain setups you will need to select a main domain each time you setup a new container.\n\
+      With a single domain setup you setup the main domain once, and then only need setup the subdomains\n\
+      with each new container."
     # check the security switch
-    if (whiptail --yesno "Would you like to allow for multiple domains?" --defaultno --title "Allow Multi Domains" 8 112); then
+    if (whiptail --yesno "Would you like to use a multiple domains setup?" --defaultno --title "Allow Multi Domains" 8 112); then
       # we set the secure switch
       VDM_MULTI_DOMAIN=true
     else
@@ -2622,7 +2631,7 @@ function setUpdateHostFile() {
 function setSecureState() {
   if [ "${VDM_SECURE:-not}" = 'not' ]; then
     # check the security switch
-    if (whiptail --yesno "Would you like to use Letsencrypt auto setup for your containers [only for server with public static IP]" --defaultno --title "Letsencrypt" 8 112); then
+    if (whiptail --yesno "Would you like to use Letsencrypt auto setup for your containers [ONLY for server with public static IP]" --defaultno --title "Letsencrypt" 8 112); then
       # we set the secure switch
       VDM_SECURE=true
     else
@@ -2723,6 +2732,35 @@ function allowEditHostFile() {
   return 12
 }
 
+# to set a global multiple domain file and values
+function saveMultiDomain() {
+  # set some locals
+  local domain_name
+  local src_path_domain
+  # set the domain and remove any whitespace
+  domain_name="$(echo -e "${1}" | tr -d '[:space:]')";
+  src_path_domain="${VDM_SRC_PATH}/.domains";
+  # check that we have a domain string
+  if [ ${#domain_name} -ge 1 ]; then
+    # check if the file exist
+    if [ -f "${src_path_domain}" ]; then
+      # check if its already set
+      if grep -L "${domain_name}" "${src_path_domain}"; then
+        echo "${domain_name}" >>"${src_path_domain}"
+      fi
+    else
+      # make sure the folder exist
+      mkdir -p "${VDM_SRC_PATH}"
+      # so we creat the file
+      echo "${domain_name}" >"${src_path_domain}"
+      # make sure the permissions are secured
+      chmod 600 "${src_path_domain}"
+    fi
+  fi
+  # we return true
+  return 0
+}
+
 # delete multiple domains
 function deleteMultiDomains() {
   # menu for dynamic addition
@@ -2789,9 +2827,25 @@ function editHostFile() {
   # check if we should add to host file
   if allowEditHostFile; then
     # if this container is enabled ask if it should be redeployed
-    if (whiptail --yesno "To edit the host file we need sudo privileges." --title "Give sudo Privileges" 8 112); then
+    if (whiptail --yesno "To edit the host file we need sudo privileges.\n[Only continue if you know what your doing!]" --title "Give sudo Privileges" 15 112); then
+      # give little heads-up
+      showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
       # lets open the file with nano for now
       sudo "${EDITOR:-nano}" /etc/hosts
+    fi
+  fi
+}
+
+# the manually edit the config file
+function editConfigFile() {
+  # check if the file exist
+  if [ -f "${VDM_SRC_PATH}/.env" ]; then
+    # give little warning for less command ready people
+    if (whiptail --yesno "Only continue if you know what your doing!\n\n\
+    ${USER^}, to save the changes you've made or to just close the file again press:\n\n\
+      [ctrl+x] with nano on ubuntu." --title "Continue to edit ${PROGRAM_NAME} global config." 15 112); then
+      # all direct edit of the global config file
+      "${EDITOR:-nano}" "${VDM_SRC_PATH}/.env"
     fi
   fi
 }
