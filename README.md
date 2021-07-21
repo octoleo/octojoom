@@ -8,6 +8,8 @@ There are more than one .env file and the script will set those up for you whene
 the script will check if those values exist, and if they don't it will ask for them, and store them automatically for future use.
 That same time the output message to the terminal will show you where the specific .env file can be found.
 
+> program only for ubuntu/debian systems at this time (should you like to use it on other OS's please open and issue...)
+
 ---
 # Install
 ```shell
