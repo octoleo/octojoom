@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="2.1.1"
-_V="2.1"
+_VERSION="3.0.0"
+_V="3.0"
 
 # The program full name
-PROGRAM_NAME="Docker Deployment"
+PROGRAM_NAME="Octojoom"
 
 # make sure whiptail is installed
 command -v whiptail >/dev/null 2>&1 || {
@@ -828,7 +828,7 @@ function joomla__TRuST__enable() {
   elif [ ! -d "${VDM_PROJECT_PATH}" ]; then
     # this should never happen, but in case
     showError "The path ${VDM_PROJECT_PATH} does not exist, so we can't mount the persistent volumes. This error should never show, \
-      please open an issue and report docker-deploy-error-1234 with the steps of how you got here?"
+      please open an issue and report octojoom-error-1234 with the steps of how you got here?"
   elif [ ${#VDM_CONTAINER} -ge 1 ]; then
     # this means we have a single already selected container to enable if it exists
     if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_CONTAINER}" ]; then
@@ -1516,39 +1516,37 @@ function deletePersistentVolumes() {
 function runUpdate() {
   # we need sudo permissions
   if (whiptail --yesno "${USER^}, to update ${PROGRAM_NAME} we need sudo privileges." --title "Give sudo Privileges" 8 112); then
-    # check that we have an access token
-    getAccessToken || return 1
     # remove the current version
-    if [ -f /usr/local/bin/docker-deploy ]; then
+    if [ -f /usr/local/bin/octojoom ]; then
       # just backup in case of failure
-      sudo mv /usr/local/bin/docker-deploy /usr/local/bin/docker-deploy.bak
+      sudo mv /usr/local/bin/octojoom /usr/local/bin/octojoom.bak
     fi
     # some local values
     local branch
     # get the target branch to use in our update
     branch=$(getTargetBranch)
     # pull the latest version. Master is always the latest
-    if sudo curl --fail -L "https://git.vdm.dev/api/v1/repos/octoleo/docker-deploy/raw/src/docker-deploy?ref=${branch:-master}&access_token=${VDM_ACCESS_TOKEN}" -o /usr/local/bin/docker-deploy 2>/dev/null; then
+    if sudo curl --fail -L "https://git.vdm.dev/api/v1/repos/octoleo/octojoom/raw/src/octojoom?ref=${branch:-master}" -o /usr/local/bin/octojoom 2>/dev/null; then
       # give success message
       echo "SUCCESS: Update was successful."
       # do we have a backup
-      if [ -f /usr/local/bin/docker-deploy.bak ]; then
+      if [ -f /usr/local/bin/octojoom.bak ]; then
         # lets remove it now
-        sudo rm -f /usr/local/bin/docker-deploy.bak
+        sudo rm -f /usr/local/bin/octojoom.bak
       fi
     else
       # show the error
       echo >&2 "ERROR: Update failed! Please try again later."
       # do we have a backup
-      if [ -f /usr/local/bin/docker-deploy.bak ]; then
+      if [ -f /usr/local/bin/octojoom.bak ]; then
         # move backup back
-        sudo mv /usr/local/bin/docker-deploy.bak /usr/local/bin/docker-deploy
+        sudo mv /usr/local/bin/octojoom.bak /usr/local/bin/octojoom
       fi
     fi
     # always set the permission again if we have a file
-    if [ -f /usr/local/bin/docker-deploy ]; then
+    if [ -f /usr/local/bin/octojoom ]; then
       # the we make sure its executable
-      sudo chmod +x /usr/local/bin/docker-deploy
+      sudo chmod +x /usr/local/bin/octojoom
     fi
     # always exit so the new script can load
     exit 0
@@ -1601,9 +1599,9 @@ function runUninstall() {
         sudo rm -fr "${VDM_REPO_PATH}"
       fi
     elif (whiptail --yesno "Would you like to only remove the actual ${PROGRAM_NAME} v${_V}  script but keep all the Docker stuff?" --title "Keep Docker Stuff" 8 112); then
-      # now remove the docker-deploy script
-      if [ -f /usr/local/bin/docker-deploy ]; then
-        sudo rm -f /usr/local/bin/docker-deploy
+      # now remove the octojoom script
+      if [ -f /usr/local/bin/octojoom ]; then
+        sudo rm -f /usr/local/bin/octojoom
       fi
       # give the final message
       whiptail --title "${PROGRAM_NAME} v${_VERSION}  is UNINSTALLED" --msgbox "\n\
@@ -1687,9 +1685,9 @@ function runUninstall() {
         sudo rm -fr "${VDM_SRC_PATH}"
       fi
     fi
-    # now remove the docker-deploy script
-    if [ -f /usr/local/bin/docker-deploy ]; then
-      sudo rm -f /usr/local/bin/docker-deploy
+    # now remove the octojoom script
+    if [ -f /usr/local/bin/octojoom ]; then
+      sudo rm -f /usr/local/bin/octojoom
     fi
     # last and final question as this is most dangerous and serious issue.
     if [ -d "${VDM_PROJECT_PATH}" ] &&
@@ -1705,10 +1703,10 @@ function runUninstall() {
 }
 
 # we show the octoleo info quietly
-octoleoQuietly() {
+octojoomQuietly() {
   local message
   # now set the message
-  message="                                              https://git.vdm.dev/octoleo/docker-deploy
+  message="                                              https://git.vdm.dev/octoleo/octojoom
 
   Welcome to an Octoleo Program (${PROGRAM_NAME} v$_VERSION)
 
@@ -1897,7 +1895,7 @@ function showTraefik() {
     menu_options+=("delete" "Delete Traefik") && i=$((i + 1))
   # get the selection
   CHOICE=$(
-    whiptail --menu "Make your selection" 16 112 $i \
+    whiptail --menu "Make your selection" 20 112 $i \
       --title "Traefik | ${PROGRAM_NAME} v${_V}" --fb \
       --backtitle "    Octoleo" --nocancel --notags \
       "${menu_options[@]}" 3>&2 2>&1 1>&3
@@ -1946,7 +1944,7 @@ function showPortainer() {
     menu_options+=("delete" "Delete Portainer") && i=$((i + 1))
   # get the selection
   CHOICE=$(
-    whiptail --menu "Make your selection" 16 112 $i \
+    whiptail --menu "Make your selection" 20 112 $i \
       --title "Portainer | ${PROGRAM_NAME} v${_V}" --fb \
       --backtitle "    Octoleo" --nocancel --notags \
       "${menu_options[@]}" 3>&2 2>&1 1>&3
@@ -1993,10 +1991,10 @@ function showHelpMenu() {
   # Uninstall the whole script
   menu_options+=("uninstall" "Uninstall ${PROGRAM_NAME,,}")
   # Octoleo details
-  menu_options+=("octoleo" "Octoleo")
+  menu_options+=("octojoom" "Octojoom")
   # get the selection
   CHOICE=$(
-    whiptail --menu "Make your selection" 16 112 $i \
+    whiptail --menu "Make your selection" 20 112 $i \
       --title "Help Menu | ${PROGRAM_NAME} v${_V}" --fb \
       --backtitle "    Octoleo" --nocancel --notags \
       "${menu_options[@]}" 3>&2 2>&1 1>&3
@@ -2013,7 +2011,7 @@ function showHelpMenu() {
     editConfigFile
     ;;
   "report-issue")
-    showLink "https://git.vdm.dev/octoleo/docker-deploy/issues" "To report an issue go to:" "Report an Issue"
+    showLink "https://git.vdm.dev/octoleo/octojoom/issues" "To report an issue go to:" "Report an Issue"
     ;;
   "update")
     runUpdate
@@ -2021,8 +2019,8 @@ function showHelpMenu() {
   "uninstall")
     runUninstall
     ;;
-  "octoleo")
-    octoleoQuietly
+  "octojoom")
+    octojoomQuietly
     ;;
   esac
 }
@@ -2046,7 +2044,7 @@ function domainsMenu() {
     menu_options+=("edit" "Edit Host File") && i=$((i + 1))
   # get the selection
   CHOICE=$(
-    whiptail --menu "Make your selection" 16 112 $i \
+    whiptail --menu "Make your selection" 20 112 $i \
       --title "Domains Menu | ${PROGRAM_NAME} v${_V}" --fb \
       --backtitle "    Octoleo" --nocancel --notags \
       "${menu_options[@]}" 3>&2 2>&1 1>&3
@@ -2164,7 +2162,7 @@ function showImportantPaths() {
     CONFIG:  ${VDM_SRC_PATH}
 
   Then we have some key environment variable files that hold very useful and important information.
-  Since we do not store any passwords or other important details in the docker-deploy.yml files
+  Since we do not store any passwords or other important details in the octojoom.yml files
   they are stored in these environment variable files and its permissions are (600) for security.
 
     JOOMLA:    ${VDM_REPO_PATH}/joomla/.env
@@ -2320,38 +2318,6 @@ function getPassword() {
   PASSWORD=$(whiptail --passwordbox "$1" 10 112 "${2:-}" --title "${3:-Get Password}" --nocancel 3>&1 1>&2 2>&3)
   # return the password
   echo "${PASSWORD}"
-}
-
-# get and set the access token
-function getAccessToken() {
-  # we try getting the token twice
-  local t=0
-  local new_token=false
-  # check that we have an access token, els ask for it
-  while [ ${#VDM_ACCESS_TOKEN} -le 30 ]; do
-    # this is a new token
-    new_token=true
-    # get the value
-    VDM_ACCESS_TOKEN=$(getInput "Enter access token for updates.\n[You can get an access token from https://git.vdm.dev/user/settings/applications]" \
-      '' 'Access Token')
-    # keep asking if empty
-    if [ ${#VDM_ACCESS_TOKEN} -le 30 ]; then
-      showError "Updates can only be done if you have an access token."
-      # increment our try
-      t=$((t + 1))
-      # when the user for the second time does not supply the correct value we return
-      if [ $t -eq 2 ]; then
-        return 12
-      fi
-    fi
-  done
-  # make the token available
-  export VDM_ACCESS_TOKEN
-  # store the token for next time
-  $new_token && setEnvVariable "VDM_ACCESS_TOKEN=\"${VDM_ACCESS_TOKEN}\"" &&
-    showNotice "The token has been stored in the environment variable file (${VDM_SRC_PATH}/.env)."
-  # we have success
-  return 0
 }
 
 # get the target branch to use in update
@@ -2856,16 +2822,16 @@ function editConfigFile() {
 # help message
 function showHelp() {
   cat <<EOF
-Usage: ${0##*/:-} [OPTION...]
+Usage: octojoom [OPTION...]
 	Options
 	======================================================
    --type <type>
 	set type you would like to work with
-	example: ${0##*/:-} --type joomla
+	example: octojoom --type joomla
 	======================================================
    --task <task>
 	set type of task you would like to perform
-	example: ${0##*/:-} --task setup
+	example: octojoom --task setup
 	======================================================
    --container <container.domain.name>
 	Directly enabling or disabling a container with
@@ -2873,74 +2839,74 @@ Usage: ${0##*/:-} [OPTION...]
 	The container must exist, which means it was
 	  setup previously
 	Used without type and task Joomla-Enable is (default)
-	example: ${0##*/:-} --container "io.vdm.dev"
+	example: octojoom --container "io.vdm.dev"
 	======================================================
    --update
 	to update your install
-	example: ${0##*/:-} --update
+	example: octojoom --update
 	======================================================
    --access-token <token>
 	to update the program you will need an access token
 	from https://git.vdm.dev/user/settings/applications
-	example: docker-deploy --access-token xxxxxxxxxxx
+	example: octojoom --access-token xxxxxxxxxxx
 	======================================================
    --uninstall
 	to uninstall this script
-	example: ${0##*/:-} --uninstall
+	example: octojoom --uninstall
 	======================================================
 	AVAILABLE FOR TO ANY CONTAINER
 	======================================================
    -k|--key <key>
 	set key for the docker compose container naming
 	!! no spaces allowed in the key !!
-	example: ${0##*/:-} -k="vdm"
-	example: ${0##*/:-} --key="vdm"
+	example: octojoom -k="vdm"
+	example: octojoom --key="vdm"
 	======================================================
    -e|--env-key <key>
 	set key for the environment variable naming
 	!! no spaces allowed in the key & must be UPPERCASE !!
-	example: ${0##*/:-} -e="VDM"
-	example: ${0##*/:-} --env-key="VDM"
+	example: octojoom -e="VDM"
+	example: octojoom --env-key="VDM"
 	======================================================
    -d|--domain <domain.com>
 	set key website domain
 	!! must be domain.tld !!
-	example: ${0##*/:-} -d="joomla.org"
-	example: ${0##*/:-} --domain="joomla.org"
+	example: octojoom -d="joomla.org"
+	example: octojoom --domain="joomla.org"
 	======================================================
    -s|--sub-domain <domain.com>
 	set key website sub domain
 	!! no spaces allowed in the sub domain !!
-	example: ${0##*/:-} -s="jcb"
-	example: ${0##*/:-} --sub-domain="jcb"
+	example: octojoom -s="jcb"
+	example: octojoom --sub-domain="jcb"
 	======================================================
 	AVAILABLE FOR JOOMLA CONTAINER
 	======================================================
    -j|--joomla-version <version-tag>
 	see available tags here https://hub.docker.com/_/joomla
-	example: ${0##*/:-} -j=3.10
-	example: ${0##*/:-} --joomla-version=3.10
+	example: octojoom -j=3.10
+	example: octojoom --joomla-version=3.10
 	======================================================
 	AVAILABLE FOR OPENSSH CONTAINER
 	======================================================
    -u|--username <username>
 	set username of the container
-	example: ${0##*/:-} -u="ubuntu"
-	example: ${0##*/:-} --username="ubuntu"
+	example: octojoom -u="ubuntu"
+	example: octojoom --username="ubuntu"
 	======================================================
    --uid <id>
 	set container user id
-	example: ${0##*/:-} --uid=1000
+	example: octojoom --uid=1000
 	======================================================
    --gid <id>
 	set container user group id
-	example: ${0##*/:-} --gid=1000
+	example: octojoom --gid=1000
 	======================================================
    -p|--port <port>
 	set ssh port to use
 	!! do not use 22 !!
-	example: ${0##*/:-} -p=2239
-	example: ${0##*/:-} --port=2239
+	example: octojoom -p=2239
+	example: octojoom --port=2239
 	======================================================
    --ssh-dir <dir>
 	set ssh directory name found in the .ssh dir
@@ -2948,25 +2914,25 @@ Usage: ${0##*/:-} [OPTION...]
 		This directory has separate files for
 		each public key allowed to access
 		the container
-	example: ${0##*/:-} --ssh-dir="teamname"
+	example: octojoom --ssh-dir="teamname"
 	======================================================
    --sudo
 	switch to add the container user to the
 	sudo group of the container
-	example: ${0##*/:-} --sudo
+	example: octojoom --sudo
 	======================================================
    -t|--time-zone <time/zone>
 	set time zone of the container
 	!! must valid time zone !!
-	example: ${0##*/:-} -t="Africa/Windhoek"
-	example: ${0##*/:-} --time-zone="Africa/Windhoek"
+	example: octojoom -t="Africa/Windhoek"
+	example: octojoom --time-zone="Africa/Windhoek"
 	======================================================
 	HELP ʕ•ᴥ•ʔ
 	======================================================
    -h|--help
 	display this help menu
-	example: ${0##*/:-} -h
-	example: ${0##*/:-} --help
+	example: octojoom -h
+	example: octojoom --help
 	======================================================
 			${PROGRAM_NAME} v${_VERSION}
 	======================================================
@@ -3287,7 +3253,7 @@ fi
 #####################################################################################################################VDM
 ######################################## SETUP KEY PATHS
 # the src folder path is where we store the script global env
-VDM_SRC_PATH="/home/${USER}/.config/docker-deploy"
+VDM_SRC_PATH="/home/${USER}/.config/octojoom"
 # create the folder if not set
 # shellcheck disable=SC2174
 mkdir -p -m '700' "${VDM_SRC_PATH}"
@@ -3296,8 +3262,6 @@ mkdir -p -m '700' "${VDM_SRC_PATH}"
 [ -f "${VDM_SRC_PATH}/.env" ] && source "${VDM_SRC_PATH}/.env"
 # get repo path where store the container deploy scripts
 while [ ${#VDM_REPO_PATH} -le 1 ] || [ ! -d "${VDM_REPO_PATH}" ]; do
-  # we catch the token now.. so we don't need asking for it later
-  getAccessToken
   # creat the path if it exist
   if [ ${#VDM_REPO_PATH} -ge 1 ] && (whiptail --yesno "Can we create the ${VDM_REPO_PATH} repository folder" --title "Create the Path" 8 112); then
     mkdir -p "${VDM_REPO_PATH}"

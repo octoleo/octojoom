@@ -1,4 +1,4 @@
-# Easy Docker Deployment (UBUNTU ONLY)
+# Octojoom - Easy Docker Deployment
 With this script we can easily deploy docker containers of Joomla and Openssh. This combination of these tools give rise to a powerful and very secure shared development environment.
 
 This program has **command input** options as seen in the menus below, but these command are _not the only way_ to set these values.
@@ -11,37 +11,29 @@ That same time the output message to the terminal will show you where the specif
 ---
 # Install
 ```shell
-$ sudo curl -L "https://git.vdm.dev/api/v1/repos/octoleo/docker-deploy/raw/src/docker-deploy?access_token=xxxx" -o /usr/local/bin/docker-deploy
-$ sudo chmod +x /usr/local/bin/docker-deploy
+$ sudo curl -L "https://git.vdm.dev/api/v1/repos/octoleo/octojoom/raw/src/octojoom" -o /usr/local/bin/octojoom
+$ sudo chmod +x /usr/local/bin/octojoom
 ```
-
-### How to get the Access Token
-Sign in to [https://git.vdm.dev/](https://git.vdm.dev/user/login) with your **GitHub** or **Gitlab** account.
-Then open your [applications settings](https://git.vdm.dev/user/settings/applications) and create a new access token.
-
-![image](https://user-images.githubusercontent.com/5607939/143513412-946843be-acd8-4973-be44-00902226f6ba.png)
-
-The first time you use the program, it will ask for the access token again, so it can do updates in the future.
 
 ---
 # Usage
 
 > To see the usage help menu
 ```shell
-$ docker-deploy -h
+$ octojoom -h
 ```
-### Help Menu (docker-deploy)
+### Help Menu (octojoom)
 ```txt
-Usage: docker-deploy [OPTION...]
+Usage: octojoom [OPTION...]
 	Options
 	======================================================
    --type <type>
 	set type you would like to work with
-	example: docker-deploy --type joomla
+	example: octojoom --type joomla
 	======================================================
    --task <task>
 	set type of task you would like to perform
-	example: docker-deploy --task setup
+	example: octojoom --task setup
 	======================================================
    --container <container.domain.name>
 	Directly enabling or disabling a container with
@@ -49,74 +41,74 @@ Usage: docker-deploy [OPTION...]
 	The container must exist, which means it was
 	  setup previously
 	Used without type and task Joomla-Enable is (default)
-	example: docker-deploy --container "io.vdm.dev"
+	example: octojoom --container "io.vdm.dev"
 	======================================================
    --update
 	to update your install
-	example: docker-deploy --update
+	example: octojoom --update
 	======================================================
    --access-token <token>
 	to update the program you will need an access token
 	from https://git.vdm.dev/user/settings/applications
-	example: docker-deploy --access-token xxxxxxxxxxx
+	example: octojoom --access-token xxxxxxxxxxx
 	======================================================
    --uninstall
 	to uninstall this script
-	example: docker-deploy --uninstall
+	example: octojoom --uninstall
 	======================================================
 	AVAILABLE FOR TO ANY CONTAINER
 	======================================================
    -k|--key <key>
 	set key for the docker compose container naming
 	!! no spaces allowed in the key !!
-	example: docker-deploy -k="vdm"
-	example: docker-deploy --key="vdm"
+	example: octojoom -k="vdm"
+	example: octojoom --key="vdm"
 	======================================================
    -e|--env-key <key>
 	set key for the environment variable naming
 	!! no spaces allowed in the key & must be UPPERCASE !!
-	example: docker-deploy -e="VDM"
-	example: docker-deploy --env-key="VDM"
+	example: octojoom -e="VDM"
+	example: octojoom --env-key="VDM"
 	======================================================
    -d|--domain <domain.com>
 	set key website domain
 	!! must be domain.tld !!
-	example: docker-deploy -d="joomla.org"
-	example: docker-deploy --domain="joomla.org"
+	example: octojoom -d="joomla.org"
+	example: octojoom --domain="joomla.org"
 	======================================================
    -s|--sub-domain <domain.com>
 	set key website sub domain
 	!! no spaces allowed in the sub domain !!
-	example: docker-deploy -s="jcb"
-	example: docker-deploy --sub-domain="jcb"
+	example: octojoom -s="jcb"
+	example: octojoom --sub-domain="jcb"
 	======================================================
 	AVAILABLE FOR JOOMLA CONTAINER
 	======================================================
    -j|--joomla-version <version-tag>
 	see available tags here https://hub.docker.com/_/joomla
-	example: docker-deploy -j=3.10
-	example: docker-deploy --joomla-version=3.10
+	example: octojoom -j=3.10
+	example: octojoom --joomla-version=3.10
 	======================================================
 	AVAILABLE FOR OPENSSH CONTAINER
 	======================================================
    -u|--username <username>
 	set username of the container
-	example: docker-deploy -u="ubuntu"
-	example: docker-deploy --username="ubuntu"
+	example: octojoom -u="ubuntu"
+	example: octojoom --username="ubuntu"
 	======================================================
    --uid <id>
 	set container user id
-	example: docker-deploy --uid=1000
+	example: octojoom --uid=1000
 	======================================================
    --gid <id>
 	set container user group id
-	example: docker-deploy --gid=1000
+	example: octojoom --gid=1000
 	======================================================
    -p|--port <port>
 	set ssh port to use
 	!! do not use 22 !!
-	example: docker-deploy -p=2239
-	example: docker-deploy --port=2239
+	example: octojoom -p=2239
+	example: octojoom --port=2239
 	======================================================
    --ssh-dir <dir>
 	set ssh directory name found in the .ssh dir
@@ -124,34 +116,34 @@ Usage: docker-deploy [OPTION...]
 		This directory has separate files for
 		each public key allowed to access
 		the container
-	example: docker-deploy --ssh-dir="teamname"
+	example: octojoom --ssh-dir="teamname"
 	======================================================
    --sudo
 	switch to add the container user to the
 	sudo group of the container
-	example: docker-deploy --sudo
+	example: octojoom --sudo
 	======================================================
    -t|--time-zone <time/zone>
 	set time zone of the container
 	!! must valid time zone !!
-	example: docker-deploy -t="Africa/Windhoek"
-	example: docker-deploy --time-zone="Africa/Windhoek"
+	example: octojoom -t="Africa/Windhoek"
+	example: octojoom --time-zone="Africa/Windhoek"
 	======================================================
 	HELP ʕ•ᴥ•ʔ
 	======================================================
    -h|--help
 	display this help menu
-	example: docker-deploy -h
-	example: docker-deploy --help
+	example: octojoom -h
+	example: octojoom --help
 	======================================================
-			Docker Deployment v2.1.0
+			Octojoom
 	======================================================
 ```
 ---
 # Uninstall
 
 ```shell
-$ docker-deploy --uninstall
+$ octojoom --uninstall
 ```
 ---
 # Free Software License
