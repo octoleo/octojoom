@@ -259,13 +259,21 @@ function joomla__TRuST__setup() {
   local vdm_env_pass
   local vdm_key_root
   local vdm_env_root
+  # get the Joomla image source
+  VDM_J_REPO=$(getImageSource)
+  # build the URL
+  if [ "${VDM_J_REPO}" = 'joomla' ]; then
+    vdm_image_repo_url="https://hub.docker.com/_/${VDM_J_REPO}?tab=tags"
+  else
+    vdm_image_repo_url="https://hub.docker.com/r/${VDM_J_REPO}/tags"
+  fi
   # get the Joomla version if not set
   while [ ${#VDM_JV} -le 1 ]; do
     # get the value
-    VDM_JV=$(getInput 'Enter Joomla version tag for this container.\n[See available tags here https://hub.docker.com/_/joomla]' '3.10' 'Enter Version Tag')
+    VDM_JV=$(getInput "Enter Joomla version tag for this container.\n[See available tags here ${vdm_image_repo_url}]" '3.10' 'Enter Version Tag')
     # keep asking
     [ ${#VDM_JV} -ge 1 ] || {
-      showError "You must enter a version tag. See available tags here https://hub.docker.com/_/joomla"
+      showError "You must enter a version tag. See available tags here ${vdm_image_repo_url}"
     }
   done
   # get the key if not set
@@ -365,6 +373,7 @@ function joomla__TRuST__setup() {
   export VDM_REPO_PATH
   export VDM_PROJECT_PATH
   # container
+  export VDM_J_REPO
   export VDM_JV
   export VDM_REMOVE_SECURE
   export VDM_ENTRY_POINT
@@ -400,6 +409,7 @@ function joomla__TRuST__setup() {
   ### unset all no longer needed
   # container
   unset VDM_SUBDOMAIN
+  unset VDM_J_REPO
   unset VDM_JV
   unset VDM_KEY
   unset VDM_ENV_KEY
@@ -435,7 +445,7 @@ services:
     networks:
       - traefik
   joomla_${VDM_KEY}:
-    image: joomla:${VDM_JV}
+    image: ${VDM_J_REPO}:${VDM_JV}
     container_name: joomla_${VDM_KEY}
     restart: unless-stopped
     environment:
@@ -2330,6 +2340,18 @@ function getTargetBranch() {
     3>&1 1>&2 2>&3)
   # return the answer (default master)
   echo "${answer:-master}"
+}
+
+# get the target repository to use in update
+function getImageSource() {
+   # now make the selection
+   answer=$(whiptail --title "Select image repository" --radiolist --nocancel --notags \
+     "You can select the source of your Joomla! image." 10 80 2 \
+     "joomla" "Joomla official image" "OFF" \
+     "llewellyn/joomla" "Octoleo Joomla image" "OFF" \
+     3>&1 1>&2 2>&3)
+   # return the answer (default joomla)
+   echo "${answer:-joomla}"
 }
 
 # get a list of domains locally set
