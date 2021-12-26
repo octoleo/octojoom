@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="3.0.0"
+_VERSION="3.0.1"
 _V="3.0"
 
 # The program full name
@@ -358,6 +358,16 @@ function joomla__TRuST__setup() {
   }
   # add the projects path
   setContainerEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
+  # set the container user detail id needed
+  if [ "${VDM_J_REPO}" = 'llewellyn/joomla' ]; then
+    # if this is our octoleo images we can also set the user ID and user-group ID
+    setContainerUser
+    # check that we got the details
+    if [ -n "${VDM_PUID}" ] && [ -n "${VDM_PGID}" ]; then
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_PUID=\"#${VDM_PUID}\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_PGID=\"#${VDM_PGID}\""
+    fi
+  fi
   # add this value if not set variable
   [ ${#vdm_database_name} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB=\"${vdm_database_name}\""
   # add this value if not set variable
@@ -416,6 +426,8 @@ function joomla__TRuST__setup() {
   unset VDM_REMOVE_SECURE
   unset VDM_ENTRY_POINT
   unset VDM_HTTP_SCHEME
+  unset VDM_PUID
+  unset VDM_PGID
   # container lower
   unset vdm_database_name
   unset vdm_database_user
@@ -427,6 +439,13 @@ function joomla__TRuST__setup() {
 
 # return the Joomla Container setup yml
 function joomlaContainer() {
+  # set the USER if set
+  vdm_container_user=''
+  if [ -n "${VDM_PUID}" ] && [ -n "${VDM_PGID}" ]; then
+    vdm_container_user="
+      - APACHE_RUN_USER=\${VDM_${VDM_ENV_KEY^^}_PUID}
+      - APACHE_RUN_GROUP=\${VDM_${VDM_ENV_KEY^^}_PGID}"
+  fi
   # we build the yml file
   cat <<EOF
 version: '2'
@@ -448,7 +467,7 @@ services:
     image: ${VDM_J_REPO}:${VDM_JV}
     container_name: joomla_${VDM_KEY}
     restart: unless-stopped
-    environment:
+    environment:${vdm_container_user}
       - JOOMLA_DB_HOST=mariadb_${VDM_KEY}:3306
       - JOOMLA_DB_NAME=\${VDM_${VDM_ENV_KEY^^}_DB}
       - JOOMLA_DB_USER=\${VDM_${VDM_ENV_KEY^^}_DB_USER}
@@ -523,6 +542,8 @@ function openssh__TRuST__setup() {
       showError "You must enter a username for the container"
     fi
   done
+  # be sure to set the container USER ID
+  setContainerUser 33
   # get the key if not set
   setUniqueKey "Enter key used for container naming."
   # get the env key if not set
@@ -668,6 +689,8 @@ function openssh__TRuST__setup() {
   # container
   unset VDM_PORT
   unset VDM_USER_NAME
+  unset VDM_PUID
+  unset VDM_PGID
   unset VDM_KEY
   unset VDM_ENV_KEY
   unset VDM_PUBLIC_KEY_GLOBAL_DIR
@@ -692,8 +715,8 @@ services:
     restart: unless-stopped
     hostname: ${VDM_DOMAIN:-vdm.dev}
     environment:
-      - PUID=${VDM_PUID:-33}
-      - PGID=${VDM_PGID:-33}
+      - PUID=${VDM_PUID}
+      - PGID=${VDM_PGID}
       - TZ=${VDM_TZ:-Africa/Windhoek}
       - PUBLIC_KEY_DIR=/config/ssh_public_keys
       - SUDO_ACCESS=${VDM_SUDO_ACCESS:-false}
@@ -731,7 +754,7 @@ function joomla__TRuST__edit() {
       # check if this docker-composer.yml exist
       if [ -f "${vdm_edit_me}" ]; then
         # give little heads-up
-         showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
+        showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
         # lets open the file with nano for now
         "${EDITOR:-nano}" "${vdm_edit_me}"
         # if this container is enabled ask if it should be redeployed
@@ -767,7 +790,7 @@ function openssh__TRuST__edit() {
       # check if this docker-composer.yml exist
       if [ -f "${vdm_edit_me}" ]; then
         # give little heads-up
-         showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
+        showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
         # lets open the file with nano for now
         "${EDITOR:-nano}" "${vdm_edit_me}"
         # if this container is enabled ask if it should be redeployed
@@ -2344,14 +2367,44 @@ function getTargetBranch() {
 
 # get the target repository to use in update
 function getImageSource() {
-   # now make the selection
-   answer=$(whiptail --title "Select image repository" --radiolist --nocancel --notags \
-     "You can select the source of your Joomla! image." 10 80 2 \
-     "joomla" "Joomla official image" "OFF" \
-     "llewellyn/joomla" "Octoleo Joomla image" "OFF" \
-     3>&1 1>&2 2>&3)
-   # return the answer (default joomla)
-   echo "${answer:-joomla}"
+  # we set some local stuff
+  local image
+  local image_source
+  local images_source
+  # menu for dynamic addition
+  local menu_options=()
+  # our counter
+  local i=2
+  # set the base images source
+  menu_options+=("joomla" "Joomla official image" "OFF")
+  menu_options+=("llewellyn/joomla" "Octoleo Joomla image" "OFF")
+  # get existing source
+  if [ -f "${VDM_SRC_PATH}/.images-source" ] && readarray -t images_source <"${VDM_SRC_PATH}/.images-source"; then
+    # build the menus
+    if [ "${#images_source[@]}" -gt 0 ]; then
+      # loop source images
+      for image in "${images_source[@]}"; do
+        # the image name (get before first comma)
+        image_name="${image%%,*}"
+        # the image description (get after last comma)
+        image_desc="${image##*,}"
+        # make sure we have a value, and it is not the defaults already set
+        if [ "${#image_name}" -ge 1 ] && [ "${#image_desc}" -ge 1 ] &&
+          [ "${image_name}" != 'joomla' ] && [ "${image_name}" != 'llewellyn/joomla' ]; then
+          # load the source name and description
+          menu_options+=("${image_name}" "${image_desc}" "OFF")
+          # increment our counter
+          i=$((i + 1))
+        fi
+      done
+    fi
+  fi
+  # now make the selection
+  image_source=$(whiptail --title "Select image source repository" --radiolist --nocancel --notags \
+    "You can select the source of your Joomla! image." 10 80 $i \
+    "${menu_options[@]}" 3>&1 1>&2 2>&3)
+  # return the answer (default joomla)
+  echo "${image_source:-joomla}"
 }
 
 # get a list of domains locally set
@@ -2460,6 +2513,19 @@ function getMainDomain() {
     # update the main domain with a selection
     getMultiDomain
   fi
+}
+
+# set the container user
+function setContainerUser() {
+  # we first get the container user ID
+  VDM_PUID=$(getInput "Enter user ID for the ${VDM_CONTAINER_TYPE^} container.\n[add only a number]" \
+    "${1:-1000}" 'Enter Container User ID')
+  # we get the container user-group ID
+  VDM_PGID=$(getInput "Enter user-group ID for the ${VDM_CONTAINER_TYPE^} container.\n[add only a number]" \
+    "${1:-1000}" 'Enter Container User Group ID')
+  # make available
+  export VDM_PUID
+  export VDM_PGID
 }
 
 # set the domain
@@ -2726,8 +2792,8 @@ function saveMultiDomain() {
   local domain_name
   local src_path_domain
   # set the domain and remove any whitespace
-  domain_name="$(echo -e "${1}" | tr -d '[:space:]')";
-  src_path_domain="${VDM_SRC_PATH}/.domains";
+  domain_name="$(echo -e "${1}" | tr -d '[:space:]')"
+  src_path_domain="${VDM_SRC_PATH}/.domains"
   # check that we have a domain string
   if [ ${#domain_name} -ge 1 ]; then
     # check if the file exist
