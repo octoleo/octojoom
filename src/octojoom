@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="3.0.1"
-_V="3.0"
+_VERSION="3.1.0"
+_V="3.1"
 
 # The program full name
 PROGRAM_NAME="Octojoom"
@@ -260,7 +260,8 @@ function joomla__TRuST__setup() {
   local vdm_key_root
   local vdm_env_root
   # get the Joomla image source
-  VDM_J_REPO=$(getImageSource)
+  VDM_J_REPO='joomla'
+  isExpert && VDM_J_REPO=$(getImageSource)
   # build the URL
   if [ "${VDM_J_REPO}" = 'joomla' ]; then
     vdm_image_repo_url="https://hub.docker.com/_/${VDM_J_REPO}?tab=tags"
@@ -356,12 +357,26 @@ function joomla__TRuST__setup() {
       }
     done
   }
+  # set persistence
+  # only if in expert mode
+  if isExpert; then
+    if setPersistence; then
+      VDM_PERSISTENCE=''
+      VDM_NOT_PERSISTENCE='#'
+    else
+      VDM_PERSISTENCE='#'
+      VDM_NOT_PERSISTENCE=''
+    fi
+  else
+    VDM_PERSISTENCE=''
+    VDM_NOT_PERSISTENCE='#'
+  fi
   # add the projects path
   setContainerEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
   # set the container user detail id needed
   if [ "${VDM_J_REPO}" = 'llewellyn/joomla' ]; then
     # if this is our octoleo images we can also set the user ID and user-group ID
-    setContainerUser
+    setContainerUser "$(id -u)"
     # check that we got the details
     if [ -n "${VDM_PUID}" ] && [ -n "${VDM_PGID}" ]; then
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_PUID=\"#${VDM_PUID}\""
@@ -388,6 +403,8 @@ function joomla__TRuST__setup() {
   export VDM_REMOVE_SECURE
   export VDM_ENTRY_POINT
   export VDM_HTTP_SCHEME
+  export VDM_PERSISTENCE
+  export VDM_NOT_PERSISTENCE
   # container lower
   export vdm_database_name
   export vdm_database_user
@@ -426,8 +443,8 @@ function joomla__TRuST__setup() {
   unset VDM_REMOVE_SECURE
   unset VDM_ENTRY_POINT
   unset VDM_HTTP_SCHEME
-  unset VDM_PUID
-  unset VDM_PGID
+  unset VDM_PERSISTENCE
+  unset VDM_NOT_PERSISTENCE
   # container lower
   unset vdm_database_name
   unset vdm_database_user
@@ -460,7 +477,8 @@ services:
       - MARIADB_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_DB_PASS}
       - MARIADB_ROOT_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_DB_ROOT}
     volumes:
-      - "\${VDM_PROJECT_PATH}/${VDM_KEY}/db:/var/lib/mysql"
+${VDM_PERSISTENCE}      - "\${VDM_PROJECT_PATH}/${VDM_KEY}/db:/var/lib/mysql"
+${VDM_NOT_PERSISTENCE}      - ${VDM_KEY,,}_db:/var/lib/mysql
     networks:
       - traefik
   joomla_${VDM_KEY}:
@@ -475,7 +493,8 @@ services:
     depends_on:
       - mariadb_${VDM_KEY}
     volumes:
-      - "\${VDM_PROJECT_PATH}/${VDM_KEY}/joomla:/var/www/html"
+${VDM_PERSISTENCE}      - "\${VDM_PROJECT_PATH}/${VDM_KEY}/joomla:/var/www/html"
+${VDM_NOT_PERSISTENCE}      - ${VDM_KEY,,}_web:/var/www/html
     networks:
       - traefik
     labels:
@@ -511,6 +530,10 @@ networks:
   traefik:
     external:
       name: traefik_webgateway
+
+${VDM_NOT_PERSISTENCE}volumes:
+${VDM_NOT_PERSISTENCE}  ${VDM_KEY,,}_web:
+${VDM_NOT_PERSISTENCE}  ${VDM_KEY,,}_db:
 EOF
 }
 
@@ -689,8 +712,6 @@ function openssh__TRuST__setup() {
   # container
   unset VDM_PORT
   unset VDM_USER_NAME
-  unset VDM_PUID
-  unset VDM_PGID
   unset VDM_KEY
   unset VDM_ENV_KEY
   unset VDM_PUBLIC_KEY_GLOBAL_DIR
@@ -1433,7 +1454,7 @@ function deleteContainer() {
 }
 
 # To fix the permissions of Joomla containers
-function fixContainerPermissions() {
+function fixContainersPermissions() {
   # check if we have persistent volumes
   if [ ! -d "${VDM_PROJECT_PATH}" ]; then
     showError "The ${VDM_PROJECT_PATH} does not exist."
@@ -1456,54 +1477,95 @@ function fixContainerPermissions() {
         persistent="${volume//\"/}"
         # make sure this is a joomla system
         if [ -d "${VDM_PROJECT_PATH}/${persistent}/joomla" ]; then
+          # show the notice of the volume being fixed
+          showNotice "Fixing ${persistent}/joomla permissions now."
+          # if this is our octoleo images we can also set the user ID and user-group ID
+          setContainerUser "$(id -u)"
           ### Fix the folder ownership of Joomla folders
           # id -u www-data
-          # getent group www-data | awk -F: '{printf "Group %s with GID=%d\n", $1, $3}'
-          echo "Fixing the folder ownership of ${persistent} Joomla folders to belong to 33:www-data"
+          # id -g www-data
           #
-          sudo chown -R 33:33 "${VDM_PROJECT_PATH}/${persistent}/joomla"
+          sudo chown -R "$VDM_PUID":"$VDM_PGID" "${VDM_PROJECT_PATH}/${persistent}/joomla" &
+          showProgress "chown" "Setting the ownership of ${persistent} Joomla directory/files.\n(c h o w n -R $VDM_PUID:$VDM_PGID ${persistent}/joomla)"
           ### Fix the folder permissions for the Joomla websites
           #
-          echo "Fixing the file and folder permissions for the ${persistent} Joomla website"
-          #
           # Change the file permissions
-          sudo find "${VDM_PROJECT_PATH}/${persistent}/joomla" -type f -exec chmod 644 {} \;
-          sudo find "${VDM_PROJECT_PATH}/${persistent}/joomla/configuration.php" -type f -exec chmod 444 {} \;
+          sudo find "${VDM_PROJECT_PATH}/${persistent}/joomla" -type f -exec chmod 644 {} \; &
+          showProgress "find" "Setting the files permissions for the ${persistent} Joomla website.\n(f i n d ${persistent}/joomla -type f -exec chmod 644 {} \;)"
+          [ -f "${VDM_PROJECT_PATH}/${persistent}/joomla/configuration.php" ] &&
+            sudo chmod 444 "${VDM_PROJECT_PATH}/${persistent}/joomla/configuration.php"
           [ -f "${VDM_PROJECT_PATH}/${persistent}/joomla/.htaccess" ] &&
-            sudo find "${VDM_PROJECT_PATH}/${persistent}/joomla/.htaccess" -type f -exec chmod 400 {} \;
+            sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/.htaccess"
           [ -f "${VDM_PROJECT_PATH}/${persistent}/joomla/php.ini" ] &&
-            sudo find "${VDM_PROJECT_PATH}/${persistent}/joomla/php.ini" -type f -exec chmod 400 {} \;
+            sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/php.ini"
           # Change the folder permissions
-          sudo find /"home/${USER}/Projects/${persistent}/joomla" -type d -exec chmod 755 {} \;
+          sudo find /"home/${USER}/Projects/${persistent}/joomla" -type d -exec chmod 755 {} \; &
+          showProgress "chown" "Setting the directory permissions for the ${persistent} Joomla website.\n(f i n d ${persistent}/joomla -type d -exec chmod 755 {} \;)"
+          # lock jetbrains folder
+          [ -e "${VDM_PROJECT_PATH}/${persistent}/joomla/.idea" ] && {
+            sudo chmod -R 700 "${VDM_PROJECT_PATH}/${persistent}/joomla/.idea"
+            # add a locking .htaccess file and set its access
+            lockFolder >"${VDM_PROJECT_PATH}/${persistent}/joomla/.idea/.htaccess"
+            sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/.idea/.htaccess"
+          }
+          # lock hidden folder
+          [ -e "${VDM_PROJECT_PATH}/${persistent}/joomla/.hidden" ] && {
+            sudo chmod -R 700 "${VDM_PROJECT_PATH}/${persistent}/joomla/.hidden"
+            # add a locking .htaccess file and set its access
+            lockFolder >"${VDM_PROJECT_PATH}/${persistent}/joomla/.hidden/.htaccess"
+            sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/.hidden/.htaccess"
+          }
+          # lock git folder
+          [ -e "${VDM_PROJECT_PATH}/${persistent}/joomla/.git" ] && {
+            sudo chmod -R 700 "${VDM_PROJECT_PATH}/${persistent}/joomla/.git"
+            # add a locking .htaccess file and set its access
+            lockFolder >"${VDM_PROJECT_PATH}/${persistent}/joomla/.git/.htaccess"
+            sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/.git/.htaccess"
+          }
+          # lock the tmp folder
+          [ -e "${VDM_PROJECT_PATH}/${persistent}/joomla/tmp" ] && {
+            sudo chmod -R 700 "${VDM_PROJECT_PATH}/${persistent}/joomla/tmp"
+            # add a locking .htaccess file and set its access
+            # lockFolder > "${VDM_PROJECT_PATH}/${persistent}/joomla/tmp/.htaccess"
+            # sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/tmp/.htaccess"
+          }
           # Change the image folder permissions
           # chmod 707 "${VDM_PROJECT_PATH}/${persistent}/joomla/images"
           # chmod 707 "${VDM_PROJECT_PATH}/${persistent}/joomla/images/stories"
           #
-          # Check if the setfacl command is installed
-          # shellcheck disable=SC2015
-          if command -v setfacl >/dev/null 2>&1; then
-            ### Fix the folder permissions so the active user (1000) can access the files
-            echo "Fixing the folder permissions of ${persistent} Joomla so user:$USER can access them"
-            sudo setfacl -R -m u:"$USER":rwx "${VDM_PROJECT_PATH}/${persistent}/joomla"
-          else
-            echo "[ERROR] Could not fix the permissions of the ${persistent} Joomla so user:$USER can access them."
-            echo "[ERROR] You will need to install: setfacl for this option to work, then run this fix again."
+          # get current user ID
+          user_id="$(id -u)"
+          # check if the current user mismatch
+          if [ "$user_id" != "$VDM_PUID" ]; then
+            # Check if the setfacl command is installed
+            # shellcheck disable=SC2015
+            if command -v setfacl >/dev/null 2>&1; then
+              ### Fix the folder permissions so the active user (1000) can access the files
+              sudo setfacl -R -m u:"$USER":rwx "${VDM_PROJECT_PATH}/${persistent}/joomla" &
+              showProgress "setfacl" "Setting the permissions of ${persistent} Joomla so user:$USER can access and edit them both the files and folders."
+            else
+              showError "[ERROR] Could not fix the permissions of the ${persistent} Joomla so user:$USER can access them.\n\n\
+                You will need to install: setfacl for this option to work, then run this fix again."
+            fi
+          elif command -v setfacl >/dev/null 2>&1; then
+            # we remove the acl map if it was set before
+            sudo setfacl -R -b "${VDM_PROJECT_PATH}/${persistent}/joomla"
           fi
           ### Fix the folder ownership of database folders
           # id -u systemd-coredump
-          # getent group systemd-coredump | awk -F: '{printf "Group %s with GID=%d\n", $1, $3}'
-          echo "Fixing the folder ownership of ${persistent} database folders to belong to 999:systemd-coredump"
+          # id -g systemd-coredump
           #
-          sudo chown -R 999:999 "${VDM_PROJECT_PATH}/${persistent}/db"
+          sudo chown -R 999:999 "${VDM_PROJECT_PATH}/${persistent}/db" &
+          showProgress "chown" "Setting the ownership of ${persistent} database directory/files.\n(c h o w n -R 999:999 ${persistent}/db)"
           ### Fix the folder permissions for the database files
           #
-          echo "Fixing the file and folder permissions for the ${persistent} database files"
-          #
           # Change the file permissions
-          sudo find "${VDM_PROJECT_PATH}/${persistent}/db" -type f -exec chmod 660 {} \;
-          sudo find "${VDM_PROJECT_PATH}/${persistent}/db" -type d -exec chmod 700 {} \;
+          sudo find "${VDM_PROJECT_PATH}/${persistent}/db" -type f -exec chmod 660 {} \; &
+          showProgress "find" "Setting the file permissions for the ${persistent} database.\n(f i n d ${persistent}/db -type f -exec chmod 660 {} \;)"
+          sudo find "${VDM_PROJECT_PATH}/${persistent}/db" -type d -exec chmod 700 {} \; &
+          showProgress "find" "Setting the directory permissions for the ${persistent} database.\n(f i n d ${persistent}/db -type d -exec chmod 700 {} \;)"
           # show the completion of this permission fix
-          showNotice "Permissions fix completed on (${persistent})."
+          showNotice "Permissions update completed!"
         else
           showError "${VDM_PROJECT_PATH}/${persistent} is not a joomla persistent volume and was skipped."
         fi
@@ -1557,7 +1619,7 @@ function runUpdate() {
     # some local values
     local branch
     # get the target branch to use in our update
-    branch=$(getTargetBranch)
+    isExpert && branch=$(getTargetBranch)
     # pull the latest version. Master is always the latest
     if sudo curl --fail -L "https://git.vdm.dev/api/v1/repos/octoleo/octojoom/raw/src/octojoom?ref=${branch:-master}" -o /usr/local/bin/octojoom 2>/dev/null; then
       # give success message
@@ -1582,7 +1644,7 @@ function runUpdate() {
       sudo chmod +x /usr/local/bin/octojoom
     fi
     # always exit so the new script can load
-    exit 0
+    quitProgram
   fi
 }
 
@@ -1645,7 +1707,7 @@ function runUninstall() {
         VOLUMES: ${VDM_PROJECT_PATH} \n\
         CONFIG:  ${VDM_SRC_PATH}" 20 112
       # we exit here... where done!
-      exit 0
+      quitProgram
     else
       # little notice
       showNotice "This option lets you choose what you keep, so read the questions carefully! IT CAN'T BE UNDONE!"
@@ -1731,7 +1793,7 @@ function runUninstall() {
     whiptail --title "${PROGRAM_NAME} v${_VERSION} is UNINSTALLED" --msgbox "\n\n\
       ${PROGRAM_NAME} v${_V} has been uninstalled." 10 112
     # exit the program right now
-    exit 0
+    quitProgram
   fi
 }
 
@@ -1780,7 +1842,7 @@ function showJoomla() {
   # menu for dynamic addition
   local menu_options=()
   # our counter
-  local i=2
+  local i=3
   # load the back menu
   menu_options+=("back" "<-- Return to the main menu.")
   # setup new container
@@ -1798,7 +1860,7 @@ function showJoomla() {
   hasDirectories 'joomla/enabled' &&
     menu_options+=("up" "Pull up all enabled containers") && i=$((i + 1))
   # edit available container
-  hasDirectories 'joomla/available' &&
+  isExpert && hasDirectories 'joomla/available' &&
     menu_options+=("edit" "Edit available container") && i=$((i + 1))
   # fix permissions
   hasDirectories '' "${VDM_PROJECT_PATH}" &&
@@ -1807,6 +1869,8 @@ function showJoomla() {
   # delete a container
   hasDirectories 'joomla/available' &&
     menu_options+=("delete" "Delete a container") && i=$((i + 1))
+  # Quit Octoleo Program
+  menu_options+=("quit" "Quit ${PROGRAM_NAME}")
   # get the selection
   CHOICE=$(
     whiptail --menu "Make your selection" 20 112 $i \
@@ -1815,6 +1879,7 @@ function showJoomla() {
       "${menu_options[@]}" 3>&2 2>&1 1>&3
   )
 
+  # menu actions
   case $CHOICE in
   "setup")
     setupContainer 'joomla'
@@ -1835,10 +1900,18 @@ function showJoomla() {
     upContainers 'joomla'
     ;;
   "fix")
-    fixContainerPermissions
+    fixContainersPermissions
     ;;
   "delete")
     deleteContainer 'joomla'
+    ;;
+  "quit") quitProgram ;;
+  esac
+
+  # menu loop
+  case $CHOICE in
+  "setup" | "edit" | "enable" | "disable" | "down" | "up" | "fix" | "delete")
+    showJoomla
     ;;
   esac
 }
@@ -1848,7 +1921,7 @@ function showOpenssh() {
   # menu for dynamic addition
   local menu_options=()
   # our counter
-  local i=2
+  local i=3
   # load the back menu
   menu_options+=("back" "<-- Return to the main menu.")
   # setup new container
@@ -1866,11 +1939,13 @@ function showOpenssh() {
   hasDirectories 'openssh/enabled' &&
     menu_options+=("up" "Pull up all enabled containers") && i=$((i + 1))
   # edit available container
-  hasDirectories 'openssh/available' &&
+  isExpert && hasDirectories 'openssh/available' &&
     menu_options+=("edit" "Edit available container") && i=$((i + 1))
   # delete a container
   hasDirectories 'openssh/available' &&
     menu_options+=("delete" "Delete a container") && i=$((i + 1))
+  # Quit Octoleo Program
+  menu_options+=("quit" "Quit ${PROGRAM_NAME}")
   # get the selection
   CHOICE=$(
     whiptail --menu "Make your selection" 20 112 $i \
@@ -1901,6 +1976,14 @@ function showOpenssh() {
   "delete")
     deleteContainer 'openssh'
     ;;
+  "quit") quitProgram ;;
+  esac
+
+  # menu loop
+  case $CHOICE in
+  "setup" | "edit" | "enable" | "disable" | "down" | "up" | "delete")
+    showOpenssh
+    ;;
   esac
 }
 
@@ -1909,9 +1992,9 @@ function showTraefik() {
   # menu for dynamic addition
   local menu_options=()
   # our counter
-  local i=2
+  local i=3
   # load the back menu
-  menu_options+=("back" "<-- Return to the main menu.")
+  menu_options+=("back" "<-- Return to the main menu.") && i=$((i + 1))
   # setup new container
   menu_options+=("setup" "Setup or rebuild Traefik")
   # enable existing container
@@ -1921,11 +2004,13 @@ function showTraefik() {
   [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
     menu_options+=("disable" "Disable Traefik") && i=$((i + 1))
   # edit available container
-  [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
+  isExpert && [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
     menu_options+=("edit" "Edit Traefik") && i=$((i + 1))
   # delete traefik container
   [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
     menu_options+=("delete" "Delete Traefik") && i=$((i + 1))
+  # Quit Octoleo Program
+  menu_options+=("quit" "Quit ${PROGRAM_NAME}")
   # get the selection
   CHOICE=$(
     whiptail --menu "Make your selection" 20 112 $i \
@@ -1934,6 +2019,7 @@ function showTraefik() {
       "${menu_options[@]}" 3>&2 2>&1 1>&3
   )
 
+  # menu actions
   case $CHOICE in
   "setup")
     setupContainer 'traefik'
@@ -1950,6 +2036,14 @@ function showTraefik() {
   "delete")
     deleteContainer 'traefik'
     ;;
+  "quit") quitProgram ;;
+  esac
+
+  # menu loop
+  case $CHOICE in
+  "setup" | "edit" | "enable" | "disable" | "delete")
+    showTraefik
+    ;;
   esac
 }
 
@@ -1958,7 +2052,7 @@ function showPortainer() {
   # menu for dynamic addition
   local menu_options=()
   # our counter
-  local i=2
+  local i=3
   # load the back menu
   menu_options+=("back" "<-- Return to the main menu.")
   # setup new container
@@ -1970,11 +2064,13 @@ function showPortainer() {
   [ -f "${VDM_REPO_PATH}/portainer/docker-compose.yml" ] &&
     menu_options+=("disable" "Disable Portainer") && i=$((i + 1))
   # edit available container
-  [ -f "${VDM_REPO_PATH}/portainer/docker-compose.yml" ] &&
+  isExpert && [ -f "${VDM_REPO_PATH}/portainer/docker-compose.yml" ] &&
     menu_options+=("edit" "Edit Portainer") && i=$((i + 1))
   # delete traefik container
   [ -f "${VDM_REPO_PATH}/portainer/docker-compose.yml" ] &&
     menu_options+=("delete" "Delete Portainer") && i=$((i + 1))
+  # Quit Octoleo Program
+  menu_options+=("quit" "Quit ${PROGRAM_NAME}")
   # get the selection
   CHOICE=$(
     whiptail --menu "Make your selection" 20 112 $i \
@@ -1983,6 +2079,7 @@ function showPortainer() {
       "${menu_options[@]}" 3>&2 2>&1 1>&3
   )
 
+  # menu actions
   case $CHOICE in
   "setup")
     setupContainer 'portainer'
@@ -1999,23 +2096,35 @@ function showPortainer() {
   "delete")
     deleteContainer 'portainer'
     ;;
+  "quit") quitProgram ;;
+  esac
+
+  # menu loop
+  case $CHOICE in
+  "setup" | "edit" | "enable" | "disable" | "delete")
+    showPortainer
+    ;;
   esac
 }
 
 # show systems help menu
-function showHelpMenu() {
+function showSettings() {
   # menu for dynamic addition
   local menu_options=()
   # our counter
-  local i=7
+  local i=8
   # load the back menu
   menu_options+=("back" "<-- Return to the main menu.")
+  # the mode switch
+  isExpert && menu_options+=("basic-mode" "Switch to basic mode")
+  ! isExpert && menu_options+=("expert-mode" "Switch to expert mode")
+  i=$((i + 1))
   # Show command help
   menu_options+=("command-help" "Help with commands")
   # Show folder paths
   menu_options+=("important-paths" "Important paths")
   # Edit the global config
-  [ -f "${VDM_SRC_PATH}/.env" ] &&
+  isExpert && [ -f "${VDM_SRC_PATH}/.env" ] &&
     menu_options+=("edit-config" "Edit Config") && i=$((i + 1))
   # Report an Issue
   menu_options+=("report-issue" "Report an issue")
@@ -2025,15 +2134,24 @@ function showHelpMenu() {
   menu_options+=("uninstall" "Uninstall ${PROGRAM_NAME,,}")
   # Octoleo details
   menu_options+=("octojoom" "Octojoom")
+  # Quit Octoleo Program
+  menu_options+=("quit" "Quit ${PROGRAM_NAME}")
   # get the selection
   CHOICE=$(
     whiptail --menu "Make your selection" 20 112 $i \
-      --title "Help Menu | ${PROGRAM_NAME} v${_V}" --fb \
+      --title "Settings Menu | ${PROGRAM_NAME} v${_V}" --fb \
       --backtitle "    Octoleo" --nocancel --notags \
       "${menu_options[@]}" 3>&2 2>&1 1>&3
   )
 
+  # menu actions
   case $CHOICE in
+  "basic-mode")
+    setMode 'basic'
+    ;;
+  "expert-mode")
+    setMode 'expert'
+    ;;
   "command-help")
     showCommandsHelpMenu
     ;;
@@ -2055,6 +2173,14 @@ function showHelpMenu() {
   "octojoom")
     octojoomQuietly
     ;;
+  "quit") quitProgram ;;
+  esac
+
+  # menu loop
+  case $CHOICE in
+  "basic-mode" | "expert-mode" | "command-help" | "important-paths" | "edit-config" | "report-issue" | "octojoom")
+    showSettings
+    ;;
   esac
 }
 
@@ -2063,7 +2189,7 @@ function domainsMenu() {
   # menu for dynamic addition
   local menu_options=()
   # our counter
-  local i=2
+  local i=3
   # load the back menu
   menu_options+=("back" "<-- Return to the main menu.")
   # add more domains
@@ -2073,8 +2199,10 @@ function domainsMenu() {
   [ -f "${VDM_SRC_PATH}/.domains" ] &&
     menu_options+=("delete" "Delete Domain") && i=$((i + 1))
   # edit available container
-  allowEditHostFile &&
+  isExpert && allowEditHostFile &&
     menu_options+=("edit" "Edit Host File") && i=$((i + 1))
+  # Quit Octoleo Program
+  menu_options+=("quit" "Quit ${PROGRAM_NAME}")
   # get the selection
   CHOICE=$(
     whiptail --menu "Make your selection" 20 112 $i \
@@ -2083,6 +2211,7 @@ function domainsMenu() {
       "${menu_options[@]}" 3>&2 2>&1 1>&3
   )
 
+  # menu actions
   case $CHOICE in
   "add")
     setMultiDomains
@@ -2092,6 +2221,14 @@ function domainsMenu() {
     ;;
   "edit")
     editHostFile
+    ;;
+  "quit") quitProgram ;;
+  esac
+
+  # menu loop
+  case $CHOICE in
+  "add" | "delete" | "edit")
+    domainsMenu
     ;;
   esac
 }
@@ -2118,10 +2255,10 @@ function mainMenu() {
   # Delete Persistent Volumes
   hasDirectories '' "${VDM_PROJECT_PATH}" &&
     menu_options+=("delete" "Delete Persistent Volumes") && i=$((i + 1))
-  # Show help
-  menu_options+=("help" "Main Help Menu")
-  # Octoleo details
-  menu_options+=("quit" "Quit Program")
+  # Octoleo settings
+  menu_options+=("settings" "${PROGRAM_NAME} Settings")
+  # Quit Octoleo Program
+  menu_options+=("quit" "Quit ${PROGRAM_NAME}")
   # get the selection
   while true; do
     CHOICE=$(
@@ -2150,10 +2287,10 @@ function mainMenu() {
     "delete")
       deletePersistentVolumes
       ;;
-    "help")
-      showHelpMenu
+    "settings")
+      showSettings
       ;;
-    "quit") exit ;;
+    "quit") quitProgram ;;
     esac
   done
 }
@@ -2181,6 +2318,51 @@ function showLink() {
   whiptail --title "${3:-Open Link} | ${PROGRAM_NAME} v${_V}" --msgbox "${2:-To open the link click here:} ${1}" 8 112
 }
 
+# show progress bar
+function showProgress() {
+  # some locals
+  local searching_for
+  local title
+  local message
+  local per
+  local program
+  # get input
+  searching_for="$1"
+  message="$2"
+  title="${3:-Please wait!}"
+  # our little loop progress
+  {
+    per=1
+    while (true); do
+      # shellcheck disable=SC2009
+      program=$(ps aux | grep -v grep | grep -e "${searching_for}")
+      if [[ "$program" == "" ]] && [[ "$per" -eq "0" ]]; then
+        # searching_for did not start
+        break
+      elif [[ "$program" == "" ]] && [[ "$per" -gt "0" ]]; then
+        # we are finished, so we slow down to 100%
+        sleep .5
+        echo 88
+        sleep .5
+        echo 90
+        sleep 1
+        echo 98
+        sleep .5
+        echo 100
+        sleep 1
+        break
+      elif [[ "87" -eq "$per" ]]; then
+        # if it takes longer we loop
+        per="33"
+      fi
+      # sleep a little moment
+      sleep .5
+      echo $per
+      per=$((per + 1))
+    done
+  } | whiptail --title "${title}" --gauge "${message}" 8 112 0
+}
+
 # show important paths
 function showImportantPaths() {
   local message
@@ -2190,13 +2372,16 @@ function showImportantPaths() {
   We have a few important paths that you should know, and use to manually manage your setup.
 
     DOCKER:  ${VDM_REPO_PATH}
+    SOURCE:  ${VDM_SRC_PATH}/.images-source
+    DOMAINS: ${VDM_SRC_PATH}/.domains
+    CONFIG:  ${VDM_SRC_PATH}/.env
     SSH:     ${VDM_REPO_PATH}/openssh/.ssh
     VOLUMES: ${VDM_PROJECT_PATH}
-    CONFIG:  ${VDM_SRC_PATH}
 
   Then we have some key environment variable files that hold very useful and important information.
-  Since we do not store any passwords or other important details in the octojoom.yml files
-  they are stored in these environment variable files and its permissions are (600) for security.
+  Since we do not store any passwords or other important details in the docker-compose.yml files
+  they are stored in >>these environment variable files<< and therefore we set these .env file
+  permission to (600) for security.
 
     JOOMLA:    ${VDM_REPO_PATH}/joomla/.env
     OPENSSH:   ${VDM_REPO_PATH}/openssh/.env
@@ -2517,15 +2702,57 @@ function getMainDomain() {
 
 # set the container user
 function setContainerUser() {
+  # ask if a new User ID should be set if one is set
+  if [ -n "${VDM_PUID}" ] && [[ "${VDM_PUID}" =~ ^[0-9]+$ ]] &&
+    (whiptail --yesno "The user ID in ${PROGRAM_NAME} memory is ${VDM_PUID}, would you like to change this user ID?" --defaultno --title "Set User ID" 8 112); then
+    # always first reset
+    unset VDM_PUID
+  fi
+  # give little notice
+  # showNotice "To get the ID of a user in a container:\n\n$ docker exec -it container_name /bin/bash\n$ id -u www-data"
   # we first get the container user ID
-  VDM_PUID=$(getInput "Enter user ID for the ${VDM_CONTAINER_TYPE^} container.\n[add only a number]" \
-    "${1:-1000}" 'Enter Container User ID')
+  while [ -z "${VDM_PUID}" ] || [ ${#VDM_PUID} -le 1 ] || ! [[ "${VDM_PUID}" =~ ^[0-9]+$ ]]; do
+    VDM_PUID=$(getInput "Enter user ID for the ${VDM_CONTAINER_TYPE^} container. Use default:${1:-1000} if you don't know.\n[add only a number]" \
+      "${1:-1000}" 'Enter User ID')
+    # check if we have success
+    if [ ${#VDM_PUID} -le 1 ] || ! [[ "${VDM_PUID}" =~ ^[0-9]+$ ]]; then
+      showError "You must enter a user ID like: ${1:-1000} (only the number)"
+    fi
+  done
+  # ask if a new Group ID should be set if one is set
+  if [ -n "${VDM_PGID}" ] && [[ "${VDM_PGID}" =~ ^[0-9]+$ ]] &&
+    (whiptail --yesno "The user-group ID in ${PROGRAM_NAME} memory is ${VDM_PGID}, would you like to change this user-group ID?" --defaultno --title "Set User-Group ID" 8 112); then
+    # always first reset
+    unset VDM_PGID
+  fi
+  # give little notice
+  # showNotice "To get the ID of a user-group in a container:\n\n$ docker exec -it container_name /bin/bash\n$ id -u www-data"
   # we get the container user-group ID
-  VDM_PGID=$(getInput "Enter user-group ID for the ${VDM_CONTAINER_TYPE^} container.\n[add only a number]" \
-    "${1:-1000}" 'Enter Container User Group ID')
+  while [ -z "${VDM_PGID}" ] || [ ${#VDM_PGID} -le 1 ] || ! [[ "${VDM_PGID}" =~ ^[0-9]+$ ]]; do
+    VDM_PGID=$(getInput "Enter user-group ID for the ${VDM_CONTAINER_TYPE^} container. Use default:${1:-1000} if you don't know.\n[add only a number]" \
+      "${1:-1000}" 'Enter User Group ID')
+    # check if we have success
+    if [ ${#VDM_PGID} -le 1 ] || ! [[ "${VDM_PGID}" =~ ^[0-9]+$ ]]; then
+      showError "You must enter a user-group ID like: ${1:-1000} (only the number)"
+    fi
+  done
   # make available
   export VDM_PUID
   export VDM_PGID
+}
+
+# set the program mode
+function setMode() {
+  # some default
+  VDM_EXPERT_MODE=false
+  # set the switch
+  [ "${1:-basic}" = 'basic' ] || VDM_EXPERT_MODE=true
+  # always remove previous state
+  deleteEnvVariable "VDM_EXPERT_MODE"
+  # set persistent
+  setEnvVariable "VDM_EXPERT_MODE=${VDM_EXPERT_MODE}"
+  # make global
+  export VDM_EXPERT_MODE
 }
 
 # set the domain
@@ -2681,6 +2908,17 @@ function setUpdateHostFile() {
   export VDM_UPDATE_HOST
 }
 
+# set persistence volumes
+function setPersistence() {
+  # ask the question
+  if (whiptail --yesno "Would you like to enable persistence on this container." --defaultno --title "Persist Volumes" 8 112); then
+    # yes persistence
+    return 0
+  fi
+  # no persistence
+  return 1
+}
+
 # set the secure state
 function setSecureState() {
   if [ "${VDM_SECURE:-not}" = 'not' ]; then
@@ -2760,6 +2998,41 @@ function downApache() {
   }
 }
 
+# lock a folder path
+function lockFolder() {
+  cat <<EOF
+# Apache 2.4+
+<IfModule mod_authz_core.c>
+ Require all denied
+</IfModule>
+
+# Apache 2.0-2.2
+<IfModule !mod_authz_core.c>
+ Deny from all
+</IfModule>
+EOF
+}
+
+# clear the main environment variables
+function quitProgram() {
+  ####### CLEAR ALL
+  unset VDM_PUID
+  unset VDM_PGID
+  unset VDM_CONTAINER_TYPE
+  unset VDM_TASK
+  unset VDM_SRC_PATH
+  unset VDM_REPO_PATH
+  unset VDM_PROJECT_PATH
+  unset VDM_DOMAIN
+  unset VDM_MULTI_DOMAIN
+  unset VDM_SECURE
+  unset VDM_UPDATE_HOST
+  unset VDM_CONTAINER
+  unset VDM_ACCESS_TOKEN
+  # exit at this point
+  exit 0
+}
+
 # do we allow multiple domains
 function allowMultiDomains() {
   # Allow multiple domains
@@ -2815,6 +3088,21 @@ function saveMultiDomain() {
   return 0
 }
 
+# delete a global Environment Variable
+function deleteEnvVariable() {
+  # some locals
+  local env_key
+  # check if the env file exist
+  if [ -f "${VDM_SRC_PATH}/.env" ]; then
+    # check that we have the key
+    env_key="${1:-none}"
+    # shellcheck disable=SC2015
+    grep -vx "${env_key}=.*" "${VDM_SRC_PATH}/.env" >"${VDM_SRC_PATH}/.env_tmp" &&
+      mv "${VDM_SRC_PATH}/.env_tmp" "${VDM_SRC_PATH}/.env" ||
+      rm "${VDM_SRC_PATH}/.env_tmp"
+  fi
+}
+
 # delete multiple domains
 function deleteMultiDomains() {
   # menu for dynamic addition
@@ -2853,6 +3141,17 @@ function deleteMultiDomains() {
       fi
     fi
   fi
+}
+
+# check if expert mode is on
+function isExpert() {
+  # check if its set
+  if [ -n "${VDM_EXPERT_MODE}" ] && $VDM_EXPERT_MODE; then
+    # is expert
+    return 0
+  fi
+  # not expert
+  return 1
 }
 
 # check if some thing is a function
@@ -3038,7 +3337,7 @@ while :; do
   case $1 in
   -h | --help)
     showHelp # Display a usage synopsis.
-    exit
+    quitProgram
     ;;
   --update)
     runUpdate
@@ -3054,6 +3353,7 @@ while :; do
     fi
     ;;
   --access-token=?*)
+    # shellcheck disable=SC2034
     VDM_ACCESS_TOKEN=${1#*=} # Delete everything up to "=" and assign the remainder.
     ;;
   --access-token=) # Handle the case of an empty --type=
@@ -3345,7 +3645,9 @@ VDM_SRC_PATH="/home/${USER}/.config/octojoom"
 # create the folder if not set
 # shellcheck disable=SC2174
 mkdir -p -m '700' "${VDM_SRC_PATH}"
-# load this globals
+# first run switch
+VDM_FIRST_RUN=false
+# load the globals
 # shellcheck disable=SC1090
 [ -f "${VDM_SRC_PATH}/.env" ] && source "${VDM_SRC_PATH}/.env"
 # get repo path where store the container deploy scripts
@@ -3364,6 +3666,8 @@ while [ ${#VDM_REPO_PATH} -le 1 ] || [ ! -d "${VDM_REPO_PATH}" ]; do
       showError "You must set a repository path where we can store the containers' docker-composer.yml deployment files."
     fi
   fi
+  # trip switch of first run
+  VDM_FIRST_RUN=true
 done
 # add this value if not set variable
 setEnvVariable "VDM_REPO_PATH=\"${VDM_REPO_PATH}\""
@@ -3383,26 +3687,27 @@ while [ ${#VDM_PROJECT_PATH} -le 1 ] || [ ! -d "${VDM_PROJECT_PATH}" ]; do
       showError "You must set a projects' path where we can store the containers' persistent volumes."
     fi
   fi
+  # trip switch of first run
+  VDM_FIRST_RUN=true
 done
 # add this value if not set variable
 setEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
 # set these globally
 export VDM_REPO_PATH
 export VDM_PROJECT_PATH
+# if this is the first run we should setup traefik
+$VDM_FIRST_RUN && {
+  # set traefik as the container type
+  : "${VDM_CONTAINER_TYPE:=traefik}"
+  # and enable it
+  : "${VDM_TASK:=setup}"
+  # trigger main
+  main
+  # clear it again
+  VDM_CONTAINER_TYPE=''
+  VDM_TASK=''
+}
 
 #####################################################################################################################VDM
 ######################################## MAIN ┬┴┬┴┤(･_├┬┴┬┴
 main
-
-####### CLEAR ALL
-unset VDM_CONTAINER_TYPE
-unset VDM_TASK
-unset VDM_SRC_PATH
-unset VDM_REPO_PATH
-unset VDM_PROJECT_PATH
-unset VDM_DOMAIN
-unset VDM_MULTI_DOMAIN
-unset VDM_SECURE
-unset VDM_UPDATE_HOST
-unset VDM_CONTAINER
-unset VDM_ACCESS_TOKEN
