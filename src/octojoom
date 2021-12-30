@@ -260,23 +260,7 @@ function joomla__TRuST__setup() {
   local vdm_key_root
   local vdm_env_root
   # get the Joomla image source
-  VDM_J_REPO='joomla'
-  isExpert && VDM_J_REPO=$(getImageSource)
-  # build the URL
-  if [ "${VDM_J_REPO}" = 'joomla' ]; then
-    vdm_image_repo_url="https://hub.docker.com/_/${VDM_J_REPO}?tab=tags"
-  else
-    vdm_image_repo_url="https://hub.docker.com/r/${VDM_J_REPO}/tags"
-  fi
-  # get the Joomla version if not set
-  while [ ${#VDM_JV} -le 1 ]; do
-    # get the value
-    VDM_JV=$(getInput "Enter Joomla version tag for this container.\n[See available tags here ${vdm_image_repo_url}]" '3.10' 'Enter Version Tag')
-    # keep asking
-    [ ${#VDM_JV} -ge 1 ] || {
-      showError "You must enter a version tag. See available tags here ${vdm_image_repo_url}"
-    }
-  done
+  setImageSource
   # get the key if not set
   setUniqueKey
   # get the env key if not set
@@ -358,19 +342,24 @@ function joomla__TRuST__setup() {
     done
   }
   # set persistence
+  VDM_JOOMLA_VOLUMES_MOUNT=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_KEY}/joomla:/var/www/html\"")
+  VDM_DB_VOLUMES_MOUNT=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_KEY}/db:/var/lib/mysql\"")
+  VDM_VOLUMES='volumes:'
+  reset_volume=true
   # only if in expert mode
-  if isExpert; then
-    if setPersistence; then
-      VDM_PERSISTENCE=''
-      VDM_NOT_PERSISTENCE='#'
-    else
-      VDM_PERSISTENCE='#'
-      VDM_NOT_PERSISTENCE=''
-    fi
-  else
-    VDM_PERSISTENCE=''
-    VDM_NOT_PERSISTENCE='#'
+  if isExpert && ! setPersistence 'Joomla website files and folders'; then
+    VDM_JOOMLA_VOLUMES_MOUNT=$(getYMLine3 "- ${VDM_KEY,,}_web:/var/www/html")
+    VDM_VOLUMES+=$(getYMLine1 "${VDM_KEY,,}_web:")
+    reset_volume=false
   fi
+  # only if in expert mode
+  if isExpert && ! setPersistence 'Joomla database'; then
+    VDM_DB_VOLUMES_MOUNT=$(getYMLine3 "- ${VDM_KEY,,}_db:/var/lib/mysql")
+    VDM_VOLUMES+=$(getYMLine1 "${VDM_KEY,,}_db:")
+    reset_volume=false
+  fi
+  # check if we have to reset the volume value
+  $reset_volume && VDM_VOLUMES=''
   # add the projects path
   setContainerEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
   # set the container user detail id needed
@@ -382,6 +371,14 @@ function joomla__TRuST__setup() {
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_PUID=\"#${VDM_PUID}\""
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_PGID=\"#${VDM_PGID}\""
     fi
+  fi
+  # add PHP settings
+  if isExpert && setPHPSettings; then
+    VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_KEY}/php.ini:/var/www/html/php.ini\"")
+  fi
+  # customize docker-entrypoint.sh
+  if isExpert && setDockerEntrypoint; then
+    VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_KEY}/entrypoint.sh:/entrypoint.sh\"")
   fi
   # add this value if not set variable
   [ ${#vdm_database_name} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB=\"${vdm_database_name}\""
@@ -398,13 +395,14 @@ function joomla__TRuST__setup() {
   export VDM_REPO_PATH
   export VDM_PROJECT_PATH
   # container
-  export VDM_J_REPO
-  export VDM_JV
   export VDM_REMOVE_SECURE
   export VDM_ENTRY_POINT
   export VDM_HTTP_SCHEME
   export VDM_PERSISTENCE
   export VDM_NOT_PERSISTENCE
+  export VDM_VOLUMES
+  export VDM_JOOMLA_VOLUMES_MOUNT
+  export VDM_DB_VOLUMES_MOUNT
   # container lower
   export vdm_database_name
   export vdm_database_user
@@ -437,6 +435,7 @@ function joomla__TRuST__setup() {
   # container
   unset VDM_SUBDOMAIN
   unset VDM_J_REPO
+  unset VDM_ENTRY_REPO
   unset VDM_JV
   unset VDM_KEY
   unset VDM_ENV_KEY
@@ -445,6 +444,9 @@ function joomla__TRuST__setup() {
   unset VDM_HTTP_SCHEME
   unset VDM_PERSISTENCE
   unset VDM_NOT_PERSISTENCE
+  unset VDM_VOLUMES
+  unset VDM_JOOMLA_VOLUMES_MOUNT
+  unset VDM_DB_VOLUMES_MOUNT
   # container lower
   unset vdm_database_name
   unset vdm_database_user
@@ -476,9 +478,7 @@ services:
       - MARIADB_USER=\${VDM_${VDM_ENV_KEY^^}_DB_USER}
       - MARIADB_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_DB_PASS}
       - MARIADB_ROOT_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_DB_ROOT}
-    volumes:
-${VDM_PERSISTENCE}      - "\${VDM_PROJECT_PATH}/${VDM_KEY}/db:/var/lib/mysql"
-${VDM_NOT_PERSISTENCE}      - ${VDM_KEY,,}_db:/var/lib/mysql
+    volumes:${VDM_DB_VOLUMES_MOUNT}
     networks:
       - traefik
   joomla_${VDM_KEY}:
@@ -492,9 +492,7 @@ ${VDM_NOT_PERSISTENCE}      - ${VDM_KEY,,}_db:/var/lib/mysql
       - JOOMLA_DB_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_DB_PASS}
     depends_on:
       - mariadb_${VDM_KEY}
-    volumes:
-${VDM_PERSISTENCE}      - "\${VDM_PROJECT_PATH}/${VDM_KEY}/joomla:/var/www/html"
-${VDM_NOT_PERSISTENCE}      - ${VDM_KEY,,}_web:/var/www/html
+    volumes:${VDM_JOOMLA_VOLUMES_MOUNT}
     networks:
       - traefik
     labels:
@@ -531,9 +529,8 @@ networks:
     external:
       name: traefik_webgateway
 
-${VDM_NOT_PERSISTENCE}volumes:
-${VDM_NOT_PERSISTENCE}  ${VDM_KEY,,}_web:
-${VDM_NOT_PERSISTENCE}  ${VDM_KEY,,}_db:
+${VDM_VOLUMES}
+
 EOF
 }
 
@@ -659,7 +656,7 @@ function openssh__TRuST__setup() {
   # convert the string to an array
   IFS=' ' read -r -a vdm_mount_dirs_array <<<"${VDM_MOUNT_DIRS[@]}"
   # build the mount projects
-  VDM_MOUNT_PROJECTS=$(getYMLDashLine "\${${VDM_ENV_PUBLIC_KEY_U_DIR}}:/config/ssh_public_keys")
+  VDM_VOLUMES_MOUNT=$(getYMLine3 "- \${${VDM_ENV_PUBLIC_KEY_U_DIR}}:/config/ssh_public_keys")
   # loop over the directories to build the
   for mDir in "${vdm_mount_dirs_array[@]}"; do
     # set the full path
@@ -668,9 +665,9 @@ function openssh__TRuST__setup() {
     mFull="${VDM_PROJECT_U_DIR}/${mDir}/joomla"
     # add to mount projects
     if [ -d "${mFull}" ] && (whiptail --yesno "Should we ONLY mount the (joomla website files) ${mDir}/joomla directory" --title "Mount Joomla" 8 112); then
-      VDM_MOUNT_PROJECTS+=$(getYMLDashLine "\${VDM_${VDM_ENV_KEY^^}_PROJECT_DIR}/${mDir}/joomla:/app/${mDir}")
+      VDM_VOLUMES_MOUNT+=$(getYMLine3 "- \${VDM_${VDM_ENV_KEY^^}_PROJECT_DIR}/${mDir}/joomla:/app/${mDir}")
     else
-      VDM_MOUNT_PROJECTS+=$(getYMLDashLine "\${VDM_${VDM_ENV_KEY^^}_PROJECT_DIR}/${mDir}:/app/${mDir}")
+      VDM_VOLUMES_MOUNT+=$(getYMLine3 "- \${VDM_${VDM_ENV_KEY^^}_PROJECT_DIR}/${mDir}:/app/${mDir}")
     fi
   done
   # add this value if not set variable
@@ -690,12 +687,13 @@ function openssh__TRuST__setup() {
   export VDM_USER_NAME
   export VDM_PUBLIC_KEY_GLOBAL_DIR
   export VDM_PUBLIC_KEY_U_DIR
+  export VDM_VOLUMES_MOUNT
   export VDM_PROJECT_U_DIR
   # create the directory if it does not yet already exist
   # shellcheck disable=SC2174
   mkdir -p -m 700 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_USER_NAME}.${VDM_DOMAIN}"
   # place this docker composer file in its place
-  opensshContainer "${VDM_MOUNT_PROJECTS}" >"${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_USER_NAME}.${VDM_DOMAIN}/docker-compose.yml"
+  opensshContainer >"${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_USER_NAME}.${VDM_DOMAIN}/docker-compose.yml"
   # set permissions
   chmod 600 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_USER_NAME}.${VDM_DOMAIN}/docker-compose.yml"
   # saved the file
@@ -716,6 +714,7 @@ function openssh__TRuST__setup() {
   unset VDM_ENV_KEY
   unset VDM_PUBLIC_KEY_GLOBAL_DIR
   unset VDM_PUBLIC_KEY_U_DIR
+  unset VDM_VOLUMES_MOUNT
   unset VDM_PROJECT_U_DIR
   # return a success
   return 0
@@ -723,10 +722,7 @@ function openssh__TRuST__setup() {
 
 # return the Openssh Container setup yml
 function opensshContainer() {
-  # get the projects to mount
-  local mount_projects="$1"
   # we build the yml file
-  # we use 33 as this is the www-data ID
   cat <<EOF
 version: "2.1"
 services:
@@ -742,7 +738,7 @@ services:
       - PUBLIC_KEY_DIR=/config/ssh_public_keys
       - SUDO_ACCESS=${VDM_SUDO_ACCESS:-false}
       - USER_NAME=${VDM_USER_NAME:-ubuntu}
-    volumes:${mount_projects}
+    volumes:${VDM_VOLUMES_MOUNT}
     ports:
       - ${VDM_PORT}:2222
     networks:
@@ -1471,6 +1467,8 @@ function fixContainersPermissions() {
     if [ ${#vdm_fix_me} -ge 1 ] && (whiptail --yesno "${USER^}, to fix these permissions we need sudo privileges." --title "Give sudo Privileges" 8 112); then
       # convert the string to and array
       IFS=' ' read -r -a vdm_fix_me_array <<<"${vdm_fix_me[@]}"
+      # just to get sudo pass
+      sudo -v
       # loop over the directories to build the
       for volume in "${vdm_fix_me_array[@]}"; do
         # remove the " from the string
@@ -1485,50 +1483,64 @@ function fixContainersPermissions() {
           # id -u www-data
           # id -g www-data
           #
-          sudo chown -R "$VDM_PUID":"$VDM_PGID" "${VDM_PROJECT_PATH}/${persistent}/joomla" &
-          showProgress "chown" "Setting the ownership of ${persistent} Joomla directory/files.\n(c h o w n -R $VDM_PUID:$VDM_PGID ${persistent}/joomla)"
+          progressSwitchOn
+          {
+            sudo chown -R "$VDM_PUID":"$VDM_PGID" "${VDM_PROJECT_PATH}/${persistent}/joomla"
+            progressSwitchOff
+          } &
+          showProgress "Setting the ownership of ${persistent} Joomla directory/files.\n(c h o w n -R $VDM_PUID:$VDM_PGID ${persistent}/joomla)"
           ### Fix the folder permissions for the Joomla websites
           #
           # Change the file permissions
-          sudo find "${VDM_PROJECT_PATH}/${persistent}/joomla" -type f -exec chmod 644 {} \; &
-          showProgress "find" "Setting the files permissions for the ${persistent} Joomla website.\n(f i n d ${persistent}/joomla -type f -exec chmod 644 {} \;)"
-          [ -f "${VDM_PROJECT_PATH}/${persistent}/joomla/configuration.php" ] &&
-            sudo chmod 444 "${VDM_PROJECT_PATH}/${persistent}/joomla/configuration.php"
-          [ -f "${VDM_PROJECT_PATH}/${persistent}/joomla/.htaccess" ] &&
-            sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/.htaccess"
-          [ -f "${VDM_PROJECT_PATH}/${persistent}/joomla/php.ini" ] &&
-            sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/php.ini"
+          progressSwitchOn
+          {
+            sudo find "${VDM_PROJECT_PATH}/${persistent}/joomla" -type f -exec chmod 644 {} \;
+            [ -f "${VDM_PROJECT_PATH}/${persistent}/joomla/configuration.php" ] &&
+              sudo chmod 444 "${VDM_PROJECT_PATH}/${persistent}/joomla/configuration.php"
+            [ -f "${VDM_PROJECT_PATH}/${persistent}/joomla/.htaccess" ] &&
+              sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/.htaccess"
+            [ -f "${VDM_PROJECT_PATH}/${persistent}/joomla/php.ini" ] &&
+              sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/php.ini"
+            # at last we are done
+            progressSwitchOff
+          } &
+          showProgress "Setting the files permissions for the ${persistent} Joomla website.\n(f i n d ${persistent}/joomla -type f -exec chmod 644 {} \;)"
           # Change the folder permissions
-          sudo find /"home/${USER}/Projects/${persistent}/joomla" -type d -exec chmod 755 {} \; &
-          showProgress "chown" "Setting the directory permissions for the ${persistent} Joomla website.\n(f i n d ${persistent}/joomla -type d -exec chmod 755 {} \;)"
-          # lock jetbrains folder
-          [ -e "${VDM_PROJECT_PATH}/${persistent}/joomla/.idea" ] && {
-            sudo chmod -R 700 "${VDM_PROJECT_PATH}/${persistent}/joomla/.idea"
-            # add a locking .htaccess file and set its access
-            lockFolder >"${VDM_PROJECT_PATH}/${persistent}/joomla/.idea/.htaccess"
-            sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/.idea/.htaccess"
-          }
-          # lock hidden folder
-          [ -e "${VDM_PROJECT_PATH}/${persistent}/joomla/.hidden" ] && {
-            sudo chmod -R 700 "${VDM_PROJECT_PATH}/${persistent}/joomla/.hidden"
-            # add a locking .htaccess file and set its access
-            lockFolder >"${VDM_PROJECT_PATH}/${persistent}/joomla/.hidden/.htaccess"
-            sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/.hidden/.htaccess"
-          }
-          # lock git folder
-          [ -e "${VDM_PROJECT_PATH}/${persistent}/joomla/.git" ] && {
-            sudo chmod -R 700 "${VDM_PROJECT_PATH}/${persistent}/joomla/.git"
-            # add a locking .htaccess file and set its access
-            lockFolder >"${VDM_PROJECT_PATH}/${persistent}/joomla/.git/.htaccess"
-            sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/.git/.htaccess"
-          }
-          # lock the tmp folder
-          [ -e "${VDM_PROJECT_PATH}/${persistent}/joomla/tmp" ] && {
-            sudo chmod -R 700 "${VDM_PROJECT_PATH}/${persistent}/joomla/tmp"
-            # add a locking .htaccess file and set its access
-            # lockFolder > "${VDM_PROJECT_PATH}/${persistent}/joomla/tmp/.htaccess"
-            # sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/tmp/.htaccess"
-          }
+          progressSwitchOn
+          {
+            sudo find /"home/${USER}/Projects/${persistent}/joomla" -type d -exec chmod 755 {} \;
+            # lock jetbrains folder
+            [ -e "${VDM_PROJECT_PATH}/${persistent}/joomla/.idea" ] && {
+              sudo chmod -R 700 "${VDM_PROJECT_PATH}/${persistent}/joomla/.idea"
+              # add a locking .htaccess file and set its access
+              lockFolder >"${VDM_PROJECT_PATH}/${persistent}/joomla/.idea/.htaccess"
+              sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/.idea/.htaccess"
+            }
+            # lock hidden folder
+            [ -e "${VDM_PROJECT_PATH}/${persistent}/joomla/.hidden" ] && {
+              sudo chmod -R 700 "${VDM_PROJECT_PATH}/${persistent}/joomla/.hidden"
+              # add a locking .htaccess file and set its access
+              lockFolder >"${VDM_PROJECT_PATH}/${persistent}/joomla/.hidden/.htaccess"
+              sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/.hidden/.htaccess"
+            }
+            # lock git folder
+            [ -e "${VDM_PROJECT_PATH}/${persistent}/joomla/.git" ] && {
+              sudo chmod -R 700 "${VDM_PROJECT_PATH}/${persistent}/joomla/.git"
+              # add a locking .htaccess file and set its access
+              lockFolder >"${VDM_PROJECT_PATH}/${persistent}/joomla/.git/.htaccess"
+              sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/.git/.htaccess"
+            }
+            # lock the tmp folder
+            [ -e "${VDM_PROJECT_PATH}/${persistent}/joomla/tmp" ] && {
+              sudo chmod -R 700 "${VDM_PROJECT_PATH}/${persistent}/joomla/tmp"
+              # add a locking .htaccess file and set its access
+              # lockFolder > "${VDM_PROJECT_PATH}/${persistent}/joomla/tmp/.htaccess"
+              # sudo chmod 400 "${VDM_PROJECT_PATH}/${persistent}/joomla/tmp/.htaccess"
+            }
+            # at last we are done
+            progressSwitchOff
+          } &
+          showProgress "Setting the directory permissions for the ${persistent} Joomla website.\n(f i n d ${persistent}/joomla -type d -exec chmod 755 {} \;)"
           # Change the image folder permissions
           # chmod 707 "${VDM_PROJECT_PATH}/${persistent}/joomla/images"
           # chmod 707 "${VDM_PROJECT_PATH}/${persistent}/joomla/images/stories"
@@ -1541,8 +1553,12 @@ function fixContainersPermissions() {
             # shellcheck disable=SC2015
             if command -v setfacl >/dev/null 2>&1; then
               ### Fix the folder permissions so the active user (1000) can access the files
-              sudo setfacl -R -m u:"$USER":rwx "${VDM_PROJECT_PATH}/${persistent}/joomla" &
-              showProgress "setfacl" "Setting the permissions of ${persistent} Joomla so user:$USER can access and edit them both the files and folders."
+              progressSwitchOn
+              {
+                sudo setfacl -R -m u:"$USER":rwx "${VDM_PROJECT_PATH}/${persistent}/joomla"
+                progressSwitchOff
+              } &
+              showProgress "Setting the permissions of ${persistent} Joomla so user:$USER can access and edit them both the files and folders."
             else
               showError "[ERROR] Could not fix the permissions of the ${persistent} Joomla so user:$USER can access them.\n\n\
                 You will need to install: setfacl for this option to work, then run this fix again."
@@ -1555,15 +1571,27 @@ function fixContainersPermissions() {
           # id -u systemd-coredump
           # id -g systemd-coredump
           #
-          sudo chown -R 999:999 "${VDM_PROJECT_PATH}/${persistent}/db" &
-          showProgress "chown" "Setting the ownership of ${persistent} database directory/files.\n(c h o w n -R 999:999 ${persistent}/db)"
+          progressSwitchOn
+          {
+            sudo chown -R 999:999 "${VDM_PROJECT_PATH}/${persistent}/db"
+            progressSwitchOff
+          } &
+          showProgress "Setting the ownership of ${persistent} database directory/files.\n(c h o w n -R 999:999 ${persistent}/db)"
           ### Fix the folder permissions for the database files
           #
           # Change the file permissions
-          sudo find "${VDM_PROJECT_PATH}/${persistent}/db" -type f -exec chmod 660 {} \; &
-          showProgress "find" "Setting the file permissions for the ${persistent} database.\n(f i n d ${persistent}/db -type f -exec chmod 660 {} \;)"
-          sudo find "${VDM_PROJECT_PATH}/${persistent}/db" -type d -exec chmod 700 {} \; &
-          showProgress "find" "Setting the directory permissions for the ${persistent} database.\n(f i n d ${persistent}/db -type d -exec chmod 700 {} \;)"
+          progressSwitchOn
+          {
+            sudo find "${VDM_PROJECT_PATH}/${persistent}/db" -type f -exec chmod 660 {} \;
+            progressSwitchOff
+          } &
+          showProgress "Setting the file permissions for the ${persistent} database.\n(f i n d ${persistent}/db -type f -exec chmod 660 {} \;)"
+          progressSwitchOn
+          {
+            sudo find "${VDM_PROJECT_PATH}/${persistent}/db" -type d -exec chmod 700 {} \;
+            progressSwitchOff
+          } &
+          showProgress "Setting the directory permissions for the ${persistent} database.\n(f i n d ${persistent}/db -type d -exec chmod 700 {} \;)"
           # show the completion of this permission fix
           showNotice "Permissions update completed!"
         else
@@ -2321,46 +2349,59 @@ function showLink() {
 # show progress bar
 function showProgress() {
   # some locals
-  local searching_for
   local title
   local message
+  local speed
   local per
-  local program
   # get input
-  searching_for="$1"
-  message="$2"
-  title="${3:-Please wait!}"
+  message="$1"
+  title="${2:-Please wait!}"
   # our little loop progress
   {
     per=1
     while (true); do
-      # shellcheck disable=SC2009
-      program=$(ps aux | grep -v grep | grep -e "${searching_for}")
-      if [[ "$program" == "" ]] && [[ "$per" -eq "0" ]]; then
-        # searching_for did not start
-        break
-      elif [[ "$program" == "" ]] && [[ "$per" -gt "0" ]]; then
+      if ! inProgress; then
         # we are finished, so we slow down to 100%
-        sleep .5
+        sleep .2
         echo 88
-        sleep .5
+        sleep .2
         echo 90
-        sleep 1
+        sleep .$((1 + "$RANDOM" % 6))
         echo 98
-        sleep .5
+        sleep .$((1 + "$RANDOM" % 5))
         echo 100
-        sleep 1
+        sleep .$((1 + "$RANDOM" % 5))
         break
       elif [[ "87" -eq "$per" ]]; then
         # if it takes longer we loop
         per="33"
       fi
       # sleep a little moment
-      sleep .5
+      sleep .$((1 + "$RANDOM" % 9))
       echo $per
       per=$((per + 1))
     done
   } | whiptail --title "${title}" --gauge "${message}" 8 112 0
+}
+
+# turn on progress
+function progressSwitchOn() {
+  echo "Progress ON" >"${VDM_SRC_PATH}/.progress"
+}
+
+# switch off the progress
+function progressSwitchOff() {
+  rm -f "${VDM_SRC_PATH}/.progress"
+}
+
+# get the progress
+function inProgress() {
+  if [ -f "${VDM_SRC_PATH}/.progress" ]; then
+    # found it
+    return 0
+  fi
+  # did not find it
+  return 1
 }
 
 # show important paths
@@ -2425,16 +2466,6 @@ function showJoomlaConfigDetails() {
   whiptail --msgbox "${message}" --fb --backtitle "    Octoleo" 30 112
 }
 
-# check if a Directory exist and if it has sub-directories
-function hasDirectories() {
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2012
-  if [ -d "${2:-$VDM_REPO_PATH}/${1:-}" ] && [ $(ls -A "${2:-$VDM_REPO_PATH}/${1:-}" | wc -l) -ne 0 ]; then
-    return 0
-  fi
-  return 1
-}
-
 # we must get a random key
 function getRandomPass() {
   # simple basic random
@@ -2449,6 +2480,31 @@ function getInput() {
   local answer
   # get the answer
   answer=$(whiptail --inputbox "$1" 10 112 "${2:-}" --title "${3:-Get Input}" --nocancel 3>&1 1>&2 2>&3)
+  # return the answer
+  echo "${answer}"
+}
+
+# get the input until is gotten
+function getInputNow() {
+  # set local var
+  local answer
+  local message
+  local default
+  local title
+  # get the values
+  message="${1:-Enter a value}"
+  default="${2:-}"
+  title="${3:-value}"
+  # get the VDM Domain value if not already set
+  while [ ${#answer} -le 1 ]; do
+    # get the value
+    answer=$(getInput "${message}" \
+      "${default}" "${title}")
+    # keep asking if empty or does exist
+    if [ ${#answer} -le 1 ]; then
+      showError "You must enter a $title"
+    fi
+  done
   # return the answer
   echo "${answer}"
 }
@@ -2517,14 +2573,30 @@ function getSelectedDirectories() {
   fi
 }
 
-# create a yml dashed line
-function getYMLDashLine() {
-  # get the projects to mount
-  local line="$1"
+# create a yml new line with 3 indents
+function getYMLine3() {
   # return line
   cat <<EOF
 
-      - ${line}
+      ${1}
+EOF
+}
+
+# create a yml new line with 2 indents
+function getYMLine2() {
+  # return line
+  cat <<EOF
+
+    ${1}
+EOF
+}
+
+# create a yml new line with 1 indent
+function getYMLine1() {
+  # return line
+  cat <<EOF
+
+  ${1}
 EOF
 }
 
@@ -2556,40 +2628,48 @@ function getImageSource() {
   local image
   local image_source
   local images_source
+  local default
+  local default_octojoom
   # menu for dynamic addition
   local menu_options=()
   # our counter
   local i=2
-  # set the base images source
-  menu_options+=("joomla" "Joomla official image" "OFF")
-  menu_options+=("llewellyn/joomla" "Octoleo Joomla image" "OFF")
-  # get existing source
-  if [ -f "${VDM_SRC_PATH}/.images-source" ] && readarray -t images_source <"${VDM_SRC_PATH}/.images-source"; then
-    # build the menus
-    if [ "${#images_source[@]}" -gt 0 ]; then
-      # loop source images
-      for image in "${images_source[@]}"; do
-        # the image name (get before first comma)
-        image_name="${image%%,*}"
-        # the image description (get after last comma)
-        image_desc="${image##*,}"
-        # make sure we have a value, and it is not the defaults already set
-        if [ "${#image_name}" -ge 1 ] && [ "${#image_desc}" -ge 1 ] &&
-          [ "${image_name}" != 'joomla' ] && [ "${image_name}" != 'llewellyn/joomla' ]; then
-          # load the source name and description
-          menu_options+=("${image_name}" "${image_desc}" "OFF")
-          # increment our counter
-          i=$((i + 1))
-        fi
-      done
+  # set the defaults
+  default="joomla|https://hub.docker.com/_/joomla?tab=tags;https://raw.githubusercontent.com/joomla-docker/docker-joomla/master/docker-entrypoint.sh"
+  default_octojoom="llewellyn/joomla|https://hub.docker.com/r/llewellyn/joomla/tags;https://git.vdm.dev/octoleo/docker-joomla/raw/branch/octoleo/docker-entrypoint.sh"
+  # we only ask if we are in expert mode
+  if isExpert; then
+    # set the base images source
+    menu_options+=("${default}" "Joomla official image" "OFF")
+    menu_options+=("${default_octojoom}" "Octoleo Joomla image" "OFF")
+    # get existing source
+    if [ -f "${VDM_SRC_PATH}/.images-source" ] && readarray -t images_source <"${VDM_SRC_PATH}/.images-source"; then
+      # build the menus
+      if [ "${#images_source[@]}" -gt 0 ]; then
+        # loop source images
+        for image in "${images_source[@]}"; do
+          # the image name (get before first comma)
+          image_name="${image%%,*}"
+          # the image description (get after last comma)
+          image_desc="${image##*,}"
+          # make sure we have a value, and it is not the defaults already set
+          if [ "${#image_name}" -ge 1 ] && [ "${#image_desc}" -ge 1 ] &&
+            [ "${image_name}" != "${default}" ] && [ "${image_name}" != "${default_octojoom}" ]; then
+            # load the source name and description
+            menu_options+=("${image_name}" "${image_desc}" "OFF")
+            # increment our counter
+            i=$((i + 1))
+          fi
+        done
+      fi
     fi
+    # now make the selection
+    image_source=$(whiptail --title "Select image source repository" --radiolist --nocancel --notags \
+      "You can select the source of your Joomla! image." 10 80 $i \
+      "${menu_options[@]}" 3>&1 1>&2 2>&3)
   fi
-  # now make the selection
-  image_source=$(whiptail --title "Select image source repository" --radiolist --nocancel --notags \
-    "You can select the source of your Joomla! image." 10 80 $i \
-    "${menu_options[@]}" 3>&1 1>&2 2>&3)
   # return the answer (default joomla)
-  echo "${image_source:-joomla}"
+  echo "${image_source:-$default}"
 }
 
 # get a list of domains locally set
@@ -2747,10 +2827,8 @@ function setMode() {
   VDM_EXPERT_MODE=false
   # set the switch
   [ "${1:-basic}" = 'basic' ] || VDM_EXPERT_MODE=true
-  # always remove previous state
-  deleteEnvVariable "VDM_EXPERT_MODE"
   # set persistent
-  setEnvVariable "VDM_EXPERT_MODE=${VDM_EXPERT_MODE}"
+  setUniqueEnvVariable "VDM_EXPERT_MODE=${VDM_EXPERT_MODE}"
   # make global
   export VDM_EXPERT_MODE
 }
@@ -2772,7 +2850,7 @@ function setMainDomain() {
   # set the main domain if not set
   getDomain
   # add this value if not set variable
-  setEnvVariable "VDM_DOMAIN=\"${VDM_DOMAIN}\""
+  setUniqueEnvVariable "VDM_DOMAIN=\"${VDM_DOMAIN}\""
 }
 
 # set the sub domain
@@ -2847,7 +2925,7 @@ function setMultiDomainSwitch() {
     fi
   fi
   # add this value if not set variable
-  setEnvVariable "VDM_MULTI_DOMAIN=${VDM_MULTI_DOMAIN}"
+  setUniqueEnvVariable "VDM_MULTI_DOMAIN=${VDM_MULTI_DOMAIN}"
   # make sure it is available
   export VDM_MULTI_DOMAIN
 }
@@ -2903,19 +2981,171 @@ function setUpdateHostFile() {
     fi
   fi
   # add this value since its not set variable
-  setEnvVariable "VDM_UPDATE_HOST=${VDM_UPDATE_HOST}"
+  setUniqueEnvVariable "VDM_UPDATE_HOST=${VDM_UPDATE_HOST}"
   # make sure it is available
   export VDM_UPDATE_HOST
+}
+
+# set the image source values
+setImageSource() {
+  # some local values
+  local vdm_image_source
+  local vdm_tag_url
+  # get the Joomla version if not set
+  while [ -z "${VDM_J_REPO}" ] || [ ${#VDM_J_REPO} -le 3 ]; do
+    # get the image source
+    vdm_image_source=$(getImageSource)
+    # build the source key (string before the first | )
+    VDM_J_REPO="${vdm_image_source%%|*}"
+    # set the source entry-point (url after the last ; )
+    VDM_ENTRY_REPO="${vdm_image_source##*;}"
+    # remove the J_REPO (remove everything before the first | )
+    vdm_image_source="${vdm_image_source##*|}"
+    # set the source entry-point (string before the first ; )
+    vdm_tag_url="${vdm_image_source%%;*}"
+    # keep asking
+    [ ${#VDM_J_REPO} -le 3 ] && {
+      showError "Seems like the source selected is not correctly configured, please select another."
+    }
+    # make sure the source is set
+    [[ "${VDM_ENTRY_REPO}" == *'docker-entrypoint.sh' ]] || {
+      VDM_J_REPO=''
+      showError "Seems like the source selected is not correctly configured, please select another."
+    }
+  done
+  # get the Joomla version if not set
+  while [ ${#VDM_JV} -le 1 ]; do
+    # get the value
+    VDM_JV=$(getInput "Enter Joomla version tag for this container.\n[See available tags here ${vdm_tag_url}]" '3.10' 'Enter Version Tag')
+    # keep asking
+    [ ${#VDM_JV} -ge 1 ] || {
+      showError "You must enter a version tag. See available tags here ${vdm_tag_url}"
+    }
+  done
+  # make the value available globally
+  export VDM_ENTRY_REPO
+  export VDM_J_REPO
+  export VDM_JV
 }
 
 # set persistence volumes
 function setPersistence() {
   # ask the question
-  if (whiptail --yesno "Would you like to enable persistence on this container." --defaultno --title "Persist Volumes" 8 112); then
+  if (whiptail --yesno "Would you like to enable persistence on this $1." --title "Persist Volume" 8 112); then
     # yes persistence
     return 0
   fi
   # no persistence
+  return 1
+}
+
+# set the PHP settings
+function setPHPSettings() {
+  # ask the question
+  if (whiptail --yesno "Would you like to set some PHP overrides for the Joomla container.\n\nTo make these changes we need sudo privileges." --defaultno --title "PHP.ini values" 9 112); then
+
+    # max_execution_time
+    VDM_max_execution_time=$(getInputNow "Enter max execution time" \
+        "${VDM_max_execution_time:-124}" 'max_execution_time')
+    # remember this for next time
+    setUniqueEnvVariable "VDM_max_execution_time=${VDM_max_execution_time}"
+
+    # max_input_time
+    VDM_max_input_time=$(getInputNow "Enter max input time" \
+        "${VDM_max_input_time:-1500}" 'max_input_time')
+    # remember this for next time
+    setUniqueEnvVariable "VDM_max_input_time=${VDM_max_input_time}"
+
+    # error_reporting
+    default_error_reporting="E_ALL & ~E_DEPRECATED & ~E_STRICT"
+    VDM_error_reporting=$(getInputNow "Enter error reporting" \
+        "${VDM_error_reporting:-$default_error_reporting}" 'error_reporting')
+    # remember this for next time
+    setUniqueEnvVariable "VDM_error_reporting=\"${VDM_error_reporting}\""
+
+    # upload_max_filesize
+    VDM_upload_max_filesize=$(getInputNow "Enter upload max filesize" \
+        "${VDM_upload_max_filesize:-256M}" 'upload_max_filesize')
+    # remember this for next time
+    setUniqueEnvVariable "VDM_upload_max_filesize=\"${VDM_upload_max_filesize}\""
+
+    # post_max_size
+    VDM_post_max_size=$(getInputNow "Enter post max size" \
+        "${VDM_post_max_size:-256M}" 'post_max_size')
+    # remember this for next time
+    setUniqueEnvVariable "VDM_post_max_size=\"${VDM_post_max_size}\""
+
+    # memory_limit
+    VDM_memory_limit=$(getInputNow "Enter memory limit" \
+        "${VDM_memory_limit:-256M}" 'memory_limit')
+    # remember this for next time
+    setUniqueEnvVariable "VDM_memory_limit=\"${VDM_memory_limit}\""
+
+    # make sure the directory exist
+    mkdir -p "${VDM_PROJECT_PATH}/${VDM_KEY}"
+
+    # push all these values to the php.ini file
+    {
+      echo "max_execution_time = ${VDM_max_execution_time}"
+      echo "max_input_time = ${VDM_max_input_time}"
+      echo "error_reporting = ${VDM_error_reporting}"
+      echo "upload_max_filesize = ${VDM_upload_max_filesize}"
+      echo "post_max_size = ${VDM_post_max_size}"
+      echo "memory_limit = ${VDM_memory_limit}"
+    } > "${VDM_PROJECT_PATH}/${VDM_KEY}/php.ini"
+
+    # allow custom edit
+    if isExpert && (whiptail --yesno "Would you like to set some more custom PHP overrides for this Joomla container" --defaultno --title "Edit PHP.ini" 8 112); then
+      # give little heads-up
+      showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
+      # lets open the file with nano for now
+      sudo "${EDITOR:-nano}" "${VDM_PROJECT_PATH}/${VDM_KEY}/php.ini"
+    fi
+
+    # set the ownership
+    if [ -n "${VDM_PUID}" ] && [ -n "${VDM_PGID}" ]; then
+      sudo chown "${VDM_PUID}":"${VDM_PGID}" "${VDM_PROJECT_PATH}/${VDM_KEY}/php.ini"
+    else
+      sudo chown www-data:www-data "${VDM_PROJECT_PATH}/${VDM_KEY}/php.ini"
+    fi
+    # make sure the permission are good
+    sudo chmod 600 "${VDM_PROJECT_PATH}/${VDM_KEY}/php.ini"
+
+    # yes load php.ini volume to the container
+    return 0
+  fi
+  return 1
+}
+
+# set the docker entrypoint
+function setDockerEntrypoint() {
+  # ask the question
+  if (whiptail --yesno "Would you like to customize the entrypoint script for this Joomla container" --defaultno --title "entrypoint.sh values" 8 112); then
+    # make sure the directory exist
+    mkdir -p "${VDM_PROJECT_PATH}/${VDM_KEY}"
+    # unattended deploy
+#    if (whiptail --yesno "Would you like to to setup unattended deployment for this Joomla container" --defaultno --title "Unattended Deployment" 8 112); then
+#        echo "soon we will have this ready"
+#    fi
+    # download entrypoint.sh file to the project folder
+    if sudo curl --fail -L "${VDM_ENTRY_REPO}" -o "${VDM_PROJECT_PATH}/${VDM_KEY}/entrypoint.sh" 2>/dev/null; then
+      # give little heads-up
+      showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
+      # lets open the file with nano for now
+      sudo "${EDITOR:-nano}" "${VDM_PROJECT_PATH}/${VDM_KEY}/entrypoint.sh"
+
+      # set the ownership
+      sudo chown root:root "${VDM_PROJECT_PATH}/${VDM_KEY}/entrypoint.sh"
+      # make sure the permission are good
+      sudo chmod +x "${VDM_PROJECT_PATH}/${VDM_KEY}/entrypoint.sh"
+
+      # we have the file set
+      return 0
+    else
+      # show the error
+      showError "The entrypoint.sh could not be set."
+    fi
+  fi
   return 1
 }
 
@@ -2931,7 +3161,7 @@ function setSecureState() {
     fi
   fi
   # add this value if not set variable
-  setEnvVariable "VDM_SECURE=${VDM_SECURE}"
+  setUniqueEnvVariable "VDM_SECURE=${VDM_SECURE}"
   # make sure it is available
   export VDM_SECURE
 }
@@ -2943,6 +3173,18 @@ function setNetworks() {
     docker network create traefik_webgateway
   docker network inspect openssh_gateway >/dev/null 2>&1 ||
     docker network create openssh_gateway
+}
+
+# to set a global Env Variable
+function setUniqueEnvVariable() {
+  # some locals
+  local environment_variable="$1"
+  # always remove previous environment variable
+  deleteEnvVariable "${environment_variable%%=*}"
+  # set the new environment variable
+  setEnvVariable "${environment_variable}" && return 0
+  # or failed
+  return 12
 }
 
 # to set a global Env Variable
@@ -2985,6 +3227,16 @@ function setContainerEnvVariable() {
   fi
   # we return true
   return 0
+}
+
+# check if a Directory exist and if it has sub-directories
+function hasDirectories() {
+  # shellcheck disable=SC2046
+  # shellcheck disable=SC2012
+  if [ -d "${2:-$VDM_REPO_PATH}/${1:-}" ] && [ $(ls -A "${2:-$VDM_REPO_PATH}/${1:-}" | wc -l) -ne 0 ]; then
+    return 0
+  fi
+  return 1
 }
 
 # take down apache
