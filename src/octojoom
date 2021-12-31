@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="3.1.0"
+_VERSION="3.1.5"
 _V="3.1"
 
 # The program full name
@@ -20,6 +20,11 @@ command -v docker >/dev/null 2>&1 || {
 # make sure docker-compose is installed
 command -v docker-compose >/dev/null 2>&1 || {
   echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require docker-compose."
+  exit 1
+}
+# make sure curl is installed
+command -v curl >/dev/null 2>&1 || {
+  echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require curl."
   exit 1
 }
 # just clear the screen
@@ -143,7 +148,7 @@ ${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.redirect-to-me.redirectsch
 networks:
   traefik:
     external:
-      name: traefik_webgateway
+      name: ${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}
 EOF
 }
 
@@ -240,7 +245,7 @@ volumes:
 networks:
   traefik:
     external:
-      name: traefik_webgateway
+      name: ${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}
 EOF
 }
 
@@ -527,7 +532,7 @@ ${VDM_REMOVE_SECURE}      - "traefik.http.services.phpmyadmin_${VDM_KEY}.loadbal
 networks:
   traefik:
     external:
-      name: traefik_webgateway
+      name: ${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}
 
 ${VDM_VOLUMES}
 
@@ -747,7 +752,7 @@ services:
 networks:
   openssh:
     external:
-      name: openssh_gateway
+      name: ${VDM_OPENSSH_GATEWAY:-openssh_gateway}
 EOF
 }
 
@@ -3168,10 +3173,10 @@ function setSecureState() {
 # set the networks in place
 function setNetworks() {
   # we create the networks
-  docker network inspect traefik_webgateway >/dev/null 2>&1 ||
-    docker network create traefik_webgateway --subnet 172.22.0.0/24
-  docker network inspect openssh_gateway >/dev/null 2>&1 ||
-    docker network create openssh_gateway  --subnet 172.23.0.0/24
+  docker network inspect "${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}" >/dev/null 2>&1 ||
+    docker network create "${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}" --subnet "${VDM_TRAEFIK_SUBNET:-172.22.0.0/24}"
+  docker network inspect "${VDM_OPENSSH_GATEWAY:-openssh_gateway}" >/dev/null 2>&1 ||
+    docker network create "${VDM_OPENSSH_GATEWAY:-openssh_gateway}"  --subnet "${VDM_OPENSSH_SUBNET:-172.23.0.0/24}"
 }
 
 # to set a global Env Variable
