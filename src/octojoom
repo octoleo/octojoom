@@ -2351,7 +2351,6 @@ function showProgress() {
   # some locals
   local title
   local message
-  local speed
   local per
   # get input
   message="$1"
@@ -2925,7 +2924,7 @@ function setMultiDomainSwitch() {
     fi
   fi
   # add this value if not set variable
-  setUniqueEnvVariable "VDM_MULTI_DOMAIN=${VDM_MULTI_DOMAIN}"
+  setEnvVariable "VDM_MULTI_DOMAIN=${VDM_MULTI_DOMAIN}"
   # make sure it is available
   export VDM_MULTI_DOMAIN
 }
@@ -2981,7 +2980,7 @@ function setUpdateHostFile() {
     fi
   fi
   # add this value since its not set variable
-  setUniqueEnvVariable "VDM_UPDATE_HOST=${VDM_UPDATE_HOST}"
+  setEnvVariable "VDM_UPDATE_HOST=${VDM_UPDATE_HOST}"
   # make sure it is available
   export VDM_UPDATE_HOST
 }
@@ -3161,7 +3160,7 @@ function setSecureState() {
     fi
   fi
   # add this value if not set variable
-  setUniqueEnvVariable "VDM_SECURE=${VDM_SECURE}"
+  setEnvVariable "VDM_SECURE=${VDM_SECURE}"
   # make sure it is available
   export VDM_SECURE
 }
@@ -3170,9 +3169,9 @@ function setSecureState() {
 function setNetworks() {
   # we create the networks
   docker network inspect traefik_webgateway >/dev/null 2>&1 ||
-    docker network create traefik_webgateway
+    docker network create traefik_webgateway --subnet 172.22.0.0/24
   docker network inspect openssh_gateway >/dev/null 2>&1 ||
-    docker network create openssh_gateway
+    docker network create openssh_gateway  --subnet 172.23.0.0/24
 }
 
 # to set a global Env Variable
