@@ -3952,6 +3952,8 @@ $VDM_FIRST_RUN && {
   : "${VDM_CONTAINER_TYPE:=traefik}"
   # and enable it
   : "${VDM_TASK:=setup}"
+  # first setup the network
+  setNetworks
   # trigger main
   main
   # clear it again
