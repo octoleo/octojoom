@@ -1493,7 +1493,7 @@ function fixContainersPermissions() {
             sudo chown -R "$VDM_PUID":"$VDM_PGID" "${VDM_PROJECT_PATH}/${persistent}/joomla"
             progressSwitchOff
           } &
-          showProgress "Setting the ownership of ${persistent} Joomla directory/files.\n(c h o w n -R $VDM_PUID:$VDM_PGID ${persistent}/joomla)"
+          showProgress "Setting the ownership of ${persistent} Joomla directory/files.\n(chown -R $VDM_PUID:$VDM_PGID ${persistent}/joomla)"
           ### Fix the folder permissions for the Joomla websites
           #
           # Change the file permissions
@@ -1509,7 +1509,7 @@ function fixContainersPermissions() {
             # at last we are done
             progressSwitchOff
           } &
-          showProgress "Setting the files permissions for the ${persistent} Joomla website.\n(f i n d ${persistent}/joomla -type f -exec chmod 644 {} \;)"
+          showProgress "Setting the files permissions for the ${persistent} Joomla website.\n(find ${persistent}/joomla -type f -exec chmod 644 {} \;)"
           # Change the folder permissions
           progressSwitchOn
           {
@@ -1545,7 +1545,7 @@ function fixContainersPermissions() {
             # at last we are done
             progressSwitchOff
           } &
-          showProgress "Setting the directory permissions for the ${persistent} Joomla website.\n(f i n d ${persistent}/joomla -type d -exec chmod 755 {} \;)"
+          showProgress "Setting the directory permissions for the ${persistent} Joomla website.\n(find ${persistent}/joomla -type d -exec chmod 755 {} \;)"
           # Change the image folder permissions
           # chmod 707 "${VDM_PROJECT_PATH}/${persistent}/joomla/images"
           # chmod 707 "${VDM_PROJECT_PATH}/${persistent}/joomla/images/stories"
@@ -1581,7 +1581,7 @@ function fixContainersPermissions() {
             sudo chown -R 999:999 "${VDM_PROJECT_PATH}/${persistent}/db"
             progressSwitchOff
           } &
-          showProgress "Setting the ownership of ${persistent} database directory/files.\n(c h o w n -R 999:999 ${persistent}/db)"
+          showProgress "Setting the ownership of ${persistent} database directory/files.\n(chown -R 999:999 ${persistent}/db)"
           ### Fix the folder permissions for the database files
           #
           # Change the file permissions
@@ -1590,13 +1590,13 @@ function fixContainersPermissions() {
             sudo find "${VDM_PROJECT_PATH}/${persistent}/db" -type f -exec chmod 660 {} \;
             progressSwitchOff
           } &
-          showProgress "Setting the file permissions for the ${persistent} database.\n(f i n d ${persistent}/db -type f -exec chmod 660 {} \;)"
+          showProgress "Setting the file permissions for the ${persistent} database.\n(find ${persistent}/db -type f -exec chmod 660 {} \;)"
           progressSwitchOn
           {
             sudo find "${VDM_PROJECT_PATH}/${persistent}/db" -type d -exec chmod 700 {} \;
             progressSwitchOff
           } &
-          showProgress "Setting the directory permissions for the ${persistent} database.\n(f i n d ${persistent}/db -type d -exec chmod 700 {} \;)"
+          showProgress "Setting the directory permissions for the ${persistent} database.\n(find ${persistent}/db -type d -exec chmod 700 {} \;)"
           # show the completion of this permission fix
           showNotice "Permissions update completed!"
         else
