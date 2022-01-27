@@ -367,8 +367,8 @@ function joomla__TRuST__setup() {
   $reset_volume && VDM_VOLUMES=''
   # add the projects path
   setContainerEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
-  # set the container user detail id needed
-  if [ "${VDM_J_REPO}" = 'llewellyn/joomla' ]; then
+  # only if in expert mode set the container user detail id needed
+  if isExpert; then
     # if this is our octoleo images we can also set the user ID and user-group ID
     setContainerUser "$(id -u)"
     # check that we got the details
