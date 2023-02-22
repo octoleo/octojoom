@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="3.1.5"
-_V="3.1"
+_VERSION="3.2.0"
+_V="3.2"
 
 # The program full name
 PROGRAM_NAME="Octojoom"
@@ -12,21 +12,63 @@ command -v whiptail >/dev/null 2>&1 || {
   echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require whiptail."
   exit 1
 }
-# make sure docker is installed
-command -v docker >/dev/null 2>&1 || {
-  echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require docker."
-  exit 1
-}
-# make sure docker-compose is installed
-command -v docker-compose >/dev/null 2>&1 || {
-  echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require docker-compose."
-  exit 1
-}
 # make sure curl is installed
 command -v curl >/dev/null 2>&1 || {
   echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require curl."
   exit 1
 }
+# Check if Docker is installed.
+if ! command -v docker &>/dev/null; then
+  # If Docker is not installed, ask the user if they want to install it.
+  if whiptail --yesno "Docker is not installed. Do you want to install it now?" 10 60; then
+    # If the user chooses Yes, install Docker.
+    echo "Installing Docker..."
+
+    # Add Docker GPG key and repository to sources.list.
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+    # Update package index and install Docker.
+    sudo apt-get update
+    sudo apt-get install docker-ce docker-ce-cli containerd.io -y
+
+    # Add the current user to the docker group.
+    sudo groupadd docker
+    sudo usermod -aG docker "$USER"
+
+    # Enable and start the Docker service.
+    sudo systemctl enable docker.service
+    sudo systemctl start docker.service
+
+    echo "Docker is installed."
+  else
+    # If the user chooses No, exit the script with an error message.
+    echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require docker."
+    exit 1
+  fi
+fi
+# Check if Docker Compose is installed.
+if ! command -v docker-compose &>/dev/null; then
+  # If Docker Compose is not installed, ask the user if they want to install it.
+  if whiptail --yesno "Docker Compose is not installed. Do you want to install it now?" 10 60; then
+    # If the user chooses Yes, install Docker Compose.
+    echo "Installing Docker Compose..."
+
+    # Download the latest Docker Compose binary.
+    COMPOSE_VERSION=$(curl --silent https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    sudo curl -SL "https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+
+    # Make the Docker Compose binary executable.
+    sudo chmod +x /usr/local/bin/docker-compose
+    sudo ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+
+    echo "Docker Compose is installed."
+  else
+    # If the user chooses No, exit the script with an error message.
+    echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require docker-compose."
+    exit 1
+  fi
+fi
 # just clear the screen
 clear
 
@@ -147,8 +189,7 @@ ${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.redirect-to-me.redirectsch
 
 networks:
   traefik:
-    external:
-      name: ${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}
+    name: ${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}
 EOF
 }
 
@@ -244,8 +285,7 @@ volumes:
 
 networks:
   traefik:
-    external:
-      name: ${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}
+    name: ${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}
 EOF
 }
 
@@ -531,8 +571,7 @@ ${VDM_REMOVE_SECURE}      - "traefik.http.services.phpmyadmin_${VDM_KEY}.loadbal
 
 networks:
   traefik:
-    external:
-      name: ${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}
+    name: ${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}
 
 ${VDM_VOLUMES}
 
@@ -751,8 +790,7 @@ services:
 
 networks:
   openssh:
-    external:
-      name: ${VDM_OPENSSH_GATEWAY:-openssh_gateway}
+    name: ${VDM_OPENSSH_GATEWAY:-openssh_gateway}
 EOF
 }
 
