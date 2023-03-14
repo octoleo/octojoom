@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="3.2.0"
+_VERSION="3.2.1"
 _V="3.2"
 
 # The program full name
@@ -105,6 +105,14 @@ function traefik__TRuST__setup() {
         showError "You must enter an email for the Letsencrypt setup."
       }
     done
+    # make sure the directory exist
+    mkdir -p "${VDM_PROJECT_PATH}/traefik"
+    # we must create this, else docker creates a folder
+    echo "{}" > "${VDM_PROJECT_PATH}/traefik/acme.json"
+    # make sure the permission are good
+    sudo chmod 600 "${VDM_PROJECT_PATH}/traefik/acme.json"
+    # and is owned by root
+    sudo chown -R root:root "${VDM_PROJECT_PATH}/traefik"
   else
     VDM_REMOVE_SECURE="#"
     VDM_HTTP_SCHEME="http"
