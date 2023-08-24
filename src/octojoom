@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="3.3.0"
-_V="3.3"
+_VERSION="3.4.0"
+_V="3.4"
 
 # The program full name
 PROGRAM_NAME="Octojoom"
@@ -21,6 +21,11 @@ command -v whiptail >/dev/null 2>&1 || {
 # make sure curl is installed
 command -v curl >/dev/null 2>&1 || {
   echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require curl."
+  exit 1
+}
+# make sure awk is installed
+command -v awk >/dev/null 2>&1 || {
+  echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require awk."
   exit 1
 }
 # Check if Docker is installed.
@@ -330,8 +335,8 @@ function joomla__TRuST__setup() {
   setEnvironmentKey
   # set the domain
   setDomain
-  # get the sub domain if not set TODO get dynamic port domain name
-  setSubDomain "${VDM_KEY,,}" "port"
+  # get the sub domain if not set TODO get dynamic joomla domain name
+  setSubDomain "${VDM_KEY,,}" "joomla"
   # check if we have secure switch set
   setSecureState
   # setup letsencrypt stuff
@@ -407,6 +412,8 @@ function joomla__TRuST__setup() {
   # set persistence
   VDM_JOOMLA_VOLUMES_MOUNT=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_KEY}/joomla:/var/www/html\"")
   VDM_DB_VOLUMES_MOUNT=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_KEY}/db:/var/lib/mysql\"")
+  VDM_EXTRA_CONTAINER_STUFF=''
+  VDM_EXTRA_JOOMLA_ENV=''
   VDM_VOLUMES='volumes:'
   reset_volume=true
   # only if in expert mode
@@ -425,6 +432,27 @@ function joomla__TRuST__setup() {
   $reset_volume && VDM_VOLUMES=''
   # add the projects path
   setContainerEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
+  # ask if we should add mailcatcher
+  if (whiptail --yesno "Would you also like to enable mailcatcher for these ${VDM_CONTAINER_TYPE^} containers" \
+    --defaultno --title "Enable Mailcatcher" --backtitle "${BACK_TITLE}" 8 112); then
+    VDM_EXTRA_CONTAINER_STUFF=$(getYMLine1 "mailcatcher_${VDM_KEY}:")
+    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "image: schickling/mailcatcher")
+    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "container_name: mailcatcher_${VDM_KEY}")
+    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "restart: unless-stopped")
+    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "networks:")
+    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- traefik")
+    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "labels:")
+    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "# mailcatcher")
+    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.enable=true\"")
+    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}mail.${VDM_DOMAIN}\`)\"")
+    if $VDM_SECURE; then
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.tls.certresolver=vdmresolver\"")
+    fi
+    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.service=mailcatcher_${VDM_KEY}\"")
+    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.services.mailcatcher_${VDM_KEY}.loadbalancer.server.port=1080\"")
+    VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SMTP_HOST=mailcatcher_${VDM_KEY}")
+  fi
   # only if in expert mode set the container user detail id needed
   if isExpert; then
     # if this is our octoleo images we can also set the user ID and user-group ID
@@ -435,14 +463,6 @@ function joomla__TRuST__setup() {
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_PGID=\"#${VDM_PGID}\""
     fi
   fi
-  # add PHP settings
-  if isExpert && setPHPSettings; then
-    VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_KEY}/php.ini:/var/www/html/php.ini\"")
-  fi
-  # customize docker-entrypoint.sh
-  if isExpert && setDockerEntrypoint; then
-    VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_KEY}/entrypoint.sh:/entrypoint.sh\"")
-  fi
   # add this value if not set variable
   [ ${#vdm_database_name} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB=\"${vdm_database_name}\""
   # add this value if not set variable
@@ -451,6 +471,40 @@ function joomla__TRuST__setup() {
   [ ${#vdm_database_pass} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_PASS=\"${vdm_database_pass}\""
   # add this value if not set variable
   [ ${#vdm_database_rootpass} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_ROOT=\"${vdm_database_rootpass}\""
+  # we only do autodeploy for Joomla 4.3 and above
+  if isVersionAbove "$VDM_JV" "4.3"; then
+    # setup the website auto deploy details
+    setJoomlaWebsiteDetails
+    if [[ -n "${VDM_J_EMAIL}" ]]; then
+      # add extra Joomla envs
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_TYPE=\"mysqli\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_PREFIX=\"${VDM_KEY}_\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_SITE_NAME=\"${VDM_J_SITE_NAME}\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USERNAME=\"${VDM_J_USERNAME}\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USER=\"${VDM_J_USER}\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_EMAIL=\"${VDM_J_EMAIL}\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_PASSWORD=\"${VDM_J_PASSWORD}\""
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_DB_TYPE=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_TYPE}")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_DB_PREFIX=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_PREFIX}")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SITE_NAME=\"\${VDM_${VDM_ENV_KEY^^}_JOOMLA_SITE_NAME}\"")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_USERNAME=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USERNAME}")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_USER=\"\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USER}\"")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_EMAIL=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_EMAIL}")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_PASSWORD}")
+    fi
+  fi
+  # add PHP settings
+  VDM_PHP_PROJECT_PATH="${VDM_KEY}"
+  export VDM_PHP_PROJECT_PATH
+  if isExpert && setPHPSettings; then
+    VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini:/var/www/html/php.ini\"")
+  fi
+  # customize docker-entrypoint.sh
+  VDM_ENTRY_PROJECT_PATH="${VDM_KEY}"
+  export VDM_ENTRY_PROJECT_PATH
+  if isExpert && setDockerEntrypoint; then
+    VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}/entrypoint.sh:/entrypoint.sh\"")
+  fi
   ##########################
   ### export all we need
   # global
@@ -466,6 +520,8 @@ function joomla__TRuST__setup() {
   export VDM_VOLUMES
   export VDM_JOOMLA_VOLUMES_MOUNT
   export VDM_DB_VOLUMES_MOUNT
+  export VDM_EXTRA_CONTAINER_STUFF
+  export VDM_EXTRA_JOOMLA_ENV
   # container lower
   export vdm_database_name
   export vdm_database_user
@@ -511,6 +567,15 @@ function joomla__TRuST__setup() {
   unset VDM_VOLUMES
   unset VDM_JOOMLA_VOLUMES_MOUNT
   unset VDM_DB_VOLUMES_MOUNT
+  unset VDM_PHP_PROJECT_PATH
+  unset VDM_ENTRY_PROJECT_PATH
+  unset VDM_EXTRA_CONTAINER_STUFF
+  unset VDM_EXTRA_JOOMLA_ENV
+  unset VDM_J_SITE_NAME
+  unset VDM_J_USERNAME
+  unset VDM_J_USER
+  unset VDM_J_EMAIL
+  unset VDM_J_PASSWORD
   # container lower
   unset vdm_database_name
   unset vdm_database_user
@@ -553,7 +618,7 @@ services:
       - JOOMLA_DB_HOST=mariadb_${VDM_KEY}:3306
       - JOOMLA_DB_NAME=\${VDM_${VDM_ENV_KEY^^}_DB}
       - JOOMLA_DB_USER=\${VDM_${VDM_ENV_KEY^^}_DB_USER}
-      - JOOMLA_DB_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_DB_PASS}
+      - JOOMLA_DB_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_DB_PASS}${VDM_EXTRA_JOOMLA_ENV}
     depends_on:
       - mariadb_${VDM_KEY}
     volumes:${VDM_JOOMLA_VOLUMES_MOUNT}
@@ -586,8 +651,7 @@ ${VDM_REMOVE_SECURE}      - "traefik.http.services.joomla_${VDM_KEY}.loadbalance
 ${VDM_REMOVE_SECURE}      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}"
 ${VDM_REMOVE_SECURE}      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.tls.certresolver=vdmresolver"
 ${VDM_REMOVE_SECURE}      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.service=phpmyadmin_${VDM_KEY}"
-${VDM_REMOVE_SECURE}      - "traefik.http.services.phpmyadmin_${VDM_KEY}.loadbalancer.server.port=80"
-
+${VDM_REMOVE_SECURE}      - "traefik.http.services.phpmyadmin_${VDM_KEY}.loadbalancer.server.port=80"${VDM_EXTRA_CONTAINER_STUFF}
 networks:
   traefik:
     name: ${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}
@@ -595,6 +659,293 @@ networks:
 ${VDM_VOLUMES}
 
 EOF
+}
+
+#####################################################################################################################VDM
+######################################## BULK SETUP JOOMLA
+function joomla__TRuST__bulk() {
+  # load this container type globals
+  # shellcheck disable=SC1090
+  [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && source "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+  # we need to pull these values from the env if set
+  local vdm_key
+  local vdm_subdomain
+  local vdm_database_name
+  local vdm_bulk_database_name
+  local vdm_database_user
+  local vdm_bulk_database_user
+  local vdm_database_pass
+  local vdm_bulk_database_user
+  local vdm_database_rootpass
+  # get the Joomla image source
+  setImageSource
+  # set the domain
+  setDomain
+  # get the sub domain if not set TODO get dynamic joomla domain name
+  setSubDomain "subdomain" "joomla"
+  vdm_subdomain="${VDM_SUBDOMAIN}"
+  # check if we have secure switch set
+  setSecureState
+  # setup letsencrypt stuff
+  if $VDM_SECURE; then
+    VDM_REMOVE_SECURE=''
+    VDM_ENTRY_POINT="websecure"
+    VDM_HTTP_SCHEME="https://"
+  else
+    VDM_REMOVE_SECURE="#"
+    VDM_ENTRY_POINT="web"
+    VDM_HTTP_SCHEME="http://"
+  fi
+  # get the database name needed
+  while [ ${#vdm_bulk_database_name} -le 1 ]; do
+    # get the value
+    vdm_bulk_database_name=$(getInput "Enter Database Name\n[Text with no spaces that is only underscore and alphabetical]" \
+      "vdm_io" 'Enter Database Name')
+    # keep asking if empty or does exist
+    [ ${#vdm_bulk_database_name} -ge 1 ] || {
+      showError "You must enter a database name!"
+    }
+  done
+  # get the database user name needed
+  while [ ${#vdm_bulk_database_user} -le 1 ]; do
+    # get the value
+    vdm_bulk_database_user=$(getInput "Enter Database Username\n[Text with no spaces that is only underscore and alphabetical]" \
+      "vdm_user" 'Enter Database Username')
+    # keep asking if empty or does exist
+    [ ${#vdm_bulk_database_user} -ge 1 ] || {
+      showError "You must enter a database username!"
+    }
+  done
+  # get the database user password needed
+  while [ ${#vdm_bulk_database_pass} -le 1 ]; do
+    # get the value
+    vdm_bulk_database_pass=$(getPassword "Enter Database User Password" \
+      "$(getRandomPass 20)" 'Enter Database User Password')
+    # keep asking if empty or does exist
+    [ ${#vdm_bulk_database_pass} -ge 1 ] || {
+      showError "You must enter a database user password!"
+    }
+  done
+  # only if in expert mode set the container user detail id needed
+  if isExpert; then
+    # if this is our octoleo images we can also set the user ID and user-group ID
+    setContainerUser "$(id -u)"
+  fi
+  # add PHP settings
+  set_php_settings=false
+  VDM_PHP_PROJECT_PATH="bulk"
+  export VDM_PHP_PROJECT_PATH
+  if isExpert && setPHPSettings; then
+    set_php_settings=true
+  fi
+  # customize docker-entrypoint.sh
+  set_docker_entry_point=false
+  VDM_ENTRY_PROJECT_PATH="bulk"
+  export VDM_ENTRY_PROJECT_PATH
+  if isExpert && setDockerEntrypoint; then
+    set_docker_entry_point=true
+  fi
+  # set persistence
+  persistence_volume=false
+  persistence_db=false
+  # only if in expert mode
+  if isExpert && setPersistence 'Joomla website files and folders'; then
+    persistence_volume=true
+  fi
+  # only if in expert mode
+  if isExpert && setPersistence 'Joomla database'; then
+    persistence_db=true
+  fi
+  # ask if we should add mailcatcher
+  enable_mailcatcher=false
+  if (whiptail --yesno "Would you also like to enable mailcatcher for these ${VDM_CONTAINER_TYPE^} containers" \
+    --defaultno --title "Enable Mailcatcher" --backtitle "${BACK_TITLE}" 8 112); then
+      enable_mailcatcher=true
+  fi
+  # we only do autodeploy for Joomla 4.3 and above
+  enable_autodeploy=false
+  if isVersionAbove "$VDM_JV" "4.3"; then
+    # get website setup details
+    setJoomlaWebsiteDetails
+    if [[ -n "${VDM_J_EMAIL}" ]]; then
+      enable_autodeploy=true
+    fi
+  fi
+  # add the projects path
+  setContainerEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
+  ##########################
+  ### export all we need
+  # global
+  export VDM_CONTAINER_TYPE
+  export VDM_REPO_PATH
+  export VDM_PROJECT_PATH
+  # container
+  export VDM_REMOVE_SECURE
+  export VDM_ENTRY_POINT
+  export VDM_HTTP_SCHEME
+  export VDM_PERSISTENCE
+  export VDM_NOT_PERSISTENCE
+  # get the number of containers
+  setNumberContainers
+  # ask if we should continue to enable
+  enable_containers=false
+  if (whiptail --yesno "Would you also like to enable all these ${VDM_CONTAINER_TYPE^} containers" \
+    --defaultno --title "Enable Containers" --backtitle "${BACK_TITLE}" 8 112); then
+      enable_containers=true
+  fi
+  # loop the number of containers
+  for (( i=1; i<=VDM_NUMBER_CONTAINERS; i++ ))
+  do
+    vdm_key=$(getRandomName 5)
+    VDM_KEY="${vdm_key,,}"
+    VDM_ENV_KEY="${vdm_key^^}"
+    VDM_SUBDOMAIN="${vdm_subdomain}${i}"
+    vdm_database_name="${vdm_bulk_database_name}${i}"
+    vdm_database_user="${vdm_bulk_database_user}${i}"
+    vdm_database_pass="${vdm_bulk_database_pass}${i}"
+    vdm_database_rootpass=$(getRandomPass 30)
+    # reset some globals
+    VDM_EXTRA_CONTAINER_STUFF=''
+    VDM_EXTRA_JOOMLA_ENV=''
+    # check that we got the details
+    if [ -n "${VDM_PUID}" ] && [ -n "${VDM_PGID}" ]; then
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_PUID=\"#${VDM_PUID}\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_PGID=\"#${VDM_PGID}\""
+    fi
+    # add this value if not set variable
+    setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB=\"${vdm_database_name}\""
+    # add this value if not set variable
+    setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_USER=\"${vdm_database_user}\""
+    # add this value if not set variable
+    setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_PASS=\"${vdm_database_pass}\""
+    # add this value if not set variable
+    setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_ROOT=\"${vdm_database_rootpass}\""
+    # we only do autodeploy for Joomla 4.3 and above
+    if $enable_autodeploy; then
+      # add extra Joomla envs
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_TYPE=\"mysqli\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_PREFIX=\"${VDM_KEY}_\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_SITE_NAME=\"${VDM_J_SITE_NAME} ${i}\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USERNAME=\"${VDM_J_USERNAME}\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USER=\"${VDM_J_USER}\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_EMAIL=\"${VDM_J_EMAIL}\""
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_PASSWORD=\"${VDM_J_PASSWORD}\""
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_DB_TYPE=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_TYPE}")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_DB_PREFIX=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_PREFIX}")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SITE_NAME=\"\${VDM_${VDM_ENV_KEY^^}_JOOMLA_SITE_NAME}\"")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_USERNAME=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USERNAME}")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_USER=\"\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USER}\"")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_EMAIL=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_EMAIL}")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_PASSWORD}")
+    fi
+    # set persistence
+    reset_volume=true
+    VDM_JOOMLA_VOLUMES_MOUNT=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_KEY}/joomla:/var/www/html\"")
+    VDM_DB_VOLUMES_MOUNT=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_KEY}/db:/var/lib/mysql\"")
+    VDM_VOLUMES='volumes:'
+    if ! $persistence_volume; then
+      VDM_JOOMLA_VOLUMES_MOUNT=$(getYMLine3 "- ${VDM_KEY,,}_web:/var/www/html")
+      VDM_VOLUMES+=$(getYMLine1 "${VDM_KEY,,}_web:")
+      reset_volume=false
+    fi
+    if ! $persistence_db; then
+      VDM_DB_VOLUMES_MOUNT=$(getYMLine3 "- ${VDM_KEY,,}_db:/var/lib/mysql")
+      VDM_VOLUMES+=$(getYMLine1 "${VDM_KEY,,}_db:")
+      reset_volume=false
+    fi
+    # add PHP settings
+    if $set_php_settings; then
+      VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini:/var/www/html/php.ini\"")
+    fi
+    # customize docker-entrypoint.sh
+    if $set_docker_entry_point; then
+      VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}/entrypoint.sh:/entrypoint.sh\"")
+    fi
+    # check if we have to reset the volume value
+    $reset_volume && VDM_VOLUMES=''
+    # add the mailcatcher if needed
+    if $enable_mailcatcher; then
+      VDM_EXTRA_CONTAINER_STUFF=$(getYMLine1 "mailcatcher_${VDM_KEY}:")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "image: schickling/mailcatcher")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "container_name: mailcatcher_${VDM_KEY}")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "restart: unless-stopped")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "networks:")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- traefik")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "labels:")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "# mailcatcher")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.enable=true\"")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}mail.${VDM_DOMAIN}\`)\"")
+      if $VDM_SECURE; then
+        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.tls.certresolver=vdmresolver\"")
+      fi
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.service=mailcatcher_${VDM_KEY}\"")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.services.mailcatcher_${VDM_KEY}.loadbalancer.server.port=1080\"")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SMTP_HOST=mailcatcher_${VDM_KEY}")
+    fi
+    # global
+    export VDM_KEY
+    export VDM_ENV_KEY
+    export VDM_SUBDOMAIN
+    # container
+    export VDM_VOLUMES
+    export VDM_JOOMLA_VOLUMES_MOUNT
+    export VDM_DB_VOLUMES_MOUNT
+    export VDM_EXTRA_CONTAINER_STUFF
+    export VDM_EXTRA_JOOMLA_ENV
+    # container lower
+    export vdm_database_name
+    export vdm_database_user
+    export vdm_database_pass
+    export vdm_database_rootpass
+    # create the directory if it does not yet already exist
+    # shellcheck disable=SC2174
+    mkdir -p -m 700 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}"
+    # place this docker composer file in its place
+    joomlaContainer >"${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}/docker-compose.yml"
+    # set permissions
+    chmod 600 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}/docker-compose.yml"
+    # enable the container
+    if $enable_containers; then
+      # we set the container details
+      export VDM_CONTAINER="${VDM_SUBDOMAIN}.${VDM_DOMAIN}"
+      # then we enable it
+      enableContainer "${VDM_CONTAINER_TYPE}"
+    fi
+  done
+  ##########################
+  ### unset all no longer needed
+  # container
+  unset VDM_SUBDOMAIN
+  unset VDM_J_REPO
+  unset VDM_ENTRY_REPO
+  unset VDM_JV
+  unset VDM_KEY
+  unset VDM_ENV_KEY
+  unset VDM_REMOVE_SECURE
+  unset VDM_ENTRY_POINT
+  unset VDM_HTTP_SCHEME
+  unset VDM_PERSISTENCE
+  unset VDM_NOT_PERSISTENCE
+  unset VDM_VOLUMES
+  unset VDM_JOOMLA_VOLUMES_MOUNT
+  unset VDM_DB_VOLUMES_MOUNT
+  unset VDM_NUMBER_CONTAINERS
+  unset VDM_PHP_PROJECT_PATH
+  unset VDM_ENTRY_PROJECT_PATH
+  unset VDM_EXTRA_CONTAINER_STUFF
+  unset VDM_J_SITE_NAME
+  unset VDM_J_USERNAME
+  unset VDM_J_USER
+  unset VDM_J_EMAIL
+  unset VDM_J_PASSWORD
+  # container lower
+  unset vdm_database_name
+  unset vdm_database_user
+  unset vdm_database_pass
+  unset vdm_database_rootpass
+  # return a success
+  return 0
 }
 
 #####################################################################################################################VDM
@@ -1594,6 +1945,17 @@ function setupContainer() {
   main
 }
 
+# setup multiple containers
+bulkSetupContainers() {
+  # make sure the networks are set
+  setNetworks
+  # make sure of our container type
+  VDM_CONTAINER_TYPE="${1}"
+  VDM_TASK="bulk"
+  # execute the task
+  main
+}
+
 # edit a container
 function editContainer() {
   # make sure of our container type
@@ -2124,6 +2486,8 @@ function showJoomla() {
   # Get Joomla env details
   isExpert && hasDirectories 'joomla/available' &&
     menu_options+=("joomla_env" "Open Joomla .env Details") && i=$((i + 1))
+  # bulk deploy
+  isExpert && menu_options+=("bulk" "Bulk deploy") && i=$((i + 1))
   # Quit Octoleo Program
   menu_options+=("quit" "Quit ${PROGRAM_NAME}")
   # get the selection
@@ -2163,12 +2527,15 @@ function showJoomla() {
   "joomla_env")
     openEnv 'joomla'
     ;;
+  "bulk")
+    bulkSetupContainers 'joomla'
+    ;;
   "quit") quitProgram ;;
   esac
 
   # menu loop
   case $CHOICE in
-  "setup" | "edit" | "enable" | "disable" | "down" | "up" | "fix" | "delete" | "joomla_env")
+  "setup" | "edit" | "enable" | "disable" | "down" | "up" | "fix" | "delete" | "joomla_env" | "bulk")
     showJoomla
     ;;
   esac
@@ -2772,10 +3139,14 @@ function showJoomlaConfigDetails() {
 
 # we must get a random key
 function getRandomPass() {
-  # simple basic random
-  # shellcheck disable=SC2046
-  # shellcheck disable=SC2005
-  echo $(tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | dd bs="${1:-128}" count=1 status=none)
+  local length="${1:-128}"
+  tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | head -c "$length"
+}
+
+# we must get a random key
+function getRandomName() {
+  local length="${1:-128}"
+  tr -dc 'A-Za-z' </dev/urandom | head -c "$length"
 }
 
 # Get input from the user using whiptail utility
@@ -3301,6 +3672,139 @@ function setUniqueKey() {
   export VDM_KEY
 }
 
+# set the Joomla website details
+function setJoomlaWebsiteDetails() {
+  # ask if we should add mailcatcher
+  if (whiptail --yesno "Would you like to enable website autodeploy for ${VDM_CONTAINER_TYPE,}:${VDM_JV}" \
+    --defaultno --title "Enable Autodeploy" --backtitle "${BACK_TITLE}" 8 112); then
+
+    # ask for website name
+    setJoomlaSiteName
+
+    # ask for username
+    setJoomlaUsername
+
+    # ask for user
+    setJoomlaUser
+
+    # ask for email
+    setJoomlaEmail
+
+    # ask for username password
+    setJoomlaPassword
+
+  fi
+}
+
+# set the website name
+function setJoomlaSiteName() {
+  # get the key if not set
+  while [ ${#VDM_J_SITE_NAME} -le 2 ]; do
+    # get the value
+    VDM_J_SITE_NAME=$(getInput "Enter a Joomla website name." \
+      'Joomla! CMS' 'Enter Site Name')
+    # keep asking if empty
+    if [ ${#VDM_J_SITE_NAME} -le 2 ]; then
+      showError "You must enter a site name longer than 2 characters!"
+    fi
+  done
+  # make sure it is available
+  export VDM_J_SITE_NAME
+}
+
+# set the username
+function setJoomlaUsername() {
+  # get the key if not set
+  while [ ${#VDM_J_USERNAME} -le 1 ] || [[ "${VDM_J_USERNAME}" =~ [^a-zA-Z] ]]; do
+    # get the value
+    VDM_J_USERNAME=$(getInput "Enter a Joomla username.\n[Text with no spaces that is only alphabetical]" \
+      'user' 'Enter Username')
+    # keep asking if empty
+    if [[ "${VDM_J_USERNAME}" =~ [^a-zA-Z] ]]; then
+      showError "You must enter a username with no spaces that is only alphabetical!"
+    elif [ ${#VDM_J_USERNAME} -le 1 ]; then
+      showError "You must enter a username!"
+    fi
+  done
+  # make sure it is available
+  export VDM_J_USERNAME
+}
+
+# set the user
+function setJoomlaUser() {
+  # get the key if not set
+  while [ ${#VDM_J_USER} -le 2 ]; do
+    # get the value
+    VDM_J_USER=$(getInput "Enter a Joomla user." \
+      'John Doe' 'Enter User Name')
+    # keep asking if empty
+    if [ ${#VDM_J_USER} -le 2 ]; then
+      showError "You must enter a user!"
+    fi
+  done
+  # make sure it is available
+  export VDM_J_USER
+}
+
+# set the email
+function setJoomlaEmail() {
+  # Email regex for basic validation
+  local email_regex="^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+
+  # Keep prompting until a valid email is provided
+  while [[ ! "${VDM_J_EMAIL}" =~ $email_regex ]]; do
+    # Get the email
+    VDM_J_EMAIL=$(getInput "Enter a Joomla email address." \
+      'admin@example.org' 'Enter Email')
+
+    # Check if the input matches the basic email regex pattern
+    if [[ ! "${VDM_J_EMAIL}" =~ $email_regex ]]; then
+      showError "You must enter a valid email address!"
+    fi
+  done
+
+  # Export the variable to make it available for child processes
+  export VDM_J_EMAIL
+}
+
+# set the username
+function setJoomlaPassword() {
+  # get the key if not set
+  while [ ${#VDM_J_PASSWORD} -le 12 ]; do
+    # get the value
+    VDM_J_PASSWORD=$(getInput "Enter Joomla User Password" \
+      'joomla-17082005' 'Enter Joomla User Password')
+    # keep asking if empty
+    if [ ${#VDM_J_PASSWORD} -le 12 ]; then
+      showError "You must enter a password with more than 4 characters!"
+    fi
+  done
+  # make sure it is available
+  export VDM_J_PASSWORD
+}
+
+# set the number of containers to build
+function setNumberContainers() {
+  local valid=0
+  while [ "$valid" -eq 0 ]; do
+    # get the value
+    VDM_NUMBER_CONTAINERS=$(getInput "Enter the number of containers you would like to deploy.\n[Just a number!]" \
+      10 'Enter Number')
+    # check that the number is above 1 and below 100
+    if ! [[ $VDM_NUMBER_CONTAINERS =~ ^[0-9]+$ ]]; then
+      showError "You must enter a number!"
+    elif [[ $VDM_NUMBER_CONTAINERS -le 1 ]]; then
+      showError "The number (${VDM_NUMBER_CONTAINERS}) must be above 1"
+    elif [[ $VDM_NUMBER_CONTAINERS -ge 100 ]]; then
+      showError "The number (${VDM_NUMBER_CONTAINERS}) must be below 100"
+    else
+      valid=1
+    fi
+  done
+  # make sure it is available
+  export VDM_NUMBER_CONTAINERS
+}
+
 # set the Environment key
 function setEnvironmentKey() {
   # get the env key if not set
@@ -3380,6 +3884,31 @@ function setImageSource() {
   export VDM_JV
 }
 
+# check version
+function isVersionAbove() {
+    local tag="$1"
+    local target_version="$2"
+    local tag_major
+    local tag_minor
+    local target_major
+    local target_minor
+
+    # Extract major and minor versions for the tag and the target_version
+    tag_major=$(echo "$tag" | awk -F'[.-]' '{print $1}')
+    tag_minor=$(echo "$tag" | awk -F'[.-]' '{print $2}')
+    target_major=$(echo "$target_version" | awk -F'.' '{print $1}')
+    target_minor=$(echo "$target_version" | awk -F'.' '{print $2}')
+
+    # Compare major versions
+    if [[ "$tag_major" -gt "$target_major" ]]; then
+        return 0
+    elif [[ "$tag_major" -eq "$target_major" && "$tag_minor" -ge "$target_minor" ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
 # set persistence volumes
 function setPersistence() {
   # ask the question
@@ -3436,7 +3965,7 @@ function setPHPSettings() {
     setUniqueEnvVariable "VDM_memory_limit=\"${VDM_memory_limit}\""
 
     # make sure the directory exist
-    mkdir -p "${VDM_PROJECT_PATH}/${VDM_KEY}"
+    mkdir -p "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}"
 
     # push all these values to the php.ini file
     {
@@ -3446,7 +3975,7 @@ function setPHPSettings() {
       echo "upload_max_filesize = ${VDM_upload_max_filesize}"
       echo "post_max_size = ${VDM_post_max_size}"
       echo "memory_limit = ${VDM_memory_limit}"
-    } > "${VDM_PROJECT_PATH}/${VDM_KEY}/php.ini"
+    } > "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini"
 
     # allow custom edit
     if isExpert && (whiptail --yesno "Would you like to set some more custom PHP overrides for this Joomla container" \
@@ -3454,17 +3983,17 @@ function setPHPSettings() {
       # give little heads-up
       showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
       # lets open the file with nano for now
-      sudo "${EDITOR:-nano}" "${VDM_PROJECT_PATH}/${VDM_KEY}/php.ini"
+      sudo "${EDITOR:-nano}" "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini"
     fi
 
     # set the ownership
     if [ -n "${VDM_PUID}" ] && [ -n "${VDM_PGID}" ]; then
-      sudo chown "${VDM_PUID}":"${VDM_PGID}" "${VDM_PROJECT_PATH}/${VDM_KEY}/php.ini"
+      sudo chown "${VDM_PUID}":"${VDM_PGID}" "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini"
     else
-      sudo chown www-data:www-data "${VDM_PROJECT_PATH}/${VDM_KEY}/php.ini"
+      sudo chown www-data:www-data "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini"
     fi
     # make sure the permission are good
-    sudo chmod 600 "${VDM_PROJECT_PATH}/${VDM_KEY}/php.ini"
+    sudo chmod 600 "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini"
 
     # yes load php.ini volume to the container
     return 0
@@ -3478,22 +4007,22 @@ function setDockerEntrypoint() {
   if (whiptail --yesno "Would you like to customize the entrypoint script for this Joomla container" \
     --defaultno --title "entrypoint.sh values" --backtitle "${BACK_TITLE}" 8 112); then
     # make sure the directory exist
-    mkdir -p "${VDM_PROJECT_PATH}/${VDM_KEY}"
+    mkdir -p "${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}"
     # unattended deploy
 #    if (whiptail --yesno "Would you like to to setup unattended deployment for this Joomla container" --defaultno --title "Unattended Deployment" 8 112); then
 #        echo "soon we will have this ready"
 #    fi
     # download entrypoint.sh file to the project folder
-    if sudo curl --fail -L "${VDM_ENTRY_REPO}" -o "${VDM_PROJECT_PATH}/${VDM_KEY}/entrypoint.sh" 2>/dev/null; then
+    if sudo curl --fail -L "${VDM_ENTRY_REPO}" -o "${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}/entrypoint.sh" 2>/dev/null; then
       # give little heads-up
       showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
       # lets open the file with nano for now
-      sudo "${EDITOR:-nano}" "${VDM_PROJECT_PATH}/${VDM_KEY}/entrypoint.sh"
+      sudo "${EDITOR:-nano}" "${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}/entrypoint.sh"
 
       # set the ownership
-      sudo chown root:root "${VDM_PROJECT_PATH}/${VDM_KEY}/entrypoint.sh"
+      sudo chown root:root "${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}/entrypoint.sh"
       # make sure the permission are good
-      sudo chmod +x "${VDM_PROJECT_PATH}/${VDM_KEY}/entrypoint.sh"
+      sudo chmod +x "${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}/entrypoint.sh"
 
       # we have the file set
       return 0
