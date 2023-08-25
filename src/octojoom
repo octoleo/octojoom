@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="3.4.0"
+_VERSION="3.4.1"
 _V="3.4"
 
 # The program full name
@@ -224,9 +224,17 @@ function portainer__TRuST__setup() {
   # check if we have secure switch set
   setSecureState
   # setup letsencrypt stuff
+  VDM_PORT_SECURE_LABELS=''
   if $VDM_SECURE; then
     VDM_REMOVE_SECURE=''
     VDM_ENTRY_POINT="websecure"
+    setSecureCloudflareState
+    if $VDM_SECURE_CLOUDFLARE; then
+      VDM_PORT_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.portainer.entrypoints=web\"")
+    else
+      VDM_PORT_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.portainer.entrypoints=${VDM_ENTRY_POINT}\"")
+      VDM_PORT_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.portainer.tls.certresolver=vdmresolver\"")
+    fi
   else
     VDM_REMOVE_SECURE="#"
     VDM_ENTRY_POINT="web"
@@ -244,6 +252,7 @@ function portainer__TRuST__setup() {
   # container
   export VDM_REMOVE_SECURE
   export VDM_ENTRY_POINT
+  export VDM_PORT_SECURE_LABELS
   # set host file if needed
   updateHostFile
   ## create the directory if it does not yet already exist
@@ -266,6 +275,7 @@ function portainer__TRuST__setup() {
   unset VDM_SUBDOMAIN
   unset VDM_REMOVE_SECURE
   unset VDM_ENTRY_POINT
+  unset VDM_PORT_SECURE_LABELS
   # return a success
   return 0
 }
@@ -288,9 +298,7 @@ services:
     labels:
       # Frontend
       - "traefik.enable=true"
-      - "traefik.http.routers.portainer.rule=Host(\`${VDM_SUBDOMAIN}.${VDM_DOMAIN}\`)"
-${VDM_REMOVE_SECURE}      - "traefik.http.routers.portainer.entrypoints=${VDM_ENTRY_POINT}"
-${VDM_REMOVE_SECURE}      - "traefik.http.routers.portainer.tls.certresolver=vdmresolver"
+      - "traefik.http.routers.portainer.rule=Host(\`${VDM_SUBDOMAIN}.${VDM_DOMAIN}\`)"${VDM_PORT_SECURE_LABELS}
       - "traefik.http.routers.portainer.service=portainer"
       - "traefik.http.services.portainer.loadbalancer.server.port=9000"
 
@@ -308,6 +316,7 @@ volumes:
 
 networks:
   traefik:
+    external: true
     name: ${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}
 EOF
 }
@@ -340,10 +349,31 @@ function joomla__TRuST__setup() {
   # check if we have secure switch set
   setSecureState
   # setup letsencrypt stuff
+  VDM_JOOMLA_SECURE_LABELS=''
+  VDM_PHPMYADMIN_SECURE_LABELS=''
   if $VDM_SECURE; then
     VDM_REMOVE_SECURE=''
     VDM_ENTRY_POINT="websecure"
     VDM_HTTP_SCHEME="https://"
+    setSecureCloudflareState
+    # add joomla labels
+    if $VDM_SECURE_CLOUDFLARE; then
+      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla_${VDM_KEY}.entrypoints=web\"")
+    else
+      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla_${VDM_KEY}.tls.certresolver=vdmresolver\"")
+    fi
+    VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla_${VDM_KEY}.service=joomla_${VDM_KEY}\"")
+    VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.joomla_${VDM_KEY}.loadbalancer.server.port=80\"")
+    # add phpmyadmin labels
+    if $VDM_SECURE_CLOUDFLARE; then
+      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin_${VDM_KEY}.entrypoints=web\"")
+    else
+      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin_${VDM_KEY}.tls.certresolver=vdmresolver\"")
+    fi
+    VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin_${VDM_KEY}.service=phpmyadmin_${VDM_KEY}\"")
+    VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.phpmyadmin_${VDM_KEY}.loadbalancer.server.port=80\"")
   else
     VDM_REMOVE_SECURE="#"
     VDM_ENTRY_POINT="web"
@@ -446,8 +476,12 @@ function joomla__TRuST__setup() {
     VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.enable=true\"")
     VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}mail.${VDM_DOMAIN}\`)\"")
     if $VDM_SECURE; then
-      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
-      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.tls.certresolver=vdmresolver\"")
+      if $VDM_SECURE_CLOUDFLARE; then
+        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.entrypoints=web\"")
+      else
+        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.tls.certresolver=vdmresolver\"")
+      fi
     fi
     VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.service=mailcatcher_${VDM_KEY}\"")
     VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.services.mailcatcher_${VDM_KEY}.loadbalancer.server.port=1080\"")
@@ -521,6 +555,8 @@ function joomla__TRuST__setup() {
   export VDM_JOOMLA_VOLUMES_MOUNT
   export VDM_DB_VOLUMES_MOUNT
   export VDM_EXTRA_CONTAINER_STUFF
+  export VDM_JOOMLA_SECURE_LABELS
+  export VDM_PHPMYADMIN_SECURE_LABELS
   export VDM_EXTRA_JOOMLA_ENV
   # container lower
   export vdm_database_name
@@ -570,6 +606,8 @@ function joomla__TRuST__setup() {
   unset VDM_PHP_PROJECT_PATH
   unset VDM_ENTRY_PROJECT_PATH
   unset VDM_EXTRA_CONTAINER_STUFF
+  unset VDM_JOOMLA_SECURE_LABELS
+  unset VDM_PHPMYADMIN_SECURE_LABELS
   unset VDM_EXTRA_JOOMLA_ENV
   unset VDM_J_SITE_NAME
   unset VDM_J_USERNAME
@@ -627,11 +665,7 @@ services:
     labels:
       # joomla
       - "traefik.enable=true"
-      - "traefik.http.routers.joomla_${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}.${VDM_DOMAIN}\`)"
-${VDM_REMOVE_SECURE}      - "traefik.http.routers.joomla_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}"
-${VDM_REMOVE_SECURE}      - "traefik.http.routers.joomla_${VDM_KEY}.tls.certresolver=vdmresolver"
-${VDM_REMOVE_SECURE}      - "traefik.http.routers.joomla_${VDM_KEY}.service=joomla_${VDM_KEY}"
-${VDM_REMOVE_SECURE}      - "traefik.http.services.joomla_${VDM_KEY}.loadbalancer.server.port=80"
+      - "traefik.http.routers.joomla_${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}.${VDM_DOMAIN}\`)"${VDM_JOOMLA_SECURE_LABELS}
   phpmyadmin_${VDM_KEY}:
     image: phpmyadmin/phpmyadmin
     container_name: phpmyadmin_${VDM_KEY}
@@ -647,13 +681,10 @@ ${VDM_REMOVE_SECURE}      - "traefik.http.services.joomla_${VDM_KEY}.loadbalance
     labels:
       # phpmyadmin
       - "traefik.enable=true"
-      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}db.${VDM_DOMAIN}\`)"
-${VDM_REMOVE_SECURE}      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}"
-${VDM_REMOVE_SECURE}      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.tls.certresolver=vdmresolver"
-${VDM_REMOVE_SECURE}      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.service=phpmyadmin_${VDM_KEY}"
-${VDM_REMOVE_SECURE}      - "traefik.http.services.phpmyadmin_${VDM_KEY}.loadbalancer.server.port=80"${VDM_EXTRA_CONTAINER_STUFF}
+      - "traefik.http.routers.phpmyadmin_${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}db.${VDM_DOMAIN}\`)"${VDM_PHPMYADMIN_SECURE_LABELS}${VDM_EXTRA_CONTAINER_STUFF}
 networks:
   traefik:
+    external: true
     name: ${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}
 
 ${VDM_VOLUMES}
@@ -691,6 +722,7 @@ function joomla__TRuST__bulk() {
     VDM_REMOVE_SECURE=''
     VDM_ENTRY_POINT="websecure"
     VDM_HTTP_SCHEME="https://"
+    setSecureCloudflareState
   else
     VDM_REMOVE_SECURE="#"
     VDM_ENTRY_POINT="web"
@@ -876,12 +908,39 @@ function joomla__TRuST__bulk() {
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.enable=true\"")
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}mail.${VDM_DOMAIN}\`)\"")
       if $VDM_SECURE; then
-        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
-        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.tls.certresolver=vdmresolver\"")
+        if $VDM_SECURE_CLOUDFLARE; then
+          VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.entrypoints=web\"")
+        else
+          VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+          VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.tls.certresolver=vdmresolver\"")
+        fi
       fi
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher_${VDM_KEY}.service=mailcatcher_${VDM_KEY}\"")
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.services.mailcatcher_${VDM_KEY}.loadbalancer.server.port=1080\"")
       VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SMTP_HOST=mailcatcher_${VDM_KEY}")
+    fi
+    # setup letsencrypt stuff
+    VDM_JOOMLA_SECURE_LABELS=''
+    VDM_PHPMYADMIN_SECURE_LABELS=''
+    if $VDM_SECURE; then
+      # add joomla labels
+      if $VDM_SECURE_CLOUDFLARE; then
+        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla_${VDM_KEY}.entrypoints=web\"")
+      else
+        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla_${VDM_KEY}.tls.certresolver=vdmresolver\"")
+      fi
+      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla_${VDM_KEY}.service=joomla_${VDM_KEY}\"")
+      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.joomla_${VDM_KEY}.loadbalancer.server.port=80\"")
+      # add phpmyadmin labels
+      if $VDM_SECURE_CLOUDFLARE; then
+        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin_${VDM_KEY}.entrypoints=web\"")
+      else
+        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin_${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin_${VDM_KEY}.tls.certresolver=vdmresolver\"")
+      fi
+      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin_${VDM_KEY}.service=phpmyadmin_${VDM_KEY}\"")
+      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.phpmyadmin_${VDM_KEY}.loadbalancer.server.port=80\"")
     fi
     # global
     export VDM_KEY
@@ -892,6 +951,8 @@ function joomla__TRuST__bulk() {
     export VDM_JOOMLA_VOLUMES_MOUNT
     export VDM_DB_VOLUMES_MOUNT
     export VDM_EXTRA_CONTAINER_STUFF
+    export VDM_JOOMLA_SECURE_LABELS
+    export VDM_PHPMYADMIN_SECURE_LABELS
     export VDM_EXTRA_JOOMLA_ENV
     # container lower
     export vdm_database_name
@@ -934,6 +995,8 @@ function joomla__TRuST__bulk() {
   unset VDM_PHP_PROJECT_PATH
   unset VDM_ENTRY_PROJECT_PATH
   unset VDM_EXTRA_CONTAINER_STUFF
+  unset VDM_JOOMLA_SECURE_LABELS
+  unset VDM_PHPMYADMIN_SECURE_LABELS
   unset VDM_J_SITE_NAME
   unset VDM_J_USERNAME
   unset VDM_J_USER
@@ -4035,6 +4098,20 @@ function setDockerEntrypoint() {
 }
 
 # set the secure state
+function setSecureCloudflareState() {
+  # check the security switch
+  if (whiptail --yesno "Will this container be proxied by Cloudflare [ONLY for server proxied in none-strict mode via Cloudflare]" \
+    --defaultno --title "Cloudflare" --backtitle "${BACK_TITLE}" 8 112); then
+    # we set the secure switch
+    VDM_SECURE_CLOUDFLARE=true
+  else
+    VDM_SECURE_CLOUDFLARE=false
+  fi
+  # make sure it is available
+  export VDM_SECURE_CLOUDFLARE
+}
+
+# set the secure state
 function setSecureState() {
   if [ "${VDM_SECURE:-not}" = 'not' ]; then
     # check the security switch
@@ -4175,6 +4252,7 @@ function quitProgram() {
   unset VDM_DOMAIN
   unset VDM_MULTI_DOMAIN
   unset VDM_SECURE
+  unset VDM_SECURE_CLOUDFLARE
   unset VDM_UPDATE_HOST
   unset VDM_CONTAINER
   unset VDM_ACCESS_TOKEN
