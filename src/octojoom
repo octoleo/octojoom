@@ -1560,7 +1560,7 @@ function joomla__TRuST__disable() {
     # this means we have a single already selected container to enable if it exists
     if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ]; then
       # make sure the docker image is stopped
-      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down
+      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans
       # then remove soft link
       rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
     else
@@ -1585,7 +1585,7 @@ function joomla__TRuST__disable() {
         # remove the " from the string
         container="${containered//\"/}"
         # make sure the docker image is stopped
-        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down
+        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans
         # then remove soft link
         rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
       done
@@ -1603,7 +1603,7 @@ function openssh__TRuST__disable() {
     # this means we have a single already selected container to enable if it exists
     if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ]; then
       # make sure the docker image is stopped
-      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down
+      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans
       # then remove soft link
       rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
     else
@@ -1628,7 +1628,7 @@ function openssh__TRuST__disable() {
         # remove the " from the string
         container="${containered//\"/}"
         # make sure the docker image is stopped
-        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down
+        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans
         # then remove soft link
         rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
       done
