@@ -88,8 +88,8 @@ Usage: octojoom [OPTION...]
 	======================================================
    -j|--joomla-version <version-tag>
 	see available tags here https://hub.docker.com/_/joomla
-	example: octojoom -j=3.10
-	example: octojoom --joomla-version=3.10
+	example: octojoom -j=5.0
+	example: octojoom --joomla-version=5.0
 	======================================================
 	AVAILABLE FOR OPENSSH CONTAINER
 	======================================================

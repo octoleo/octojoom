@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="3.4.1"
+_VERSION="3.4.2"
 _V="3.4"
 
 # The program full name
@@ -3935,7 +3935,7 @@ function setImageSource() {
   # get the Joomla version if not set
   while [ ${#VDM_JV} -le 1 ]; do
     # get the value
-    VDM_JV=$(getInput "Enter Joomla version tag for this container.\n[See available tags here ${vdm_tag_url}]" '3.10' 'Enter Version Tag')
+    VDM_JV=$(getInput "Enter Joomla version tag for this container.\n[See available tags here ${vdm_tag_url}]" '5.0' 'Enter Version Tag')
     # keep asking
     [ ${#VDM_JV} -ge 1 ] || {
       showError "You must enter a version tag. See available tags here ${vdm_tag_url}"
@@ -4936,8 +4936,8 @@ Usage: octojoom [OPTION...]
 	======================================================
    -j|--joomla-version <version-tag>
 	see available tags here https://hub.docker.com/_/joomla
-	example: octojoom -j=3.10
-	example: octojoom --joomla-version=3.10
+	example: octojoom -j=5.0
+	example: octojoom --joomla-version=5.0
 	======================================================
 	AVAILABLE FOR OPENSSH CONTAINER
 	======================================================
