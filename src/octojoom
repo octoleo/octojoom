@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="3.4.4"
+_VERSION="3.4.5"
 _V="3.4"
 
 # The program full name
@@ -4002,6 +4002,12 @@ function setPHPSettings() {
     # remember this for next time
     setUniqueEnvVariable "VDM_max_input_time=${VDM_max_input_time}"
 
+    # max_input_vars
+    VDM_max_input_vars=$(getInputNow "Enter max_input_vars" \
+        "${VDM_max_input_vars:-3000}" 'max_input_vars')
+    # remember this for next time
+    setUniqueEnvVariable "VDM_max_input_vars=${VDM_max_input_time}"
+
     # error_reporting
     default_error_reporting="E_ALL & ~E_DEPRECATED & ~E_STRICT"
     VDM_error_reporting=$(getInputNow "Enter error reporting" \
@@ -4034,6 +4040,7 @@ function setPHPSettings() {
     {
       echo "max_execution_time = ${VDM_max_execution_time}"
       echo "max_input_time = ${VDM_max_input_time}"
+      echo "max_input_vars = ${VDM_max_input_vars}"
       echo "error_reporting = ${VDM_error_reporting}"
       echo "upload_max_filesize = ${VDM_upload_max_filesize}"
       echo "post_max_size = ${VDM_post_max_size}"
