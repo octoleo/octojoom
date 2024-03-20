@@ -5320,7 +5320,7 @@ mkdir -p -m '700' "${VDM_SRC_PATH}"
 # first run switch
 VDM_FIRST_RUN=false
 # load the globals
-# shellcheck disable=SC1090
+# shellcheck disable=SC1090 source=/dev/null
 [ -f "${VDM_SRC_PATH}/.env" ] && source "${VDM_SRC_PATH}/.env"
 # get repo path where store the container deploy scripts
 while [ ${#VDM_REPO_PATH} -le 1 ] || [ ! -d "${VDM_REPO_PATH}" ]; do

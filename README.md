@@ -1,4 +1,9 @@
-# Octojoom - Easy Docker Deployment
+<h2><img align="middle" src="https://raw.githubusercontent.com/odb/official-bash-logo/master/assets/Logos/Icons/PNG/64x64.png" >
+Octojoom - Easy Joomla! Docker Deployment
+</h2>
+
+Written by Llewellyn van der Merwe (@llewellynvdm)
+
 With this script we can easily deploy docker containers of Joomla and Openssh. This combination of these tools give rise to a powerful and very secure shared development environment.
 
 This program has **command input** options as seen in the menus below, but these command are _not the only way_ to set these values.
@@ -7,6 +12,8 @@ Furthermore, the use of **env variables** are also heavily used across the scrip
 There are more than one .env file and the script will set those up for you whenever you run a task that make use of env variables
 the script will check if those values exist, and if they don't it will ask for them, and store them automatically for future use.
 That same time the output message to the terminal will show you where the specific .env file can be found.
+
+Linted by [#ShellCheck](https://github.com/koalaman/shellcheck)
 
 > program only for ubuntu/debian systems at this time (should you like to use it on other OS's please open and issue...)
 
