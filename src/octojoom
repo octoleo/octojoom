@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="3.4.6"
-_V="3.4"
+_VERSION="3.5.0"
+_V="3.5"
 
 # The program full name
 PROGRAM_NAME="Octojoom"
@@ -462,33 +462,33 @@ function joomla__TRuST__setup() {
   $reset_volume && VDM_VOLUMES=''
   # add the projects path
   setContainerEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
-  # ask if we should add mailcatcher
-  if (whiptail --yesno "Would you also like to enable mailcatcher for these ${VDM_CONTAINER_TYPE^} containers" \
-    --defaultno --title "Enable Mailcatcher" --backtitle "${BACK_TITLE}" 8 112); then
-    VDM_EXTRA_CONTAINER_STUFF=$(getYMLine1 "mailcatcher${VDM_KEY}:")
-    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "image: schickling/mailcatcher")
-    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "container_name: mailcatcher${VDM_KEY}")
-    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "restart: unless-stopped")
-    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "networks:")
-    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- traefik")
-    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "labels:")
-    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "# mailcatcher")
-    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.enable=true\"")
-    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}mail.${VDM_DOMAIN}\`)\"")
-    if $VDM_SECURE; then
-      if $VDM_SECURE_CLOUDFLARE; then
-        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.entrypoints=web\"")
-      else
-        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
-        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.tls.certresolver=vdmresolver\"")
-      fi
-    fi
-    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.service=mailcatcher${VDM_KEY}\"")
-    VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.services.mailcatcher${VDM_KEY}.loadbalancer.server.port=1080\"")
-    VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SMTP_HOST=mailcatcher${VDM_KEY}")
-  fi
   # only if in expert mode set the container user detail id needed
   if isExpert; then
+    # ask if we should add mailcatcher
+    if (whiptail --yesno "Would you also like to enable mailcatcher for these ${VDM_CONTAINER_TYPE^} containers" \
+      --defaultno --title "Enable Mailcatcher" --backtitle "${BACK_TITLE}" 8 112); then
+      VDM_EXTRA_CONTAINER_STUFF=$(getYMLine1 "mailcatcher${VDM_KEY}:")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "image: schickling/mailcatcher")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "container_name: mailcatcher${VDM_KEY}")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "restart: unless-stopped")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "networks:")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- traefik")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "labels:")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "# mailcatcher")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.enable=true\"")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}mail.${VDM_DOMAIN}\`)\"")
+      if $VDM_SECURE; then
+        if $VDM_SECURE_CLOUDFLARE; then
+          VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.entrypoints=web\"")
+        else
+          VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+          VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.tls.certresolver=vdmresolver\"")
+        fi
+      fi
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.service=mailcatcher${VDM_KEY}\"")
+      VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.services.mailcatcher${VDM_KEY}.loadbalancer.server.port=1080\"")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SMTP_HOST=mailcatcher${VDM_KEY}:1080")
+    fi
     # if this is our octoleo images we can also set the user ID and user-group ID
     setContainerUser "$(id -u)"
     # check that we got the details
@@ -525,6 +525,11 @@ function joomla__TRuST__setup() {
       VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_USER=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USER}")
       VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_EMAIL=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_EMAIL}")
       VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_PASSWORD}")
+    fi
+    if [[ -n "${VDM_J_EXTENSIONS_URLS}" && "${#VDM_J_EXTENSIONS_URLS}" -gt 2 ]]; then
+      # add extra Joomla envs
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_EXTENSIONS_URLS=\"${VDM_J_EXTENSIONS_URLS}\""
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_EXTENSIONS_URLS=\${VDM_${VDM_ENV_KEY^^}_EXTENSIONS_URLS}")
     fi
   fi
   # add PHP settings
@@ -614,6 +619,7 @@ function joomla__TRuST__setup() {
   unset VDM_J_USER
   unset VDM_J_EMAIL
   unset VDM_J_PASSWORD
+  unset VDM_J_EXTENSIONS_URLS
   # container lower
   unset vdm_database_name
   unset vdm_database_user
@@ -796,11 +802,15 @@ function joomla__TRuST__bulk() {
   fi
   # we only do autodeploy for Joomla 4.3 and above
   enable_autodeploy=false
+  enable_extension_autodeploy=false
   if isVersionAbove "$VDM_JV" "4.3"; then
     # get website setup details
     setJoomlaWebsiteDetails
     if [[ -n "${VDM_J_EMAIL}" ]]; then
       enable_autodeploy=true
+      if [[ -n "${VDM_J_EXTENSIONS_URLS}" && "${#VDM_J_EXTENSIONS_URLS}" -gt 2 ]]; then
+        enable_extension_autodeploy=true
+      fi
     fi
   fi
   # add the projects path
@@ -869,6 +879,11 @@ function joomla__TRuST__bulk() {
       VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_USER=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USER}")
       VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_EMAIL=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_EMAIL}")
       VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_ADMIN_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_PASSWORD}")
+      if $enable_extension_autodeploy; then
+        # add extra Joomla envs
+        setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_EXTENSIONS_URLS=\"${VDM_J_EXTENSIONS_URLS}\""
+        VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_EXTENSIONS_URLS=\${VDM_${VDM_ENV_KEY^^}_EXTENSIONS_URLS}")
+      fi
     fi
     # set persistence
     reset_volume=true
@@ -917,7 +932,7 @@ function joomla__TRuST__bulk() {
       fi
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.service=mailcatcher${VDM_KEY}\"")
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.services.mailcatcher${VDM_KEY}.loadbalancer.server.port=1080\"")
-      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SMTP_HOST=mailcatcher${VDM_KEY}")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SMTP_HOST=mailcatcher${VDM_KEY}:1080")
     fi
     # setup letsencrypt stuff
     VDM_JOOMLA_SECURE_LABELS=''
@@ -1002,6 +1017,7 @@ function joomla__TRuST__bulk() {
   unset VDM_J_USER
   unset VDM_J_EMAIL
   unset VDM_J_PASSWORD
+  unset VDM_J_EXTENSIONS_URLS
   # container lower
   unset vdm_database_name
   unset vdm_database_user
@@ -3737,7 +3753,7 @@ function setUniqueKey() {
 
 # set the Joomla website details
 function setJoomlaWebsiteDetails() {
-  # ask if we should add mailcatcher
+  # ask if we should add autodeployment
   if (whiptail --yesno "Would you like to enable website autodeploy for ${VDM_CONTAINER_TYPE,}:${VDM_JV}" \
     --defaultno --title "Enable Autodeploy" --backtitle "${BACK_TITLE}" 8 112); then
 
@@ -3756,6 +3772,8 @@ function setJoomlaWebsiteDetails() {
     # ask for username password
     setJoomlaPassword
 
+    # ask for extension URLs
+    setJoomlaExtensionUrls
   fi
 }
 
@@ -3844,6 +3862,38 @@ function setJoomlaPassword() {
   done
   # make sure it is available
   export VDM_J_PASSWORD
+}
+
+# This function asks for Joomla extension ZIP URLs using whiptail, validates them,
+# and concatenates them into a single environment variable.
+function setJoomlaExtensionUrls() {
+    local urls=()
+    local input=""
+    local prompt_message="Enter Joomla Extension ZIP URL (leave empty to for none):"
+    local title="Enter Joomla Extension Installation URL"
+
+    # Loop to collect URLs until an empty string or cancellation
+    while true; do
+        input=$(getInput "$prompt_message" "" "$title")
+
+        # Break loop if input is empty
+        if [[ -z "$input" ]]; then
+            break
+        fi
+
+        # Validate URL format
+       if [[ "$input" =~ ^http(s)?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(/.*)?$ ]]; then
+            urls+=("$input")
+        else
+            showNotice "Invalid URL. Please enter a valid ZIP URL (must be a .zip file)." 10
+        fi
+    done
+
+    # Join URLs with semicolons
+    if [ ${#urls[@]} -gt 0 ]; then
+        VDM_J_EXTENSIONS_URLS=$(IFS=';'; echo "${urls[*]}")
+        export VDM_J_EXTENSIONS_URLS
+    fi
 }
 
 # set the number of containers to build
@@ -3935,7 +3985,7 @@ function setImageSource() {
   # get the Joomla version if not set
   while [ ${#VDM_JV} -le 1 ]; do
     # get the value
-    VDM_JV=$(getInput "Enter Joomla version tag for this container.\n[See available tags here ${vdm_tag_url}]" '5.0' 'Enter Version Tag')
+    VDM_JV=$(getInput "Enter Joomla version tag for this container.\n[See available tags here ${vdm_tag_url}]" '5.1' 'Enter Version Tag')
     # keep asking
     [ ${#VDM_JV} -ge 1 ] || {
       showError "You must enter a version tag. See available tags here ${vdm_tag_url}"
@@ -4943,8 +4993,8 @@ Usage: octojoom [OPTION...]
 	======================================================
    -j|--joomla-version <version-tag>
 	see available tags here https://hub.docker.com/_/joomla
-	example: octojoom -j=5.0
-	example: octojoom --joomla-version=5.0
+	example: octojoom -j=5.1
+	example: octojoom --joomla-version=5.1
 	======================================================
 	AVAILABLE FOR OPENSSH CONTAINER
 	======================================================
