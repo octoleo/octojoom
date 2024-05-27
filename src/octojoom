@@ -27,8 +27,8 @@ elif [[ "$OSTYPE" == "darwin"* ]]; then
 elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
   OS_NUMBER=3
 fi
-# Function to check Bash version
-check_bash_version() {
+# Check Bash version
+function check_bash_version() {
   local bash_version="$1"
   local version_string="$BASH_VERSION"
   local major_version="${version_string%%.*}"
@@ -62,8 +62,8 @@ command -v awk >/dev/null 2>&1 || {
 #  echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require rsync."
 #  exit 1
 #}
-# Function to check and install Docker on Linux
-install_docker_linux() {
+# Check and install Docker on Linux
+function install_docker_linux() {
   echo "Installing Docker on Linux..."
  # Add Docker GPG key and repository to sources.list.
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
@@ -79,15 +79,15 @@ install_docker_linux() {
   sudo systemctl start docker.service
   echo "Docker is installed."
 }
-# Function to check and install Docker on macOS
-install_docker_macos() {
+# Check and install Docker on macOS
+function install_docker_macos() {
   echo "Installing Docker on macOS..."
   brew install --cask docker
   open /Applications/Docker.app
   echo "Docker is installed. Please follow the prompts to complete the installation."
 }
-# Function to check and install Docker on Windows (MSYS/Cygwin)
-install_docker_windows() {
+# Check and install Docker on Windows (MSYS/Cygwin)
+function install_docker_windows() {
   echo "Please download and install Docker Desktop from https://www.docker.com/products/docker-desktop"
   echo "Docker Desktop is required for Windows environments."
   exit 0
@@ -119,8 +119,8 @@ if ! command -v docker &>/dev/null; then
     exit 1
   fi
 fi
-# Function to install Docker Compose on Linux
-install_docker_compose_linux() {
+# Install Docker Compose on Linux
+function install_docker_compose_linux() {
   echo "Installing Docker Compose on Linux..."
   # Download the latest Docker Compose binary.
   COMPOSE_VERSION=$(curl --silent https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
@@ -130,8 +130,8 @@ install_docker_compose_linux() {
   sudo ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
   echo "Docker Compose is installed."
 }
-# Function to install Docker Compose on macOS
-install_docker_compose_macos() {
+# Install Docker Compose on macOS
+function install_docker_compose_macos() {
   echo "Installing Docker Compose on macOS..."
   # Download the latest Docker Compose binary.
   COMPOSE_VERSION=$(curl --silent https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
@@ -141,8 +141,8 @@ install_docker_compose_macos() {
   sudo ln -s /usr/local/bin/docker-compose /usr/local/bin/docker-compose
   echo "Docker Compose is installed."
 }
-# Function to install Docker Compose on Windows (MSYS/Cygwin)
-install_docker_compose_windows() {
+# Install Docker Compose on Windows (MSYS/Cygwin)
+function install_docker_compose_windows() {
   echo "Please download Docker Compose from https://github.com/docker/compose/releases"
   echo "and place it in a directory included in your PATH."
   exit 0
@@ -4594,8 +4594,8 @@ function isFunc() {
   declare -F "$1" >/dev/null
 }
 
-# Function to update the host file for Linux and macOS
-updateHostFile_unix() {
+# Update the host file for Linux and macOS
+function updateHostFile_unix() {
   # check if we should add to host file
   if allowEditHostFile; then
     # check if already in host file
@@ -4611,8 +4611,8 @@ updateHostFile_unix() {
   fi
 }
 
-# Function to manually edit the host file for Linux and macOS
-editHostFile_unix() {
+# Manually edit the host file for Linux and macOS
+function editHostFile_unix() {
   # check if we should add to host file
   if allowEditHostFile; then
     # if this container is enabled ask if it should be redeployed
@@ -4626,8 +4626,8 @@ editHostFile_unix() {
   fi
 }
 
-# Function to update the host file for Windows (MSYS/Cygwin)
-updateHostFile_windows() {
+# Update the host file for Windows (MSYS/Cygwin)
+function updateHostFile_windows() {
   local subdomain=${1:-$VDM_SUBDOMAIN}
   local domain=${2:-$VDM_DOMAIN}
   local host_file="/c/Windows/System32/drivers/etc/hosts"
@@ -4643,8 +4643,8 @@ updateHostFile_windows() {
   fi
 }
 
-# Function to manually edit the host file for Windows (MSYS/Cygwin)
-editHostFile_windows() {
+# Manually edit the host file for Windows (MSYS/Cygwin)
+function editHostFile_windows() {
   local host_file="/c/Windows/System32/drivers/etc/hosts"
 
   if allowEditHostFile; then
@@ -4656,8 +4656,8 @@ editHostFile_windows() {
   fi
 }
 
-# Function to update the host file (dynamically calls the correct OS function)
-updateHostFile() {
+# Update the host file (dynamically calls the correct OS function)
+function updateHostFile() {
   case "$OS_NUMBER" in
     1|2)
       updateHostFile_unix "$@"
@@ -4672,8 +4672,8 @@ updateHostFile() {
   esac
 }
 
-# Function to manually edit the host file (dynamically calls the correct OS function)
-editHostFile() {
+# Manually edit the host file (dynamically calls the correct OS function)
+function editHostFile() {
   case "$OS_NUMBER" in
     1|2)
       editHostFile_unix
