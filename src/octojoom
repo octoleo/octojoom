@@ -1,8 +1,11 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="3.5.1"
-_V="3.5"
+_VERSION="3.6.0"
+_V="3.6"
+
+# Bash version required
+_bash_v=4
 
 # The program full name
 PROGRAM_NAME="Octojoom"
@@ -13,6 +16,32 @@ SERVER_HOSTNAME="$(hostname)"
 # Set the back title
 BACK_TITLE="    Octoleo | ${USER}@${SERVER_HOSTNAME}"
 
+#####################################################################################################################VDM
+######################################## The environment preparation
+# Set OS number
+OS_NUMBER=0 # Unknown
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  OS_NUMBER=1
+elif [[ "$OSTYPE" == "darwin"* ]]; then
+  OS_NUMBER=2
+elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
+  OS_NUMBER=3
+fi
+# Function to check Bash version
+check_bash_version() {
+  local bash_version="$1"
+  local version_string="$BASH_VERSION"
+  local major_version="${version_string%%.*}"
+  local rest="${version_string#*.}"
+  local minor_version="${rest%%.*}"
+
+  if (( major_version < bash_version )) || (( major_version == bash_version && minor_version < 0 )); then
+    echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script requires Bash version ${bash_version}.0 or above."
+    exit 1
+  fi
+}
+# Check for the appropriate version of Bash
+check_bash_version "$_bash_v"
 # make sure whiptail is installed
 command -v whiptail >/dev/null 2>&1 || {
   echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require whiptail."
@@ -28,57 +57,120 @@ command -v awk >/dev/null 2>&1 || {
   echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require awk."
   exit 1
 }
-# Check if Docker is installed.
+# make sure rsync is installed (hmmm not always)
+#command -v rsync >/dev/null 2>&1 || {
+#  echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require rsync."
+#  exit 1
+#}
+# Function to check and install Docker on Linux
+install_docker_linux() {
+  echo "Installing Docker on Linux..."
+ # Add Docker GPG key and repository to sources.list.
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  # Update package index and install Docker.
+  sudo apt-get update
+  sudo apt-get install docker-ce docker-ce-cli containerd.io -y
+  # Add the current user to the docker group.
+  sudo groupadd docker
+  sudo usermod -aG docker "$USER"
+  # Enable and start the Docker service.
+  sudo systemctl enable docker.service
+  sudo systemctl start docker.service
+  echo "Docker is installed."
+}
+# Function to check and install Docker on macOS
+install_docker_macos() {
+  echo "Installing Docker on macOS..."
+  brew install --cask docker
+  open /Applications/Docker.app
+  echo "Docker is installed. Please follow the prompts to complete the installation."
+}
+# Function to check and install Docker on Windows (MSYS/Cygwin)
+install_docker_windows() {
+  echo "Please download and install Docker Desktop from https://www.docker.com/products/docker-desktop"
+  echo "Docker Desktop is required for Windows environments."
+  exit 0
+}
+# Check if Docker is installed
 if ! command -v docker &>/dev/null; then
-  # If Docker is not installed, ask the user if they want to install it.
+  # If Docker is not installed, ask the user if they want to install it
   if whiptail --yesno "Docker is not installed. Do you want to install it now?" \
-    --backtitle "${BACK_TITLE}" 10 60; then
-    # If the user chooses Yes, install Docker.
-    echo "Installing Docker..."
-
-    # Add Docker GPG key and repository to sources.list.
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-    # Update package index and install Docker.
-    sudo apt-get update
-    sudo apt-get install docker-ce docker-ce-cli containerd.io -y
-
-    # Add the current user to the docker group.
-    sudo groupadd docker
-    sudo usermod -aG docker "$USER"
-
-    # Enable and start the Docker service.
-    sudo systemctl enable docker.service
-    sudo systemctl start docker.service
-
-    echo "Docker is installed."
+      --backtitle "${BACK_TITLE}" 10 60; then
+    # If the user chooses Yes, install Docker based on the OS
+    case "$OS_NUMBER" in
+      1)
+        install_docker_linux
+        ;;
+      2)
+        install_docker_macos
+        ;;
+      3)
+        install_docker_windows
+        ;;
+      *)
+        echo >&2 "ERROR: Unsupported operating system."
+        exit 1
+        ;;
+    esac
   else
-    # If the user chooses No, exit the script with an error message.
-    echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require docker."
+    # If the user chooses No, exit the script with an error message
+    echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script requires Docker."
     exit 1
   fi
 fi
-# Check if Docker Compose is installed.
+# Function to install Docker Compose on Linux
+install_docker_compose_linux() {
+  echo "Installing Docker Compose on Linux..."
+  # Download the latest Docker Compose binary.
+  COMPOSE_VERSION=$(curl --silent https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+  sudo curl -SL "https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+  # Make the Docker Compose binary executable.
+  sudo chmod +x /usr/local/bin/docker-compose
+  sudo ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+  echo "Docker Compose is installed."
+}
+# Function to install Docker Compose on macOS
+install_docker_compose_macos() {
+  echo "Installing Docker Compose on macOS..."
+  # Download the latest Docker Compose binary.
+  COMPOSE_VERSION=$(curl --silent https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+  sudo curl -SL "https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+  # Make the Docker Compose binary executable.
+  sudo chmod +x /usr/local/bin/docker-compose
+  sudo ln -s /usr/local/bin/docker-compose /usr/local/bin/docker-compose
+  echo "Docker Compose is installed."
+}
+# Function to install Docker Compose on Windows (MSYS/Cygwin)
+install_docker_compose_windows() {
+  echo "Please download Docker Compose from https://github.com/docker/compose/releases"
+  echo "and place it in a directory included in your PATH."
+  exit 0
+}
+# Check if Docker Compose is installed
 if ! command -v docker-compose &>/dev/null; then
-  # If Docker Compose is not installed, ask the user if they want to install it.
+  # If Docker Compose is not installed, ask the user if they want to install it
   if whiptail --yesno "Docker Compose is not installed. Do you want to install it now?" \
-    --backtitle "${BACK_TITLE}" 10 60; then
-    # If the user chooses Yes, install Docker Compose.
-    echo "Installing Docker Compose..."
-
-    # Download the latest Docker Compose binary.
-    COMPOSE_VERSION=$(curl --silent https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    sudo curl -SL "https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-
-    # Make the Docker Compose binary executable.
-    sudo chmod +x /usr/local/bin/docker-compose
-    sudo ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
-
-    echo "Docker Compose is installed."
+        --backtitle "${BACK_TITLE}" 10 60; then
+    # If the user chooses Yes, install Docker Compose based on the OS
+    case "$OS_NUMBER" in
+      1)
+        install_docker_compose_linux
+        ;;
+      2)
+        install_docker_compose_macos
+        ;;
+      3)
+        install_docker_compose_windows
+        ;;
+      *)
+        echo >&2 "ERROR: Unsupported operating system."
+        exit 1
+        ;;
+    esac
   else
-    # If the user chooses No, exit the script with an error message.
-    echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require docker-compose."
+    # If the user chooses No, exit the script with an error message
+    echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script requires docker-compose."
     exit 1
   fi
 fi
@@ -4570,9 +4662,9 @@ function openEnv() {
 
 # Check if any hosts are set in the SSH config file
 function hasRemoteSystemSet() {
-  local ssh_config="/home/${USER}/.ssh/config"
+  local ssh_config="${VDM_HOME_PATH}/.ssh/config"
 
-  if [ ! -d "/home/${USER}/.ssh" ] || [ ! -f "${ssh_config}" ] ||
+  if [ ! -d "${VDM_HOME_PATH}/.ssh" ] || [ ! -f "${ssh_config}" ] ||
     [[ $(grep -i -c '^host' "${ssh_config}") -eq 0 ]]; then
       showError "To use this feature you must first set up the needed remote host details in (~/.ssh/config) to allow easy and secure SSH access."
       return 1
@@ -4586,7 +4678,7 @@ function getRemoteSystem() {
   # The selected folder
   local answer
 
-  if [ -f "/home/${USER}/.ssh/config" ]; then
+  if [ -f "${VDM_HOME_PATH}/.ssh/config" ]; then
     # We start the selection array
     local selected=()
     # Our counter
@@ -4599,7 +4691,7 @@ function getRemoteSystem() {
       if [ "$i" -le 10 ]; then
         i=$((i + 1))
       fi
-    done < <(grep -i '^host' "/home/${USER}/.ssh/config" | awk '{print $2}' | sort)
+    done < <(grep -i '^host' "${VDM_HOME_PATH}/.ssh/config" | awk '{print $2}' | sort)
 
     # Add manual input option
     selected+=("Enter manually" "Enter manually" "OFF")
@@ -4645,7 +4737,7 @@ function remoteEnvFileExists() {
 
   # Check if the file exists on the remote system
   # shellcheck disable=SC2029
-  ssh "${remote_system}" "[ -f \"/home/${USER}/.config/octojoom/.env\" ]"
+  ssh "${remote_system}" "[ -f \"${VDM_HOME_PATH}/.config/octojoom/.env\" ]"
 }
 
 # Get a specific value from the remote .env file
@@ -4656,7 +4748,7 @@ function getRemoteEnvValue() {
 
   if remoteEnvFileExists "${remote_system}"; then
     # shellcheck disable=SC2029
-    remote_env_value=$(ssh "${remote_system}" "grep '^${env_key}=' \"/home/${USER}/.config/octojoom/.env\"" | cut -d '=' -f 2-)
+    remote_env_value=$(ssh "${remote_system}" "grep '^${env_key}=' \"${VDM_HOME_PATH}/.config/octojoom/.env\"" | cut -d '=' -f 2-)
   fi
 
   # Remove any double quotes from the returned value
@@ -4929,8 +5021,8 @@ function moveTarToRemote() {
   local remote_path="$2"
   local remote="$3"
 
-  if [ -f "/home/${USER}/.ssh/config" ]; then
-    scp -F "/home/${USER}/.ssh/config" "${local_path}" "${remote}:${remote_path}"
+  if [ -f "${VDM_HOME_PATH}/.ssh/config" ]; then
+    scp -F "${VDM_HOME_PATH}/.ssh/config" "${local_path}" "${remote}:${remote_path}"
   else
     scp "${local_path}" "${remote}:${remote_path}"
   fi
@@ -5430,9 +5522,26 @@ fi
 
 #####################################################################################################################VDM
 ######################################## SETUP KEY PATHS
-# the src folder path is where we store the script global env
-VDM_SRC_PATH="/home/${USER}/.config/octojoom"
-# create the folder if not set
+# we set a home path based on OS
+VDM_HOME_PATH=''
+case "$OS_NUMBER" in
+  1) # Linux
+    VDM_HOME_PATH="/home/${USER}"
+    ;;
+  2) # macOS
+    VDM_HOME_PATH="/Users/${USER}"
+    ;;
+  3) # Windows (MSYS/Cygwin)
+    VDM_HOME_PATH="/c/Users/${USER}"
+    ;;
+  *)
+    echo >&2 "ERROR: Unsupported operating system."
+    exit 1
+    ;;
+esac
+# Set the src folder path based on OS
+VDM_SRC_PATH="${VDM_HOME_PATH}/.config/octojoom"
+# Create the folder if not set
 # shellcheck disable=SC2174
 mkdir -p -m '700' "${VDM_SRC_PATH}"
 # first run switch
@@ -5449,7 +5558,7 @@ while [ ${#VDM_REPO_PATH} -le 1 ] || [ ! -d "${VDM_REPO_PATH}" ]; do
   else
     # get the value
     VDM_REPO_PATH=$(getInput "Enter the repository path where we can store the containers' docker-composer.yml deployment files." \
-      "/home/${USER}/Docker" 'Enter Repository Path')
+      "${VDM_HOME_PATH}/Docker" 'Enter Repository Path')
     # keep asking if empty or does exist
     if [ ${#VDM_REPO_PATH} -ge 1 ] && [ ! -d "${VDM_REPO_PATH}" ] && (whiptail --yesno "Can we create the ${VDM_REPO_PATH} repository folder" \
       --title "Create the Path" --backtitle "${BACK_TITLE}" 8 112); then
@@ -5472,7 +5581,7 @@ while [ ${#VDM_PROJECT_PATH} -le 1 ] || [ ! -d "${VDM_PROJECT_PATH}" ]; do
   else
     # get the value
     VDM_PROJECT_PATH=$(getInput "Enter the projects' path where we can store the containers' persistent volumes." \
-      "/home/${USER}/Projects" "Enter Projects' Path")
+      "${VDM_HOME_PATH}/Projects" "Enter Projects' Path")
     # keep asking if empty or does exist
     if [ ${#VDM_PROJECT_PATH} -ge 1 ] && [ ! -d "${VDM_PROJECT_PATH}" ] && (whiptail --yesno "Can we create the ${VDM_PROJECT_PATH} projects folder" \
       --title "Create the Path" --backtitle "${BACK_TITLE}" 8 112); then
