@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # The most recent program version.
-_VERSION="3.6.0"
+_VERSION="3.6.1"
 _V="3.6"
 
 # Bash version required
@@ -4594,8 +4594,8 @@ function isFunc() {
   declare -F "$1" >/dev/null
 }
 
-# update the host file
-function updateHostFile() {
+# Function to update the host file for Linux and macOS
+updateHostFile_unix() {
   # check if we should add to host file
   if allowEditHostFile; then
     # check if already in host file
@@ -4611,8 +4611,8 @@ function updateHostFile() {
   fi
 }
 
-# the manually edit the host file
-function editHostFile() {
+# Function to manually edit the host file for Linux and macOS
+editHostFile_unix() {
   # check if we should add to host file
   if allowEditHostFile; then
     # if this container is enabled ask if it should be redeployed
@@ -4624,6 +4624,68 @@ function editHostFile() {
       sudo "${EDITOR:-nano}" /etc/hosts
     fi
   fi
+}
+
+# Function to update the host file for Windows (MSYS/Cygwin)
+updateHostFile_windows() {
+  local subdomain=${1:-$VDM_SUBDOMAIN}
+  local domain=${2:-$VDM_DOMAIN}
+  local host_file="/c/Windows/System32/drivers/etc/hosts"
+
+  if allowEditHostFile; then
+    if grep -q "${subdomain}.${domain}" "$host_file"; then
+      showNotice "${USER^}, ${subdomain}.${domain} is already in the hosts file."
+    elif (whiptail --yesno "${USER^}, to add the ${subdomain}.${domain} entry to your host file we need administrative privileges." \
+      --title "Give administrative Privileges" --backtitle "${BACK_TITLE}" 8 112); then
+      echo "127.0.0.1       ${subdomain}.${domain}" | sudo tee -a "$host_file" >/dev/null
+      showNotice "${USER^}, ${subdomain}.${domain} was added to the hosts file."
+    fi
+  fi
+}
+
+# Function to manually edit the host file for Windows (MSYS/Cygwin)
+editHostFile_windows() {
+  local host_file="/c/Windows/System32/drivers/etc/hosts"
+
+  if allowEditHostFile; then
+    if (whiptail --yesno "To edit the host file we need administrative privileges.\n[Only continue if you know what you're doing!]" \
+      --title "Give administrative Privileges" --backtitle "${BACK_TITLE}" 15 112); then
+      showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano." 13
+      sudo "${EDITOR:-nano}" "$host_file"
+    fi
+  fi
+}
+
+# Function to update the host file (dynamically calls the correct OS function)
+updateHostFile() {
+  case "$OS_NUMBER" in
+    1|2)
+      updateHostFile_unix "$@"
+      ;;
+    3)
+      updateHostFile_windows "$@"
+      ;;
+    *)
+      echo >&2 "ERROR: Unsupported operating system."
+      exit 1
+      ;;
+  esac
+}
+
+# Function to manually edit the host file (dynamically calls the correct OS function)
+editHostFile() {
+  case "$OS_NUMBER" in
+    1|2)
+      editHostFile_unix
+      ;;
+    3)
+      editHostFile_windows
+      ;;
+    *)
+      echo >&2 "ERROR: Unsupported operating system."
+      exit 1
+      ;;
+  esac
 }
 
 # the manually edit the config file
