@@ -262,15 +262,13 @@ function traefik__TRuST__setup() {
 function traefikContainer() {
   # we build the yml file
   cat <<EOF
-version: "3.3"
-
 services:
   traefik:
     container_name: traefik
     image: "traefik:latest"
     command:
-${VDM_REMOVE_SECURE}      - --entrypoints.web.address=:80
-${VDM_REMOVE_SECURE}      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
 #      - --api.dashboard=true
 #      - --api.insecure=true
       - --providers.docker
@@ -303,6 +301,7 @@ ${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.redirect-to-me.redirectsch
 
 networks:
   traefik:
+    external: true
     name: ${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}
 EOF
 }
@@ -376,8 +375,6 @@ function portainer__TRuST__setup() {
 function portainerContainer() {
   # we build the yml file
   cat <<EOF
-version: "3.3"
-
 services:
   portainer:
     image: portainer/portainer-ce:latest
@@ -732,7 +729,6 @@ function joomlaContainer() {
   fi
   # we build the yml file
   cat <<EOF
-version: '2'
 services:
   mariadb${VDM_KEY}:
     image: mariadb:latest
@@ -1317,7 +1313,6 @@ function openssh__TRuST__setup() {
 function opensshContainer() {
   # we build the yml file
   cat <<EOF
-version: "2.1"
 services:
   openssh-server-${VDM_KEY}:
     image: lscr.io/linuxserver/openssh-server
@@ -1339,6 +1334,7 @@ services:
 
 networks:
   openssh:
+    external: true
     name: ${VDM_OPENSSH_GATEWAY:-openssh_gateway}
 EOF
 }
