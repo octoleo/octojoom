@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # The most recent program version.
 _VERSION="3.6.1"
