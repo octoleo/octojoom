@@ -18,6 +18,12 @@ BACK_TITLE="    Octoleo | ${USER}@${SERVER_HOSTNAME}"
 
 #####################################################################################################################VDM
 ######################################## The environment preparation
+# make sure curl is installed
+command -v curl >/dev/null 2>&1 || {
+  echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require curl."
+  echo >&2 "NOTICE: Please install curl first and then re-run this script again."
+  exit 1
+}
 # Set OS number
 OS_NUMBER=0 # Unknown
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
@@ -42,19 +48,60 @@ function check_bash_version() {
 }
 # Check for the appropriate version of Bash
 check_bash_version "$_bash_v"
-# make sure whiptail is installed
-command -v whiptail >/dev/null 2>&1 || {
-  echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require whiptail."
-  exit 1
+# Install whiptail on Ubuntu
+function install_whiptail_linux() {
+  sudo apt-get update
+  sudo apt-get install whiptail -y
 }
-# make sure curl is installed
-command -v curl >/dev/null 2>&1 || {
-  echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require curl."
-  exit 1
+# Install whiptail on macOS
+function install_whiptail_macos() {
+  if ! command -v brew >/dev/null 2>&1; then
+    echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require Homebrew to install whiptail on macOS."
+    echo >&2 "NOTICE: Please install Homebrew first and then re-run this script."
+    exit 1
+  fi
+  brew install newt
 }
+# Install whiptail on Windows using Chocolatey
+function install_whiptail_windows() {
+  if ! command -v choco >/dev/null 2>&1; then
+    echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require Chocolatey to install whiptail on Windows."
+    echo >&2 "NOTICE: Please install Chocolatey first and then re-run this script."
+    exit 1
+  fi
+  choco install newt
+}
+# Main script
+if ! command -v whiptail >/dev/null 2>&1; then
+  echo "Whiptail is not installed. Do you want to install it now? (y/n)"
+  read -r response
+  if [[ "$response" =~ ^[Yy]$ ]]; then
+    # If the user chooses Yes, install Docker based on the OS
+    case "$OS_NUMBER" in
+      1)
+        install_whiptail_linux
+        ;;
+      2)
+        install_whiptail_macos
+        ;;
+      3)
+        install_whiptail_windows
+        ;;
+      *)
+        echo >&2 "ERROR: Unsupported operating system."
+        exit 1
+        ;;
+    esac
+  else
+    echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require whiptail."
+    echo >&2 "NOTICE: Please install whiptail first and then re-run this script again."
+    exit 1
+  fi
+fi
 # make sure awk is installed
 command -v awk >/dev/null 2>&1 || {
   echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require awk."
+  echo >&2 "NOTICE: Please install awk first and then re-run this script again."
   exit 1
 }
 # make sure rsync is installed (hmmm not always)
@@ -116,6 +163,7 @@ if ! command -v docker &>/dev/null; then
   else
     # If the user chooses No, exit the script with an error message
     echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script requires Docker."
+    echo >&2 "NOTICE: Please install Docker first and then re-run this script again."
     exit 1
   fi
 fi
@@ -171,6 +219,7 @@ if ! command -v docker-compose &>/dev/null; then
   else
     # If the user chooses No, exit the script with an error message
     echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script requires docker-compose."
+    echo >&2 "NOTICE: Please install docker-compose first and then re-run this script again."
     exit 1
   fi
 fi
