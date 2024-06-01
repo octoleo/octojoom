@@ -223,6 +223,9 @@ if ! command -v docker-compose &>/dev/null; then
     exit 1
   fi
 fi
+# Setting the LC_ALL with respect to language, regional settings, to use POSIX locale,
+# so ASCII character set and standardizes behavior is used for consistent across different environments
+export LC_ALL=C
 # just clear the screen
 clear
 
