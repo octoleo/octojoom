@@ -1910,6 +1910,42 @@ function openssh__TRuST__down() {
 }
 
 #####################################################################################################################VDM
+######################################## CLONE JOOMLA
+function joomla__TRuST__clone() {
+  # check if this type have available containers
+  if ! hasDirectories "${VDM_CONTAINER_TYPE}/available/"; then
+    showError "The path ${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/ does not exist or is empty, first run a ${VDM_CONTAINER_TYPE^} setup."
+  else
+    # ask if they want to clone a volume
+    if (whiptail --yesno "Would you like to clone a persistent volume found in (${VDM_PROJECT_PATH})?" \
+        --title "Continue To Clone Persistent Volume" --backtitle "${BACK_TITLE}" 12 112); then
+      # trigger the volumes clone script
+      clonePersistentVolume
+    fi
+    # ask if they want to clone a container
+    if (whiptail --yesno "Would you like to clone a ${VDM_CONTAINER_TYPE^} container?" \
+      --title "Continue To Clone Container (feature not ready)" --defaultno --backtitle "${BACK_TITLE}" 12 112); then
+      # set some local variables
+      local vdm_clone_me
+      local container
+      # list containers... and allow selection to edit
+      container=$(getSelectedDirectory "Select a container you would like to clone." \
+        "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" '' "Clone ${VDM_CONTAINER_TYPE^} Container (feature not ready)")
+      # check that we have something, else return to main menu
+      if [ ${#container} -ge 1 ]; then
+        # add the parent dir back
+        vdm_clone_me="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}/docker-compose.yml"
+        # check if this docker-composer.yml exist
+        if [ -f "${vdm_clone_me}" ]; then
+          # give little heads-up
+          showNotice "Feature not ready!!\nYou have selected: ${vdm_clone_me}" 13
+        fi
+      fi
+    fi
+  fi
+}
+
+#####################################################################################################################VDM
 ######################################## DELETE JOOMLA
 function joomla__TRuST__delete() {
   # check if this type has enabled containers
@@ -2232,6 +2268,15 @@ function upContainers() {
   main
 }
 
+# clone a container
+function cloneContainer() {
+  # make sure of our container type
+  VDM_CONTAINER_TYPE="${1}"
+  VDM_TASK="clone"
+  # execute the task
+  main
+}
+
 # delete a container
 function deleteContainer() {
   # make sure of our container type
@@ -2441,6 +2486,44 @@ function deletePersistentVolumes() {
           sudo rm -rf "${VDM_PROJECT_PATH}/${persistent}"
         fi
       done
+    fi
+  else
+    showError "There are no persistent volumes found in ${VDM_PROJECT_PATH}."
+  fi
+}
+
+# clone persistent volume
+function clonePersistentVolume() {
+  # we first check if we have some volumes
+  if hasDirectories '' "${VDM_PROJECT_PATH}"; then
+    # set some local variables
+    local vdm_clone_volume
+    local persistent
+    local new_persistent
+    # get containers to enable
+    vdm_clone_volume=$(getSelectedDirectory "Select persistent volume\s to delete." \
+      "${VDM_PROJECT_PATH}" "Select Persistent Volume to Clone")
+    # check that we have something, else return to main menu
+    if [ ${#vdm_clone_volume} -ge 1 ]; then
+      # remove the " from the string
+      persistent="${vdm_clone_volume//\"/}"
+      # last serious check and then its gone
+      if [ -d "${VDM_PROJECT_PATH}/${persistent}" ]; then
+        # set the new persistent volume name
+        new_persistent="${persistent}"
+        while [ -d "${VDM_PROJECT_PATH}/${new_persistent}" ]; do
+          # get the value
+          new_persistent=$(getInput "Enter a new persistent volume name\n[do not use (${persistent}) or any other existing volume names]" '' 'Enter Persistent Name')
+          # keep asking
+          if [ -d "${VDM_PROJECT_PATH}/${new_persistent}" ]; then
+            showError "You must enter a persistent volume name that does not already exist.\n\n${new_persistent} already exist."
+          fi
+        done
+        # create this new folder
+        mkdir -p "${VDM_PROJECT_PATH}/${new_persistent}"
+        # clone or (copy) the files to a new directory.
+        sudo cp -af "${VDM_PROJECT_PATH}/${persistent}/"* "${VDM_PROJECT_PATH}/${new_persistent}"
+      fi
     fi
   else
     showError "There are no persistent volumes found in ${VDM_PROJECT_PATH}."
@@ -2761,6 +2844,9 @@ function showJoomla() {
   hasDirectories '' "${VDM_PROJECT_PATH}" &&
     menu_options+=("fix" "Fix permissions of folders and files of a container") &&
     i=$((i + 1))
+  # clone a container & volume
+  hasDirectories 'joomla/available' &&
+    menu_options+=("clone" "Clone a container") && i=$((i + 1))
   # delete a container
   hasDirectories 'joomla/available' &&
     menu_options+=("delete" "Delete a container") && i=$((i + 1))
@@ -2805,6 +2891,9 @@ function showJoomla() {
   "fix")
     fixContainersPermissions
     ;;
+  "clone")
+    cloneContainer 'joomla'
+    ;;
   "delete")
     deleteContainer 'joomla'
     ;;
@@ -2822,7 +2911,7 @@ function showJoomla() {
 
   # menu loop
   case $CHOICE in
-  "setup" | "edit" | "enable" | "disable" | "down" | "up" | "fix" | "delete" | "reset" | "joomla_env" | "bulk")
+  "setup" | "edit" | "enable" | "disable" | "down" | "up" | "fix" | "clone" | "delete" | "reset" | "joomla_env" | "bulk")
     showJoomla
     ;;
   esac
