@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # The most recent program version.
-_VERSION="3.6.2"
+_VERSION="3.6.3"
 _V="3.6"
 
 # Bash version required
@@ -628,7 +628,7 @@ function joomla__TRuST__setup() {
       fi
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.service=mailcatcher${VDM_KEY}\"")
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.services.mailcatcher${VDM_KEY}.loadbalancer.server.port=1080\"")
-      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SMTP_HOST=mailcatcher${VDM_KEY}:1080")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SMTP_HOST=mailcatcher${VDM_KEY}:1025")
     fi
     # if this is our octoleo images we can also set the user ID and user-group ID
     setContainerUser "$(id -u)"
@@ -1072,7 +1072,7 @@ function joomla__TRuST__bulk() {
       fi
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.service=mailcatcher${VDM_KEY}\"")
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.services.mailcatcher${VDM_KEY}.loadbalancer.server.port=1080\"")
-      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SMTP_HOST=mailcatcher${VDM_KEY}:1080")
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SMTP_HOST=mailcatcher${VDM_KEY}:1025")
     fi
     # setup letsencrypt stuff
     VDM_JOOMLA_SECURE_LABELS=''
