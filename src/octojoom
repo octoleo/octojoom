@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # The most recent program version.
-_VERSION="3.6.3"
+_VERSION="3.6.4"
 _V="3.6"
 
 # Bash version required
@@ -1534,6 +1534,8 @@ function joomla__TRuST__enable() {
       [ -e "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ] || {
         ln -s "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_CONTAINER}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
       }
+      # set some local variables
+      local evn_file
       # check if image has its own env file also
       evn_file=''
       # shellcheck disable=SC2015
@@ -1555,6 +1557,7 @@ function joomla__TRuST__enable() {
     # set some local variables
     local vdm_enable_me
     local container
+    local evn_file
     # create the folder as needed
     mkdir -p "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"
     # get containers to enable
@@ -1603,6 +1606,8 @@ function openssh__TRuST__enable() {
       [ -e "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ] || {
         ln -s "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_CONTAINER}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
       }
+      # set some local variables
+      local evn_file
       # check if image has its own env file also
       evn_file=''
       # shellcheck disable=SC2015
@@ -1713,10 +1718,21 @@ function joomla__TRuST__disable() {
   if ! hasDirectories "${VDM_CONTAINER_TYPE}/enabled/"; then
     showError "There are no ${VDM_CONTAINER_TYPE^} containers to disable."
   elif [ ${#VDM_CONTAINER} -ge 1 ]; then
-    # this means we have a single already selected container to enable if it exists
+    # this means we have a single already selected container to disable if it exists
     if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ]; then
+      # set some local variables
+      local evn_file
+      # check if image has its own env file also
+      evn_file=''
+      # shellcheck disable=SC2015
+      [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/.env" || {
+        [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+      }
       # make sure the docker image is stopped
-      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans
+      # shellcheck disable=SC2015
+      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans || {
+        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans
+      }
       # then remove soft link
       rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
     else
@@ -1729,6 +1745,7 @@ function joomla__TRuST__disable() {
     # set some local variables
     local vdm_disable_me
     local container
+    local evn_file
     # get containers to enable
     vdm_disable_me=$(getSelectedDirectories "Select container/s to disable." \
       "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" "Disable ${VDM_CONTAINER_TYPE^} Containers")
@@ -1740,8 +1757,17 @@ function joomla__TRuST__disable() {
       for containered in "${vdm_disable_me_array[@]}"; do
         # remove the " from the string
         container="${containered//\"/}"
+        # check if image has its own env file also
+        evn_file=''
+        # shellcheck disable=SC2015
+        [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/.env" || {
+          [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+        }
         # make sure the docker image is stopped
-        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans
+        # shellcheck disable=SC2015
+        [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans || {
+          docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans
+        }
         # then remove soft link
         rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
       done
@@ -1756,10 +1782,21 @@ function openssh__TRuST__disable() {
   if ! hasDirectories "${VDM_CONTAINER_TYPE}/enabled/"; then
     showError "There are no ${VDM_CONTAINER_TYPE^} containers to disable."
   elif [ ${#VDM_CONTAINER} -ge 1 ]; then
-    # this means we have a single already selected container to enable if it exists
+    # this means we have a single already selected container to disable if it exists
     if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ]; then
+      # set some local variables
+      local evn_file
+      # check if image has its own env file also
+      evn_file=''
+      # shellcheck disable=SC2015
+      [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/.env" || {
+        [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+      }
       # make sure the docker image is stopped
-      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans
+      # shellcheck disable=SC2015
+      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans || {
+        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans
+      }
       # then remove soft link
       rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
     else
@@ -1772,6 +1809,7 @@ function openssh__TRuST__disable() {
     # set some local variables
     local vdm_disable_me
     local container
+    local evn_file
     # get containers to enable
     vdm_disable_me=$(getSelectedDirectories "Select container/s to disable." \
       "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" "Disable ${VDM_CONTAINER_TYPE^} Containers")
@@ -1783,8 +1821,17 @@ function openssh__TRuST__disable() {
       for containered in "${vdm_disable_me_array[@]}"; do
         # remove the " from the string
         container="${containered//\"/}"
+        # check if image has its own env file also
+        evn_file=''
+        # shellcheck disable=SC2015
+        [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/.env" || {
+          [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+        }
         # make sure the docker image is stopped
-        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans
+        # shellcheck disable=SC2015
+        [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans || {
+          docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans
+        }
         # then remove soft link
         rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
       done
@@ -1799,8 +1846,19 @@ function traefik__TRuST__disable() {
   if [ ! -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" ]; then
     showError "There is no ${VDM_CONTAINER_TYPE^} container to disable."
   else
+    # set some local variables
+    local evn_file
+    # check if image has its own env file also
+    evn_file=''
+    # shellcheck disable=SC2015
+    [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || {
+      [ -f "${VDM_SRC_PATH}/.env" ] && evn_file="${VDM_SRC_PATH}/.env"
+    }
     # make sure the docker image is stopped
-    docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
+    # shellcheck disable=SC2015
+    [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down || {
+      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
+    }
   fi
 }
 
@@ -1811,8 +1869,19 @@ function portainer__TRuST__disable() {
   if [ ! -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" ]; then
     showError "There is no ${VDM_CONTAINER_TYPE^} container to disable."
   else
+    # set some local variables
+    local evn_file
+    # check if image has its own env file also
+    evn_file=''
+    # shellcheck disable=SC2015
+    [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || {
+      [ -f "${VDM_SRC_PATH}/.env" ] && evn_file="${VDM_SRC_PATH}/.env"
+    }
     # make sure the docker image is stopped
-    docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
+    # shellcheck disable=SC2015
+    [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down || {
+      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
+    }
   fi
 }
 
