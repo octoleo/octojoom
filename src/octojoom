@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # The most recent program version.
-_VERSION="3.6.4"
-_V="3.6"
+_VERSION="3.7.0"
+_V="3.7"
 
 # Bash version required
 _bash_v=4
@@ -296,8 +296,8 @@ function traefik__TRuST__setup() {
   # saved the file
   showNotice "Saved ${VDM_CONTAINER_TYPE}:docker-compose.yml file.\nSetup of this container is complete!"
   # ask if we should continue to enable
-  if (whiptail --yesno "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" --defaultno \
-    --title "Enable Container" --backtitle "${BACK_TITLE}" 8 112); then
+  if getInputYesNo "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
+    "Enable Container" 8 112 "defaultno"; then
     enableContainer "${VDM_CONTAINER_TYPE}"
   fi
   ##########################
@@ -408,8 +408,8 @@ function portainer__TRuST__setup() {
   # saved the file
   showNotice "Saved ${VDM_CONTAINER_TYPE}:docker-compose.yml file.\nSetup of this container is complete!"
   # ask if we should continue to enable
-  if (whiptail --yesno "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
-    --defaultno --title "Enable Container" --backtitle "${BACK_TITLE}" 8 112); then
+  if getInputYesNo "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
+    "Enable Container" 8 112 "defaultno"; then
     enableContainer "${VDM_CONTAINER_TYPE}"
   fi
   ##########################
@@ -606,8 +606,8 @@ function joomla__TRuST__setup() {
   # only if in expert mode set the container user detail id needed
   if isExpert; then
     # ask if we should add mailcatcher
-    if (whiptail --yesno "Would you also like to enable mailcatcher for these ${VDM_CONTAINER_TYPE^} containers" \
-      --defaultno --title "Enable Mailcatcher" --backtitle "${BACK_TITLE}" 8 112); then
+    if getInputYesNo "Would you also like to enable mailcatcher for these ${VDM_CONTAINER_TYPE^} containers" \
+      "Enable Mailcatcher" 8 112 "defaultno"; then
       VDM_EXTRA_CONTAINER_STUFF=$(getYMLine1 "mailcatcher${VDM_KEY}:")
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "image: schickling/mailcatcher")
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "container_name: mailcatcher${VDM_KEY}")
@@ -723,8 +723,8 @@ function joomla__TRuST__setup() {
   # saved the file
   showNotice "Saved ${VDM_CONTAINER_TYPE}:docker-compose.yml file.\nSetup of this container is complete!"
   # ask if we should continue to enable
-  if (whiptail --yesno "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
-    --defaultno --title "Enable Container" --backtitle "${BACK_TITLE}" 8 112); then
+  if getInputYesNo "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
+    "Enable Container" 8 112 "defaultno"; then
     # we set the container details
     export VDM_CONTAINER="${VDM_SUBDOMAIN}.${VDM_DOMAIN}"
     # then we enable it
@@ -936,8 +936,8 @@ function joomla__TRuST__bulk() {
   fi
   # ask if we should add mailcatcher
   enable_mailcatcher=false
-  if (whiptail --yesno "Would you also like to enable mailcatcher for these ${VDM_CONTAINER_TYPE^} containers" \
-    --defaultno --title "Enable Mailcatcher" --backtitle "${BACK_TITLE}" 8 112); then
+  if getInputYesNo "Would you also like to enable mailcatcher for these ${VDM_CONTAINER_TYPE^} containers" \
+    "Enable Mailcatcher" 8 112 "defaultno"; then
       enable_mailcatcher=true
   fi
   # we only do autodeploy for Joomla 4.3 and above
@@ -971,8 +971,8 @@ function joomla__TRuST__bulk() {
   setNumberContainers
   # ask if we should continue to enable
   enable_containers=false
-  if (whiptail --yesno "Would you also like to enable all these ${VDM_CONTAINER_TYPE^} containers" \
-    --defaultno --title "Enable Containers" --backtitle "${BACK_TITLE}" 8 112); then
+  if getInputYesNo "Would you also like to enable all these ${VDM_CONTAINER_TYPE^} containers" \
+    "Enable Containers" 8 112 "defaultno"; then
       enable_containers=true
   fi
   # loop the number of containers
@@ -1206,18 +1206,18 @@ function openssh__TRuST__setup() {
   # get the global directory of the ssh public keys if not set
   while [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -le 1 ] || [ ! -d "${VDM_PUBLIC_KEY_GLOBAL_DIR}" ]; do
     # creat the path if it exist
-    if [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -ge 1 ] &&
-      (whiptail --yesno "Can we create the ${VDM_PUBLIC_KEY_GLOBAL_DIR} ssh folder" \
-        --title "Create the Path" --backtitle "${BACK_TITLE}" 8 112); then
+    if [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -ge 1 ] && \
+      getInputYesNo "Can we create the ${VDM_PUBLIC_KEY_GLOBAL_DIR} ssh folder" \
+      "Create the Path" 8 112; then
       mkdir -p "${VDM_PUBLIC_KEY_GLOBAL_DIR}"
     else
       # get the value
       VDM_PUBLIC_KEY_GLOBAL_DIR=$(getInput "Enter the ssh path where we can select the ssh key folders from." \
         "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.ssh" 'Enter SSH Path')
       # keep asking if empty or does exist
-      if [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -ge 1 ] && [ ! -d "${VDM_PUBLIC_KEY_GLOBAL_DIR}" ] &&
-        (whiptail --yesno "Can we create the ${VDM_PUBLIC_KEY_GLOBAL_DIR} ssh folder" \
-          --title "Create the Path" --backtitle "${BACK_TITLE}" 8 112); then
+      if [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -ge 1 ] && [ ! -d "${VDM_PUBLIC_KEY_GLOBAL_DIR}" ] && \
+        getInputYesNo "Can we create the ${VDM_PUBLIC_KEY_GLOBAL_DIR} ssh folder" \
+        "Create the Path" 8 112; then
         # shellcheck disable=SC2174
         mkdir -p -m 700 "${VDM_PUBLIC_KEY_GLOBAL_DIR}"
       elif [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -le 1 ]; then
@@ -1231,9 +1231,9 @@ function openssh__TRuST__setup() {
   # get the directory of this containers public keys if not set
   while [ ${#VDM_PUBLIC_KEY_U_DIR} -le 1 ] || [ ! -d "${VDM_PUBLIC_KEY_U_DIR}" ]; do
     # creat the path if it exist
-    if [ ${#VDM_PUBLIC_KEY_U_DIR} -ge 1 ] &&
-      (whiptail --yesno "Can we create this (${VDM_PUBLIC_KEY_U_DIR}) containers' ssh public keys folder" \
-        --title "Create the Path" --backtitle "${BACK_TITLE}" 8 112); then
+    if [ ${#VDM_PUBLIC_KEY_U_DIR} -ge 1 ] && \
+      getInputYesNo "Can we create this (${VDM_PUBLIC_KEY_U_DIR}) containers' ssh public keys folder" \
+      "Create the Path" 8 112; then
       # shellcheck disable=SC2174
       mkdir -p -m 700 "${VDM_PUBLIC_KEY_U_DIR}"
     else
@@ -1245,9 +1245,9 @@ function openssh__TRuST__setup() {
         # add the parent dir back
         VDM_PUBLIC_KEY_U_DIR="${VDM_PUBLIC_KEY_GLOBAL_DIR}/${VDM_PUBLIC_KEY_U_DIR}"
         # check if this directory exist
-        if [ ! -d "${VDM_PUBLIC_KEY_U_DIR}" ] &&
-          (whiptail --yesno "Can we create this (${VDM_PUBLIC_KEY_U_DIR}) containers' ssh public keys folder" \
-            --title "Create the Path" --backtitle "${BACK_TITLE}" 8 112); then
+        if [ ! -d "${VDM_PUBLIC_KEY_U_DIR}" ] && \
+          getInputYesNo "Can we create this (${VDM_PUBLIC_KEY_U_DIR}) containers' ssh public keys folder" \
+          "Create the Path" 8 112; then
           # shellcheck disable=SC2174
           mkdir -p -m 700 "${VDM_PUBLIC_KEY_U_DIR}"
           # TODO add option to add keys?
@@ -1263,18 +1263,18 @@ function openssh__TRuST__setup() {
   # get the directory of the ssh public keys if not set
   while [ ${#VDM_PROJECT_U_DIR} -le 1 ] || [ ! -d "${VDM_PROJECT_U_DIR}" ]; do
     # creat the path if it exist
-    if [ ${#VDM_PROJECT_U_DIR} -ge 1 ] &&
-      (whiptail --yesno "Can we create the ${VDM_PROJECT_U_DIR} parent mounting directory" \
-        --title "Create the Path" --backtitle "${BACK_TITLE}" 8 112); then
+    if [ ${#VDM_PROJECT_U_DIR} -ge 1 ] && \
+      getInputYesNo "Can we create the ${VDM_PROJECT_U_DIR} parent mounting directory" \
+      "Create the Path" 8 112; then
       mkdir -p "${VDM_PROJECT_U_DIR}"
     else
       # get the value
       VDM_PROJECT_U_DIR=$(getInput "Enter the parent path where we can select the folders to mount to this container." \
         "${VDM_PROJECT_PATH}" 'Enter Path')
       # keep asking if empty or does exist
-      if [ ${#VDM_PROJECT_U_DIR} -ge 1 ] && [ ! -d "${VDM_PROJECT_U_DIR}" ] &&
-        (whiptail --yesno "Can we create the ${VDM_PROJECT_U_DIR} parent mounting directory" \
-          --title "Create the Path" --backtitle "${BACK_TITLE}" 8 112); then
+      if [ ${#VDM_PROJECT_U_DIR} -ge 1 ] && [ ! -d "${VDM_PROJECT_U_DIR}" ] && \
+        getInputYesNo "Can we create the ${VDM_PROJECT_U_DIR} parent mounting directory" \
+        "Create the Path" 8 112; then
         # shellcheck disable=SC2174
         mkdir -p -m 700 "${VDM_PROJECT_U_DIR}"
       elif [ ${#VDM_PROJECT_U_DIR} -le 1 ]; then
@@ -1303,8 +1303,9 @@ function openssh__TRuST__setup() {
     # when we mount a joomla volume we may not want to mount the database
     mFull="${VDM_PROJECT_U_DIR}/${mDir}/joomla"
     # add to mount projects
-    if [ -d "${mFull}" ] && (whiptail --yesno "Should we ONLY mount the (joomla website files) ${mDir}/joomla directory" \
-      --title "Mount Joomla" --backtitle "${BACK_TITLE}" 8 112); then
+    if [ -d "${mFull}" ] && \
+      getInputYesNo "Should we ONLY mount the (joomla website files) ${mDir}/joomla directory" \
+      "Mount Joomla" 8 112; then
       VDM_VOLUMES_MOUNT+=$(getYMLine3 "- \${VDM_${VDM_ENV_KEY^^}_PROJECT_DIR}/${mDir}/joomla:/app/${mDir}")
     else
       VDM_VOLUMES_MOUNT+=$(getYMLine3 "- \${VDM_${VDM_ENV_KEY^^}_PROJECT_DIR}/${mDir}:/app/${mDir}")
@@ -1339,8 +1340,8 @@ function openssh__TRuST__setup() {
   # saved the file
   showNotice "Saved ${VDM_CONTAINER_TYPE}:docker-compose.yml file.\nSetup of this container is complete!"
   # ask if we should continue to enable
-  if (whiptail --yesno "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
-    --defaultno --title "Enable Container" --backtitle "${BACK_TITLE}" 8 112); then
+  if getInputYesNo "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
+    "Enable Container" 8 112 "defaultno"; then
     # we set the container details
     export VDM_CONTAINER="${VDM_USER_NAME}.${VDM_DOMAIN}"
     # then we enable it
@@ -1954,8 +1955,8 @@ function joomla__TRuST__down() {
   if ! hasDirectories "${VDM_CONTAINER_TYPE}/enabled/"; then
     showError "There are no ${VDM_CONTAINER_TYPE^} containers to take down.\n\
       (UP and DOWN targets only enabled containers)"
-  elif (whiptail --yesno "Are you absolutely sure you want to take down all the ${VDM_CONTAINER_TYPE^} containers?" \
-    --title "Take Down Containers" --backtitle "${BACK_TITLE}" 8 112); then
+  elif getInputYesNo "Are you absolutely sure you want to take down all the ${VDM_CONTAINER_TYPE^} containers?" \
+      "Take Down Containers" 8 112; then
     # get all zip files
     for yml in "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"*/*.yml; do
       docker-compose --file "${yml}" down
@@ -1969,8 +1970,8 @@ function openssh__TRuST__down() {
   # check if this type has enabled containers
   if ! hasDirectories "${VDM_CONTAINER_TYPE}/enabled/"; then
     showError "There are no ${VDM_CONTAINER_TYPE^} containers to take down."
-  elif (whiptail --yesno "Are you absolutely sure you want to take down all the ${VDM_CONTAINER_TYPE^} containers?" \
-    --title "Take Down Containers" --backtitle "${BACK_TITLE}" 8 112); then
+  elif getInputYesNo "Are you absolutely sure you want to take down all the ${VDM_CONTAINER_TYPE^} containers?" \
+      "Take Down Containers" 8 112; then
     # get all zip files
     for yml in "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"*/*.yml; do
       docker-compose --file "${yml}" down
@@ -1986,14 +1987,14 @@ function joomla__TRuST__clone() {
     showError "The path ${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/ does not exist or is empty, first run a ${VDM_CONTAINER_TYPE^} setup."
   else
     # ask if they want to clone a volume
-    if (whiptail --yesno "Would you like to clone a persistent volume found in (${VDM_PROJECT_PATH})?" \
-        --title "Continue To Clone Persistent Volume" --backtitle "${BACK_TITLE}" 12 112); then
+    if getInputYesNo "Would you like to clone a persistent volume found in (${VDM_PROJECT_PATH})?" \
+        "Continue To Clone Persistent Volume" 12 112; then
       # trigger the volumes clone script
       clonePersistentVolume
     fi
     # ask if they want to clone a container
-    if (whiptail --yesno "Would you like to clone a ${VDM_CONTAINER_TYPE^} container?" \
-      --title "Continue To Clone Container (feature not ready)" --defaultno --backtitle "${BACK_TITLE}" 12 112); then
+    if getInputYesNo "Would you like to clone a ${VDM_CONTAINER_TYPE^} container?" \
+        "Continue To Clone Container (feature not ready)" 12 112 "defaultno"; then
       # set some local variables
       local vdm_clone_me
       local container
@@ -2045,17 +2046,17 @@ function joomla__TRuST__delete() {
           rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
         fi
         # before deleting the config we ask to make sure
-        if (whiptail --yesno "Would you like to delete the (${container}) container's folder that holds the docker-compose.yml file?" \
-          --title "Delete Docker Compose Yaml" --backtitle "${BACK_TITLE}" 8 112); then
+        if getInputYesNo "Would you like to delete the (${container}) container's folder that holds the docker-compose.yml file?" \
+            "Delete Docker Compose Yaml" 8 112; then
           # then remove docker-compose.yml file
           rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}"
         fi
       done
     fi
     # ask if there are volumes to delete
-    if hasDirectories '' "${VDM_PROJECT_PATH}" &&
-      (whiptail --yesno "Would you like to delete persistent volumes found in (${VDM_PROJECT_PATH})?" \
-        --title "Continue To Delete Persistent Volumes" --backtitle "${BACK_TITLE}" 12 112); then
+    if hasDirectories '' "${VDM_PROJECT_PATH}" && \
+      getInputYesNo "Would you like to delete persistent volumes found in (${VDM_PROJECT_PATH})?" \
+      "Continue To Delete Persistent Volumes" 12 112; then
       # trigger the volumes removal script
       deletePersistentVolumes
     fi
@@ -2093,8 +2094,8 @@ function openssh__TRuST__delete() {
           rm -fr "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
         fi
         # before deleting the config we ask to make sure
-        if (whiptail --yesno "Would you like to delete the (${container}) container's folder that holds the docker-compose.yml file?" \
-          --title "Delete Docker Compose Yaml" --backtitle "${BACK_TITLE}" 8 112); then
+        if getInputYesNo "Would you like to delete the (${container}) container's folder that holds the docker-compose.yml file?" \
+            "Delete Docker Compose Yaml" 8 112; then
           # then remove docker-compose.yml file
           rm -fr "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}"
         fi
@@ -2113,8 +2114,8 @@ function traefik__TRuST__delete() {
     # make sure the docker image is stopped
     docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
     # before deleting the config we ask to make sure
-    if (whiptail --yesno "Would you like to delete the ${VDM_CONTAINER_TYPE^} container's docker-compose.yml file?" \
-      --title "Delete Docker Compose Yaml" --backtitle "${BACK_TITLE}" 8 112); then
+    if getInputYesNo "Would you like to delete the ${VDM_CONTAINER_TYPE^} container's docker-compose.yml file?" \
+      "Delete Docker Compose Yaml" 8 112; then
       # then remove docker-compose.yml file
       rm -fr "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml"
     fi
@@ -2131,8 +2132,8 @@ function portainer__TRuST__delete() {
     # make sure the docker image is stopped
     docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
     # before deleting the config we ask to make sure
-    if (whiptail --yesno "Would you like to delete the ${VDM_CONTAINER_TYPE^} container's docker-compose.yml file?" \
-      --title "Delete Docker Compose Yaml" --backtitle "${BACK_TITLE}" 8 112); then
+    if getInputYesNo "Would you like to delete the ${VDM_CONTAINER_TYPE^} container's docker-compose.yml file?" \
+      "Delete Docker Compose Yaml" 8 112; then
       # then remove docker-compose.yml file
       rm -fr "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml"
     fi
@@ -2143,9 +2144,9 @@ function portainer__TRuST__delete() {
 ######################################## RESET JOOMLA
 function joomla__TRuST__reset() {
   # ask if there are volumes to delete
-  if hasDirectories '' "${VDM_PROJECT_PATH}" &&
-    (whiptail --yesno "Would you like to reset persistent volumes found in (${VDM_PROJECT_PATH})?" \
-      --title "Continue To Reset Persistent Volumes" --backtitle "${BACK_TITLE}" 12 112); then
+  if hasDirectories '' "${VDM_PROJECT_PATH}" && \
+    getInputYesNo "Would you like to reset persistent volumes found in (${VDM_PROJECT_PATH})?" \
+    "Continue To Reset Persistent Volumes" 12 112; then
     # trigger the volumes reset script
     resetPersistentJoomlaVolumes
   fi
@@ -2643,8 +2644,8 @@ function resetPersistentJoomlaVolumes() {
 # make an update
 function runUpdate() {
   # we need sudo permissions
-  if (whiptail --yesno "${USER^}, to update ${PROGRAM_NAME} we need sudo privileges." \
-    --title "Give sudo Privileges" --backtitle "${BACK_TITLE}" 8 112); then
+  if getInputYesNo "${USER^}, to update ${PROGRAM_NAME} we need sudo privileges." \
+      "Give sudo Privileges" 8 112; then
     # remove the current version
     if [ -f /usr/local/bin/octojoom ]; then
       # just backup in case of failure
@@ -3608,6 +3609,42 @@ function getInput() {
   echo "${answer}"
 }
 
+# Display a yes/no prompt using the whiptail utility.
+# If "defaultno" is passed as the fifth parameter, it defaults to "No" when VDM_FORCE is set to "true".
+# $1: Prompt message
+# $2 (optional): Title for the dialog (default: "Confirmation Required")
+# $3 (optional): Height of the dialog (default: 8)
+# $4 (optional): Width of the dialog (default: 50)
+# $5 (optional): Set to "defaultno" to make "No" the default choice.
+# Returns 0 (yes) if the user selects "Yes".
+# Returns 1 (no) if the user selects "No" or if "defaultno" is set and VDM_FORCE is "true".
+function getInputYesNo() {
+  # set local vars
+  local question="$1"
+  local title="${2:-Confirmation Required}"
+  local height="${3:-8}"
+  local width="${4:-50}"
+  local defaultno="${5:-}"
+
+  # Handle VDM_FORCE behavior based on the 'defaultno' parameter
+  if [ "$VDM_FORCE" = "true" ]; then
+    if [ "$defaultno" = "defaultno" ]; then
+      return 1  # Default to No if "defaultno" is set and VDM_FORCE is true
+    else
+      return 0  # Default to Yes if "defaultno" is not set and VDM_FORCE is true
+    fi
+  else
+    # Display the whiptail prompt with the provided parameters
+    if [ "$defaultno" = "defaultno" ]; then
+      whiptail --defaultno --yesno "$question" "$height" "$width" --title "$title" \
+        --backtitle "${BACK_TITLE}" 3>&1 1>&2 2>&3
+    else
+      whiptail --yesno "$question" "$height" "$width" --title "$title" \
+        --backtitle "${BACK_TITLE}" 3>&1 1>&2 2>&3
+    fi
+  fi
+}
+
 # get the input until is gotten
 function getInputNow() {
   local message
@@ -3930,9 +3967,9 @@ function getMainDomain() {
 # set the container user
 function setContainerUser() {
   # ask if a new User ID should be set if one is set
-  if [ -n "${VDM_PUID}" ] && [[ "${VDM_PUID}" =~ ^[0-9]+$ ]] &&
-    (whiptail --yesno "The user ID in ${PROGRAM_NAME} memory is ${VDM_PUID}, would you like to change this user ID?" \
-      --defaultno --title "Set User ID" --backtitle "${BACK_TITLE}" 8 112); then
+  if [ -n "${VDM_PUID}" ] && [[ "${VDM_PUID}" =~ ^[0-9]+$ ]] && \
+    getInputYesNo "The user ID in ${PROGRAM_NAME} memory is ${VDM_PUID}, would you like to change this user ID?" \
+    "Set User ID" 8 112 "defaultno"; then
     # always first reset
     unset VDM_PUID
   fi
@@ -3947,10 +3984,11 @@ function setContainerUser() {
       showError "You must enter a user ID like: ${1:-1000} (only the number)"
     fi
   done
+
   # ask if a new Group ID should be set if one is set
-  if [ -n "${VDM_PGID}" ] && [[ "${VDM_PGID}" =~ ^[0-9]+$ ]] &&
-    (whiptail --yesno "The user-group ID in ${PROGRAM_NAME} memory is ${VDM_PGID}, would you like to change this user-group ID?" \
-      --defaultno --title "Set User-Group ID" --backtitle "${BACK_TITLE}"8 112); then
+  if [ -n "${VDM_PGID}" ] && [[ "${VDM_PGID}" =~ ^[0-9]+$ ]] && \
+    getInputYesNo "The user-group ID in ${PROGRAM_NAME} memory is ${VDM_PGID}, would you like to change this user-group ID?" \
+    "Set User-Group ID" 8 112 "defaultno"; then
     # always first reset
     unset VDM_PGID
   fi
@@ -4119,9 +4157,9 @@ function setUniqueKey() {
 
 # set the Joomla website details
 function setJoomlaWebsiteDetails() {
-  # ask if we should add autodeployment
-  if (whiptail --yesno "Would you like to enable website autodeploy for ${VDM_CONTAINER_TYPE,}:${VDM_JV}" \
-    --defaultno --title "Enable Autodeploy" --backtitle "${BACK_TITLE}" 8 112); then
+  # ask if we should add auto deployment
+  if getInputYesNo "Would you like to enable website auto deploy for ${VDM_CONTAINER_TYPE,}:${VDM_JV}" \
+    "Enable Auto deploy" 8 112; then
 
     # ask for website name
     setJoomlaSiteName
@@ -4391,8 +4429,8 @@ function isVersionAbove() {
 # set persistence volumes
 function setPersistence() {
   # ask the question
-  if (whiptail --yesno "Would you like to enable persistence on this $1." \
-    --title "Persist Volume" --backtitle "${BACK_TITLE}" 8 112); then
+  if getInputYesNo "Would you like to enable persistence on this $1." \
+    "Persist Volume" 8 112; then
     # yes persistence
     return 0
   fi
@@ -4403,8 +4441,8 @@ function setPersistence() {
 # set the PHP settings
 function setPHPSettings() {
   # ask the question
-  if (whiptail --yesno "Would you like to set some PHP overrides for the Joomla container.\n\nTo make these changes we need sudo privileges." \
-    --defaultno --title "PHP.ini values" --backtitle "${BACK_TITLE}" 9 112); then
+  if getInputYesNo "Would you like to set some PHP overrides for the Joomla container.\n\nTo make these changes we need sudo privileges." \
+    "PHP.ini values" 9 112; then
 
     # max_execution_time
     VDM_max_execution_time=$(getInputNow "Enter max execution time" \
@@ -4464,8 +4502,8 @@ function setPHPSettings() {
     } > "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini"
 
     # allow custom edit
-    if isExpert && (whiptail --yesno "Would you like to set some more custom PHP overrides for this Joomla container" \
-      --defaultno --title "Edit PHP.ini" --backtitle "${BACK_TITLE}" 8 112); then
+    if isExpert && getInputYesNo "Would you like to set some more custom PHP overrides for this Joomla container" \
+      "Edit PHP.ini" 8 112 "defaultno"; then
       # give little heads-up
       showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
       # lets open the file with nano for now
@@ -4490,8 +4528,8 @@ function setPHPSettings() {
 # set the docker entrypoint
 function setDockerEntrypoint() {
   # ask the question
-  if (whiptail --yesno "Would you like to customize the entrypoint script for this Joomla container" \
-    --defaultno --title "entrypoint.sh values" --backtitle "${BACK_TITLE}" 8 112); then
+  if getInputYesNo "Would you like to customize the entrypoint script for this Joomla container" \
+    "entrypoint.sh values" 8 112 "defaultno"; then
     # make sure the directory exist
     mkdir -p "${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}"
     # unattended deploy
@@ -4523,8 +4561,8 @@ function setDockerEntrypoint() {
 # set the secure state
 function setSecureCloudflareState() {
   # check the security switch
-  if (whiptail --yesno "Will this container be proxied by Cloudflare [ONLY for server proxied in none-strict mode via Cloudflare]" \
-    --defaultno --title "Cloudflare" --backtitle "${BACK_TITLE}" 8 112); then
+  if getInputYesNo "Will this container be proxied by Cloudflare [ONLY for server proxied in none-strict mode via Cloudflare]" \
+    "Cloudflare" 8 112 "defaultno"; then
     # we set the secure switch
     VDM_SECURE_CLOUDFLARE=true
   else
@@ -4538,8 +4576,8 @@ function setSecureCloudflareState() {
 function setSecureState() {
   if [ "${VDM_SECURE:-not}" = 'not' ]; then
     # check the security switch
-    if (whiptail --yesno "Would you like to use Letsencrypt auto setup for your containers [ONLY for server with public static IP]" \
-      --defaultno --title "Letsencrypt" --backtitle "${BACK_TITLE}" 8 112); then
+    if getInputYesNo "Would you like to use Letsencrypt auto setup for your containers [ONLY for server with public static IP]" \
+      "Letsencrypt" 8 112 "defaultno"; then
       # we set the secure switch
       VDM_SECURE=true
     else
@@ -5053,11 +5091,13 @@ function pushContainerMigration() {
   remote_repo_path=$(getRemoteEnvValue "${remote}" "VDM_REPO_PATH")
   if [ ! "${remote_repo_path}" = 'none_found' ]; then
     local remote_path="${remote_repo_path}/${container_path}"
-    # check how we must do this
+    # check if we must backup remote folder
     if remoteFolderExists "${remote_path}" "${remote}" && (whiptail --yesno "${USER^}, would you like to backup the remote container?" \
       --backtitle "${BACK_TITLE}" --title "Backup Remote" 15 112); then
       backupRemoteFolder "${remote_path}" "${remote}"
     fi
+    # if folder still exist remove remote folder
+    removeRemoteFolder "${remote_path}" "${remote}"
     # sync folder
     syncWithRemote "${local_path}" "${remote_path}" "${remote}"
     # check if it was done successfully
@@ -5124,6 +5164,8 @@ function pushDirectoryMigration() {
       then
         backupRemoteFolder "${remote_path}" "${remote}"
       fi
+      # if folder still exist remove remote folder
+      removeRemoteFolder "${remote_path}" "${remote}"
       # un-tar the remote file
       remoteUntarGz "${remote_path}.tar.gz" "${remote_path}" "${remote}"
       # we are done
@@ -5251,6 +5293,17 @@ function backupRemoteFolder() {
   local backup_name="${remote_path}_backup_$(date +%Y%m%d%H%M%S)"
   # shellcheck disable=SC2029
   ssh "${remote}" "if [ -d '${remote_path}' ]; then mv '${remote_path}' '${backup_name}'; fi"
+}
+
+# remove the remote folder
+function removeRemoteFolder() {
+  local remote_path="$1"
+  local remote="$2"
+  # always confirm that the path exist
+  if remoteFolderExists "${remote_path}" "${remote}"; then
+    # shellcheck disable=SC2029
+    ssh "${remote}" "if [ -d '${remote_path}' ]; then sudo rm -Irf '${remote_path}'; fi"
+  fi
 }
 
 # Prep remote folder
@@ -5481,6 +5534,7 @@ EOF
 
 # defaults
 VDM_ARG_DOMAIN=false
+VDM_FORCE=false
 
 # check if we have options
 while :; do
@@ -5492,6 +5546,9 @@ while :; do
   --update)
     runUpdate
     shift
+    ;;
+  -y | --yes)
+    VDM_FORCE=true
     ;;
   --access-token) # Takes an option argument; ensure it has been specified.
     if [ "$2" ]; then
