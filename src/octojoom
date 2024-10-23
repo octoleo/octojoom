@@ -1959,7 +1959,20 @@ function joomla__TRuST__down() {
       "Take Down Containers" 8 112; then
     # get all zip files
     for yml in "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"*/*.yml; do
-      docker-compose --file "${yml}" down
+      # get the vdm_container value
+      vdm_container="${yml%/docker-compose.yml}"
+      # check if image has its own env file also
+      evn_file=''
+      # check if image has its own env file also
+      # shellcheck disable=SC2015
+      [ -f "${vdm_container}/.env" ] && evn_file="${vdm_container}/.env" || {
+        [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+      }
+      # make sure the docker image is started
+      # shellcheck disable=SC2015
+      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${yml}" down || {
+        docker-compose --file "${yml}" down
+      }
     done
   fi
 }
@@ -1974,7 +1987,20 @@ function openssh__TRuST__down() {
       "Take Down Containers" 8 112; then
     # get all zip files
     for yml in "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"*/*.yml; do
-      docker-compose --file "${yml}" down
+      # get the vdm_container value
+      vdm_container="${yml%/docker-compose.yml}"
+      # check if image has its own env file also
+      evn_file=''
+      # check if image has its own env file also
+      # shellcheck disable=SC2015
+      [ -f "${vdm_container}/.env" ] && evn_file="${vdm_container}/.env" || {
+        [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && evn_file="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+      }
+      # make sure the docker image is started
+      # shellcheck disable=SC2015
+      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${yml}" down || {
+        docker-compose --file "${yml}" down
+      }
     done
   fi
 }
