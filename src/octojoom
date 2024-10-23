@@ -3112,6 +3112,8 @@ function showTraefik() {
   # delete traefik container
   [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
     menu_options+=("delete" "Delete Traefik") && i=$((i + 1))
+  # set network if not set
+  isExpert && menu_options+=("network" "Set Network") && i=$((i + 1))
   # Quit Octoleo Program
   menu_options+=("quit" "Quit ${PROGRAM_NAME}")
   # get the selection
@@ -3139,12 +3141,15 @@ function showTraefik() {
   "delete")
     deleteContainer 'traefik'
     ;;
+  "network")
+    setNetworks
+    ;;
   "quit") quitProgram ;;
   esac
 
   # menu loop
   case $CHOICE in
-  "setup" | "edit" | "enable" | "disable" | "delete")
+  "setup" | "edit" | "enable" | "disable" | "delete" | "network")
     showTraefik
     ;;
   esac
