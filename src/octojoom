@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # The most recent program version.
-_VERSION="3.7.0"
+_VERSION="3.7.1"
 _V="3.7"
 
 # Bash version required
@@ -5068,24 +5068,27 @@ function getMigrationType() {
   echo "${answer:-push}"
 }
 
-# Check if the remote .env file exists
+# Check if the remote .env file exists using the remote user's home directory
 function remoteEnvFileExists() {
   local remote_system="$1"
 
-  # Check if the file exists on the remote system
-  # shellcheck disable=SC2029
-  ssh "${remote_system}" "[ -f \"${VDM_HOME_PATH}/.config/octojoom/.env\" ]"
+  # The tilde (~) expands to the home directory of the logged-in remote user.
+  # Using single quotes ensures that the command is passed literally to the remote shell,
+  # allowing the tilde expansion to occur remotely.
+  ssh "${remote_system}" '[ -f ~/.config/octojoom/.env ]'
 }
 
-# Get a specific value from the remote .env file
+# Get a specific value from the remote .env file using the remote user's home directory
 function getRemoteEnvValue() {
   local remote_system="$1"
   local env_key="$2"
   local remote_env_value
 
   if remoteEnvFileExists "${remote_system}"; then
-    # shellcheck disable=SC2029
-    remote_env_value=$(ssh "${remote_system}" "grep '^${env_key}=' \"${VDM_HOME_PATH}/.config/octojoom/.env\"" | cut -d '=' -f 2-)
+    # Execute the grep command on the remote system.
+    # The command uses \$HOME so that the remote shell expands it to the logged-in user's home directory.
+    # The env_key variable is expanded locally, while the file path remains intact for the remote shell.
+    remote_env_value=$(ssh "${remote_system}" "grep '^${env_key}=' \"\$HOME/.config/octojoom/.env\"" | cut -d '=' -f 2-)
   fi
 
   # Remove any double quotes from the returned value
