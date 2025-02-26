@@ -2682,7 +2682,7 @@ function runUpdate() {
     # get the target branch to use in our update
     isExpert && branch=$(getTargetBranch)
     # pull the latest version. Master is always the latest
-    if sudo curl --fail -L "https://git.vdm.dev/api/v1/repos/octoleo/octojoom/raw/src/octojoom?ref=${branch:-master}" -o /usr/local/bin/octojoom 2>/dev/null; then
+    if sudo curl --fail -L "https://raw.githubusercontent.com/octoleo/octojoom/refs/heads/${branch:-master}/src/octojoom" -o /usr/local/bin/octojoom 2>/dev/null; then
       # give success message
       echo "SUCCESS: Update was successful."
       # do we have a backup
@@ -3849,7 +3849,7 @@ function getImageSource() {
   local i=2
   # set the defaults
   default="joomla|https://hub.docker.com/_/joomla?tab=tags;https://raw.githubusercontent.com/joomla-docker/docker-joomla/master/docker-entrypoint.sh"
-  default_octojoom="llewellyn/joomla|https://hub.docker.com/r/llewellyn/joomla/tags;https://git.vdm.dev/octoleo/docker-joomla/raw/branch/octoleo/docker-entrypoint.sh"
+  default_octojoom="llewellyn/joomla|https://hub.docker.com/r/llewellyn/joomla/tags;https://raw.githubusercontent.com/octoleo/docker-joomla/refs/heads/octoleo/docker-entrypoint.sh"
   # we only ask if we are in expert mode
   if isExpert; then
     # set the base images source

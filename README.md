@@ -20,7 +20,7 @@ Linted by [#ShellCheck](https://github.com/koalaman/shellcheck)
 ---
 # Install
 ```shell
-$ sudo curl -L "https://git.vdm.dev/api/v1/repos/octoleo/octojoom/raw/src/octojoom" -o /usr/local/bin/octojoom
+$ sudo curl -L "https://raw.githubusercontent.com/octoleo/octojoom/refs/heads/master/src/octojoom" -o /usr/local/bin/octojoom
 $ sudo chmod +x /usr/local/bin/octojoom
 ```
 
