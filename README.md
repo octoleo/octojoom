@@ -101,7 +101,7 @@ Follow the setup guide for your system below.
 ```bash
 # Install dependencies
 sudo apt-get update
-sudo apt-get install -y bash curl whiptail docker.io docker-compose
+sudo apt-get install -y bash curl whiptail
 
 # Install Octojoom
 sudo curl -L "https://raw.githubusercontent.com/octoleo/octojoom/refs/heads/master/src/octojoom" -o /usr/local/bin/octojoom
@@ -184,13 +184,13 @@ Install dependencies manually for your distribution:
 
 ```bash
 # Fedora / CentOS / RHEL
-sudo dnf install -y bash curl newt docker docker-compose
+sudo dnf install -y bash curl newt
 
 # Arch / Manjaro
-sudo pacman -S --needed bash curl newt docker docker-compose
+sudo pacman -S --needed bash curl newt
 
 # openSUSE
-sudo zypper install -y bash curl newt docker docker-compose
+sudo zypper install -y bash curl newt
 
 # Install Octojoom
 sudo curl -L "https://raw.githubusercontent.com/octoleo/octojoom/refs/heads/master/src/octojoom" -o /usr/local/bin/octojoom
