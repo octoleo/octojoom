@@ -1,5 +1,5 @@
 <h2 align="center">
-  <img align="middle" src="https://raw.githubusercontent.com/octoleo/octojoom/master/graphics/OctoJoom.svg">
+  <img align="middle" src="https://raw.githubusercontent.com/octoleo/octojoom/master/graphics/OctoJoomAlt.svg">
   <br>
   <img align="middle" src="https://raw.githubusercontent.com/odb/official-bash-logo/master/assets/Logos/Icons/PNG/64x64.png">
   Octojoom — Easy Joomla! Docker Deployment
