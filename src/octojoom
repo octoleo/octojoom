@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # The most recent program version.
-_VERSION="3.7.1"
-_V="3.7"
+_VERSION="3.8.0"
+_V="3.8"
 
 # Bash version required
 _bash_v=4
@@ -274,6 +274,8 @@ function traefik__TRuST__setup() {
     VDM_REMOVE_SECURE="#"
     VDM_HTTP_SCHEME="http"
   fi
+  # default for now (will add UI soon)
+  VDM_REMOVE_ERROR_SERVICE="#"
   # set the main domain if not set
   setMainDomain
   ##########################
@@ -284,6 +286,7 @@ function traefik__TRuST__setup() {
   export VDM_PROJECT_PATH
   # container
   export VDM_REMOVE_SECURE
+  export VDM_REMOVE_ERROR_SERVICE
   export VDM_HTTP_SCHEME
   export VDM_SECURE_EMAIL
   ## create the directory if it does not yet already exist
@@ -304,52 +307,102 @@ function traefik__TRuST__setup() {
   ### unset all no longer needed
   # container
   unset VDM_REMOVE_SECURE
+  unset VDM_REMOVE_ERROR_SERVICE
   unset VDM_HTTP_SCHEME
   unset VDM_SECURE_EMAIL
   # return a success
   return 0
 }
 
-# return the Traefik Container setup yml
+# Return the Traefik Container setup YAML
 function traefikContainer() {
-  # we build the yml file
   cat <<EOF
 services:
   traefik:
     container_name: traefik
     image: "traefik:latest"
     command:
+      # Entrypoints
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
 #      - --api.dashboard=true
 #      - --api.insecure=true
-      - --providers.docker
-${VDM_REMOVE_SECURE}      - --log.level=INFO
-${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge=true
-${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.keytype=RSA4096
-${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.email=${VDM_SECURE_EMAIL:-user@demo.com}
-${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.storage=/acme.json
-${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge.entrypoint=web
+
+      # Cloudflare support
+      - --entrypoints.web.forwardedheaders.insecure=true
+      - --entrypoints.websecure.forwardedheaders.insecure=true
+
+      # Providers
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
 ${VDM_REMOVE_SECURE}      - --providers.file.directory=/conf
 ${VDM_REMOVE_SECURE}      - --providers.file.watch=true
+
+      # Logging
+      - --log.level=INFO
+      - --accesslog=true
+      - --accesslog.filepath=/logs/access.log
+
+      # ACME
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge=true
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge.entrypoint=web
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.email=${VDM_SECURE_EMAIL:-user@demo.com}
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.storage=/acme.json
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.keytype=RSA4096
+
     restart: unless-stopped
+
     ports:
       - "80:80"
       - "443:443"
-#      - "8080:8080"
+
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - "\${VDM_PROJECT_PATH}/traefik/logs:/logs"
 ${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/conf:/conf"
 ${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/acme.json:/acme.json"
 ${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/errors:/errors"
+
 ${VDM_REMOVE_SECURE}    labels:
-      # settings for all containers
+
+      # Global HTTP -> HTTPS redirect
 ${VDM_REMOVE_SECURE}      - "traefik.http.routers.http-catchall.rule=hostregexp(\`{host:.+}\`)"
 ${VDM_REMOVE_SECURE}      - "traefik.http.routers.http-catchall.entrypoints=web"
-${VDM_REMOVE_SECURE}      - "traefik.http.routers.http-catchall.middlewares=redirect-to-me"
-${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.redirect-to-me.redirectscheme.scheme=${VDM_HTTP_SCHEME}"
+${VDM_REMOVE_SECURE}      - "traefik.http.routers.http-catchall.middlewares=redirect-https"
+${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.redirect-https.redirectscheme.scheme=https"
+${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.redirect-https.redirectscheme.permanent=true"
+
+      # Security headers
+${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.stsSeconds=63072000"
+${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.stsIncludeSubdomains=true"
+${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.stsPreload=true"
+${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.browserXssFilter=true"
+${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.contentTypeNosniff=true"
+${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.frameDeny=true"
+${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.referrerPolicy=same-origin"
+
+      # Cloudflare middleware
+${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.cloudflare.headers.customrequestheaders.X-Forwarded-Proto=https"
+
+      # Central error-page middleware
+${VDM_REMOVE_ERROR_SERVICE}      - "traefik.http.middlewares.traefik-global-errors.errors.status=403,404,500,502,503,504"
+${VDM_REMOVE_ERROR_SERVICE}      - "traefik.http.middlewares.traefik-global-errors.errors.service=traefik-global-error"
+${VDM_REMOVE_ERROR_SERVICE}      - "traefik.http.middlewares.traefik-global-errors.errors.query=/{status}.html"
+
+      # Error page backend service
+${VDM_REMOVE_ERROR_SERVICE}      - "traefik.http.services.traefik-global-error.loadbalancer.server.port=80"
+
     networks:
       - traefik
+
+${VDM_REMOVE_ERROR_SERVICE}  traefik-global-error:
+${VDM_REMOVE_ERROR_SERVICE}    image: nginx:alpine
+${VDM_REMOVE_ERROR_SERVICE}    container_name: traefik-global-error
+${VDM_REMOVE_ERROR_SERVICE}    restart: unless-stopped
+${VDM_REMOVE_ERROR_SERVICE}    volumes:
+${VDM_REMOVE_ERROR_SERVICE}      - "\${VDM_PROJECT_PATH}/traefik/global_errors:/usr/share/nginx/html"
+${VDM_REMOVE_ERROR_SERVICE}    networks:
+${VDM_REMOVE_ERROR_SERVICE}      - traefik
 
 networks:
   traefik:
@@ -506,6 +559,14 @@ function joomla__TRuST__setup() {
     fi
     VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.service=joomla${VDM_KEY}\"")
     VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.joomla${VDM_KEY}.loadbalancer.server.port=80\"")
+    # add enterprise middlewares (Security and Cloudflare)
+    if $VDM_SECURE_CLOUDFLARE; then
+      # VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=cloudflare,traefik-global-errors,joomla-security\"")
+      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=cloudflare,joomla-security\"")
+    else
+      # VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=traefik-global-errors,joomla-security\"")
+      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=joomla-security\"")
+    fi
     # add phpmyadmin labels
     if $VDM_SECURE_CLOUDFLARE; then
       VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.entrypoints=web\"")
@@ -515,6 +576,14 @@ function joomla__TRuST__setup() {
     fi
     VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.service=phpmyadmin${VDM_KEY}\"")
     VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.phpmyadmin${VDM_KEY}.loadbalancer.server.port=80\"")
+    # add enterprise middlewares (Security and Cloudflare)
+    if $VDM_SECURE_CLOUDFLARE; then
+      # VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=cloudflare,traefik-global-errors,joomla-security\"")
+      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=cloudflare,joomla-security\"")
+    else
+      # VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=traefik-global-errors,joomla-security\"")
+      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=joomla-security\"")
+    fi
   else
     VDM_REMOVE_SECURE="#"
     VDM_ENTRY_POINT="web"
@@ -772,14 +841,14 @@ function joomla__TRuST__setup() {
 
 # return the Joomla Container setup yml
 function joomlaContainer() {
-  # set the USER if set
+
   vdm_container_user=''
   if [ -n "${VDM_PUID}" ] && [ -n "${VDM_PGID}" ]; then
     vdm_container_user="
       - APACHE_RUN_USER=\${VDM_${VDM_ENV_KEY^^}_PUID}
       - APACHE_RUN_GROUP=\${VDM_${VDM_ENV_KEY^^}_PGID}"
   fi
-  # we build the yml file
+
   cat <<EOF
 services:
   mariadb${VDM_KEY}:
@@ -794,40 +863,80 @@ services:
     volumes:${VDM_DB_VOLUMES_MOUNT}
     networks:
       - traefik
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
   joomla${VDM_KEY}:
     image: ${VDM_J_REPO}:${VDM_JV}
     container_name: joomla${VDM_KEY}
     restart: unless-stopped
+
+    # Implicit internal Traefik only.
+    expose:
+      - "80"
+
     environment:${vdm_container_user}
       - JOOMLA_DB_HOST=mariadb${VDM_KEY}:3306
       - JOOMLA_DB_NAME=\${VDM_${VDM_ENV_KEY^^}_DB}
       - JOOMLA_DB_USER=\${VDM_${VDM_ENV_KEY^^}_DB_USER}
       - JOOMLA_DB_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_DB_PASS}${VDM_EXTRA_JOOMLA_ENV}
+
     depends_on:
-      - mariadb${VDM_KEY}
+      mariadb${VDM_KEY}:
+        condition: service_healthy
+
     volumes:${VDM_JOOMLA_VOLUMES_MOUNT}
+
     networks:
       - traefik
+
+     # Easy basic limits
+#    deploy:
+#      resources:
+#        limits:
+#          cpus: '1.5'
+#          memory: 2G
+#        reservations:
+#          memory: 512M
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
     labels:
-      # joomla
       - "traefik.enable=true"
       - "traefik.http.routers.joomla${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}.${VDM_DOMAIN}\`)"${VDM_JOOMLA_SECURE_LABELS}
+
   phpmyadmin${VDM_KEY}:
     image: phpmyadmin/phpmyadmin
     container_name: phpmyadmin${VDM_KEY}
     restart: unless-stopped
+
+    # Implicit internal Traefik only.
+    expose:
+      - "80"
+
     environment:
       PMA_HOST: mariadb${VDM_KEY}
       PMA_PORT: 3306
       UPLOAD_LIMIT: 300M
+
     depends_on:
-      - mariadb${VDM_KEY}
+      mariadb${VDM_KEY}:
+        condition: service_healthy
+
     networks:
       - traefik
+
     labels:
-      # phpmyadmin
       - "traefik.enable=true"
       - "traefik.http.routers.phpmyadmin${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}db.${VDM_DOMAIN}\`)"${VDM_PHPMYADMIN_SECURE_LABELS}${VDM_EXTRA_CONTAINER_STUFF}
+
 networks:
   traefik:
     external: true
@@ -1087,6 +1196,14 @@ function joomla__TRuST__bulk() {
       fi
       VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.service=joomla${VDM_KEY}\"")
       VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.joomla${VDM_KEY}.loadbalancer.server.port=80\"")
+      # add enterprise middlewares (Security and Cloudflare)
+      if $VDM_SECURE_CLOUDFLARE; then
+        # VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=cloudflare,traefik-global-errors,joomla-security\"")
+        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=cloudflare,joomla-security\"")
+      else
+        # VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=traefik-global-errors,joomla-security\"")
+        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=joomla-security\"")
+      fi
       # add phpmyadmin labels
       if $VDM_SECURE_CLOUDFLARE; then
         VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.entrypoints=web\"")
@@ -1096,6 +1213,14 @@ function joomla__TRuST__bulk() {
       fi
       VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.service=phpmyadmin${VDM_KEY}\"")
       VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.phpmyadmin${VDM_KEY}.loadbalancer.server.port=80\"")
+      # add enterprise middlewares (Security and Cloudflare)
+      if $VDM_SECURE_CLOUDFLARE; then
+        # VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=cloudflare,traefik-global-errors,joomla-security\"")
+        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=cloudflare,joomla-security\"")
+      else
+        # VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=traefik-global-errors,joomla-security\"")
+        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=joomla-security\"")
+      fi
     fi
     # global
     export VDM_KEY
@@ -2309,7 +2434,7 @@ function setupContainer() {
 }
 
 # setup multiple containers
-bulkSetupContainers() {
+function bulkSetupContainers() {
   # make sure the networks are set
   setNetworks
   # make sure of our container type
@@ -4621,21 +4746,71 @@ function setSecureState() {
   export VDM_SECURE
 }
 
-# Create Docker networks if they do not exist
+# Create Docker networks if they do not exist (IPv6 auto-detect)
 function setNetworks() {
-  # Default network names and subnets
-  local traefik_gateway="${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}"
-  local traefik_subnet="${VDM_TRAEFIK_SUBNET:-172.22.0.0/24}"
-  local openssh_gateway="${VDM_OPENSSH_GATEWAY:-openssh_gateway}"
-  local openssh_subnet="${VDM_OPENSSH_SUBNET:-172.23.0.0/24}"
 
-  # Create traefik network if it does not exist
-  docker network inspect "${traefik_gateway}" >/dev/null 2>&1 ||
-    docker network create "${traefik_gateway}" --subnet "${traefik_subnet}"
+	# Default network names and subnets
+	local traefik_gateway="${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}"
+	local traefik_subnet="${VDM_TRAEFIK_SUBNET:-172.22.0.0/24}"
+	local traefik_subnet6="${VDM_TRAEFIK_SUBNET6:-fd00:22::/64}"
 
-  # Create openssh network if it does not exist
-  docker network inspect "${openssh_gateway}" >/dev/null 2>&1 ||
-    docker network create "${openssh_gateway}"  --subnet "${openssh_subnet}"
+	local openssh_gateway="${VDM_OPENSSH_GATEWAY:-openssh_gateway}"
+	local openssh_subnet="${VDM_OPENSSH_SUBNET:-172.23.0.0/24}"
+	local openssh_subnet6="${VDM_OPENSSH_SUBNET6:-fd00:23::/64}"
+
+	# Ensure Docker is reachable
+	if ! docker info >/dev/null 2>&1; then
+		echo "ERROR: Docker daemon not running or permission denied." >&2
+		return 1
+	fi
+
+	# Detect IPv6 support
+	local ipv6_enabled=false
+	if docker info 2>/dev/null | grep -qE '^ *IPv6: *true'; then
+		ipv6_enabled=true
+	fi
+
+	# -----------------------
+	# Traefik network
+	# -----------------------
+	if ! docker network inspect "${traefik_gateway}" >/dev/null 2>&1; then
+		echo "Creating Docker network: ${traefik_gateway}"
+
+		if [[ "$ipv6_enabled" == true ]]; then
+			docker network create \
+				--driver bridge \
+				--ipv6 \
+				--subnet "$traefik_subnet" \
+				--subnet "$traefik_subnet6" \
+				"${traefik_gateway}"
+		else
+			docker network create \
+				--driver bridge \
+				--subnet "$traefik_subnet" \
+				"${traefik_gateway}"
+		fi
+	fi
+
+	# -----------------------
+	# OpenSSH network
+	# -----------------------
+	if ! docker network inspect "${openssh_gateway}" >/dev/null 2>&1; then
+		echo "Creating Docker network: ${openssh_gateway}"
+
+		if [[ "$ipv6_enabled" == true ]]; then
+			docker network create \
+				--driver bridge \
+				--ipv6 \
+				--subnet "$openssh_subnet" \
+				--subnet "$openssh_subnet6" \
+				"${openssh_gateway}"
+		else
+			docker network create \
+				--driver bridge \
+				--subnet "$openssh_subnet" \
+				"${openssh_gateway}"
+		fi
+	fi
 }
 
 # to set a global Env Variable
