@@ -1795,11 +1795,9 @@ function traefik__TRuST__enable() {
   # check if traefik has been setup
   if [ ! -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" ]; then
     showError "There is no ${VDM_CONTAINER_TYPE^} container to enable, first run the ${VDM_CONTAINER_TYPE^} setup."
-  else
+  elif ensurePortsFree; then
     # set some local variables
     local evn_file
-    # make sure to take down Apache
-    downApache
     # check if image has its own env file also
     evn_file=''
     # shellcheck disable=SC2015
@@ -4311,6 +4309,59 @@ function setUniqueKey() {
   export VDM_KEY
 }
 
+# Fetch and update all Traefik global error pages from OctoJoom repository.
+function setTraefikErrorPages() {
+	# Ensure VDM_PROJECT_PATH is available
+	if [[ -z "${VDM_PROJECT_PATH}" ]]; then
+		showError "The variable VDM_PROJECT_PATH is not set.\nCannot continue without a valid project path."
+		return 1
+	fi
+
+	# List of error pages to fetch
+	local errors=(
+		"403.html"
+		"404.html"
+		"500.html"
+		"502.html"
+		"503.html"
+		"504.html"
+	)
+
+	# Remote base URL
+	local base_url="https://raw.githubusercontent.com/octoleo/octojoom/master/treafik/errors"
+
+	# Destination directory
+	local dest_dir="${VDM_PROJECT_PATH}/traefik/global_errors"
+
+	# Ensure destination folder exists
+	if ! mkdir -p "${dest_dir}"; then
+		showError "Failed to create directory:\n${dest_dir}"
+		return 1
+	fi
+
+	# Counter for status display
+	local updated=0
+
+	# Loop and download each error page
+	for file in "${errors[@]}"; do
+		local src="${base_url}/${file}"
+		local dest="${dest_dir}/${file}"
+
+		# Fetch file
+		if curl -fsSL "${src}" -o "${dest}"; then
+			((updated++))
+		else
+			showError "Failed to download error page:\n${src}"
+			return 1
+		fi
+	done
+
+	# Show result
+	showNotice "Successfully updated ${updated} Traefik global error pages.\nThey were saved to:\n${dest_dir}"
+
+	return 0
+}
+
 # set the Joomla website details
 function setJoomlaWebsiteDetails() {
   # ask if we should add auto deployment
@@ -4879,16 +4930,100 @@ function hasDirectories() {
   return 1
 }
 
-# take down apache
-function downApache() {
-  # make sure port 80 is not used by apache
-  command -v apache2 >/dev/null 2>&1 && [[ $(service apache2 status) == *"active (running)"* ]] && {
-    if (whiptail --yesno "Traefik needs port 80/443 and since Apache is also enabled we don't know if is using these ports, so Traefik may not work. Can we disable Apache?\n(we need sudo privileges)" \
-      --defaultno --title "Disable Apache" --backtitle "${BACK_TITLE}" 12 112); then
-      sudo systemctl stop apache2.service
-      sudo systemctl disable apache2.service
-    fi
-  }
+# Ensure that no system service or process is blocking ports 80 or 443 before Traefik starts
+function ensurePortsFree() {
+	# Known Linux services that may bind to ports 80/443
+	local web_services=("apache2" "httpd" "nginx" "lighttpd" "caddy")
+	local conflict_services=()
+	local port_users=""
+	local message=""
+	local os_label=""
+
+	# Label OS for messaging
+	case "$OS_NUMBER" in
+		1) os_label="Linux" ;;
+		2) os_label="macOS" ;;
+		3) os_label="Windows" ;;
+		*) os_label="Unknown OS" ;;
+	esac
+
+	# Universal port scan (Linux, macOS, WSL, MSYS)
+	port_users=$(sudo lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN 2>/dev/null \
+		| awk 'NR>1 {print $1 ":" $2 ":" $9}')
+
+	# Nothing using ports → success
+	if [ -z "$port_users" ]; then
+		return 0
+	fi
+
+	# If Linux → detect systemd services we know how to stop
+	if [ "$OS_NUMBER" -eq 1 ]; then
+		while IFS= read -r line; do
+			local proc_name
+			proc_name=$(echo "$line" | cut -d':' -f1)
+
+			for ws in "${web_services[@]}"; do
+				if [[ "$proc_name" == "$ws" ]]; then
+					conflict_services+=("$ws")
+				fi
+			done
+		done <<< "$port_users"
+
+		# Remove duplicates
+		readarray -t conflict_services < <(printf "%s\n" "${conflict_services[@]}" | sort -u)
+	fi
+
+	# Build message
+	message="Traefik requires exclusive access to ports 80 and 443.\n\n"
+	message+="Current port usage detected on ${os_label}:\n\n${port_users}\n\n"
+
+	if [ "$OS_NUMBER" -eq 1 ] && [ ${#conflict_services[@]} -gt 0 ]; then
+		message+="Detected known Linux web services:\n"
+		for svc in "${conflict_services[@]}"; do
+			message+="  • ${svc}\n"
+		done
+		message+="\nThese can be stopped and disabled automatically.\n"
+	else
+		message+="An unknown or non-Linux process is blocking these ports.\n"
+		message+="Because this process cannot be managed automatically, Traefik cannot be enabled.\n"
+		message+="\nPlease stop the process manually and try again.\n"
+		showError "$message"
+		return 1
+	fi
+
+	# Ask user to disable Linux services
+	message+="\nWould you like us to stop and disable these services?"
+
+	if getInputYesNo "$message" "Free Ports 80 & 443" 20 112 "defaultno"; then
+
+		# Stop/disable Linux services
+		for svc in "${conflict_services[@]}"; do
+			if systemctl is-active --quiet "$svc"; then
+				sudo systemctl stop "$svc"
+			fi
+			if systemctl is-enabled --quiet "$svc"; then
+				sudo systemctl disable "$svc"
+			fi
+		done
+
+		# Re-check
+		sleep 1
+		local still_used
+		still_used=$(sudo lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN 2>/dev/null)
+
+		if [ -n "$still_used" ]; then
+			showError "Even after disabling services, something is still occupying ports 80/443:\n\n${still_used}\n\nTraefik cannot start."
+			return 1
+		fi
+
+		showNotice "All conflicting services were disabled.\nTraefik now has exclusive access to ports 80 and 443."
+		return 0
+
+	else
+		# User said NO → do not enable Traefik
+		showError "Traefik cannot run unless ports 80 and 443 are free.\nOperation cancelled."
+		return 1
+	fi
 }
 
 # lock a folder path
