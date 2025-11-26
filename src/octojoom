@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # The most recent program version.
-_VERSION="3.8.0"
+_VERSION="3.8.1"
 _V="3.8"
 
 # Bash version required
@@ -249,6 +249,8 @@ function traefik__TRuST__setup() {
   [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && source "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
   # check if we have secure switch set
   setSecureState
+  # removed error pages by default
+  VDM_REMOVE_ERROR_SERVICE="#"
   # setup letsencrypt stuff
   if $VDM_SECURE; then
     VDM_REMOVE_SECURE=''
@@ -270,12 +272,17 @@ function traefik__TRuST__setup() {
     sudo chmod 600 "${VDM_PROJECT_PATH}/traefik/acme.json"
     # and is owned by root
     sudo chown -R root:root "${VDM_PROJECT_PATH}/traefik"
+    # check if we must set the default error pages
+    setTraefikErrorPages
+    # ask if we should add default error pages
+    if $VDM_ERROR_PAGES; then
+      VDM_REMOVE_ERROR_SERVICE=""
+      getTraefikErrorPages
+    fi
   else
     VDM_REMOVE_SECURE="#"
     VDM_HTTP_SCHEME="http"
   fi
-  # default for now (will add UI soon)
-  VDM_REMOVE_ERROR_SERVICE="#"
   # set the main domain if not set
   setMainDomain
   ##########################
@@ -550,6 +557,7 @@ function joomla__TRuST__setup() {
     VDM_ENTRY_POINT="websecure"
     VDM_HTTP_SCHEME="https://"
     setSecureCloudflareState
+    issetTraefikErrorPages
     # add joomla labels
     if $VDM_SECURE_CLOUDFLARE; then
       VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.entrypoints=web\"")
@@ -561,11 +569,17 @@ function joomla__TRuST__setup() {
     VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.joomla${VDM_KEY}.loadbalancer.server.port=80\"")
     # add enterprise middlewares (Security and Cloudflare)
     if $VDM_SECURE_CLOUDFLARE; then
-      # VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=cloudflare,traefik-global-errors,joomla-security\"")
-      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=cloudflare,joomla-security\"")
+      if $VDM_ERROR_PAGES; then
+        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=cloudflare,traefik-global-errors,joomla-security\"")
+      else
+        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=cloudflare,joomla-security\"")
+      fi
     else
-      # VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=traefik-global-errors,joomla-security\"")
-      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=joomla-security\"")
+      if $VDM_ERROR_PAGES; then
+        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=traefik-global-errors,joomla-security\"")
+      else
+        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=joomla-security\"")
+      fi
     fi
     # add phpmyadmin labels
     if $VDM_SECURE_CLOUDFLARE; then
@@ -578,11 +592,17 @@ function joomla__TRuST__setup() {
     VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.phpmyadmin${VDM_KEY}.loadbalancer.server.port=80\"")
     # add enterprise middlewares (Security and Cloudflare)
     if $VDM_SECURE_CLOUDFLARE; then
-      # VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=cloudflare,traefik-global-errors,joomla-security\"")
-      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=cloudflare,joomla-security\"")
+      if $VDM_ERROR_PAGES; then
+        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=cloudflare,traefik-global-errors,joomla-security\"")
+      else
+        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=cloudflare,joomla-security\"")
+      fi
     else
-      # VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=traefik-global-errors,joomla-security\"")
-      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=joomla-security\"")
+      if $VDM_ERROR_PAGES; then
+        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=traefik-global-errors,joomla-security\"")
+      else
+        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=joomla-security\"")
+      fi
     fi
   else
     VDM_REMOVE_SECURE="#"
@@ -855,14 +875,18 @@ services:
     image: mariadb:latest
     container_name: mariadb${VDM_KEY}
     restart: unless-stopped
+
     environment:
       - MARIADB_DATABASE=\${VDM_${VDM_ENV_KEY^^}_DB}
       - MARIADB_USER=\${VDM_${VDM_ENV_KEY^^}_DB_USER}
       - MARIADB_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_DB_PASS}
       - MARIADB_ROOT_PASSWORD=\${VDM_${VDM_ENV_KEY^^}_DB_ROOT}
+
     volumes:${VDM_DB_VOLUMES_MOUNT}
+
     networks:
       - traefik
+
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 20s
@@ -4309,14 +4333,32 @@ function setUniqueKey() {
   export VDM_KEY
 }
 
-# Fetch and update all Traefik global error pages from OctoJoom repository.
+# set the default error pages
 function setTraefikErrorPages() {
-	# Ensure VDM_PROJECT_PATH is available
-	if [[ -z "${VDM_PROJECT_PATH}" ]]; then
-		showError "The variable VDM_PROJECT_PATH is not set.\nCannot continue without a valid project path."
-		return 1
-	fi
+  if [ "${VDM_ERROR_PAGES:-not}" = 'not' ]; then
+    # check the security switch
+    if getInputYesNo "Would you also like to add default error pages" \
+      "Enable Default Error pages" 8 112 "defaultno"; then
+      # we set the secure switch
+      VDM_ERROR_PAGES=true
+    else
+      VDM_ERROR_PAGES=false
+    fi
+  fi
+  # add this value if not set variable
+  setUniqueEnvVariable "VDM_ERROR_PAGES=${VDM_ERROR_PAGES}"
+  # make sure it is available
+  export VDM_ERROR_PAGES
+}
 
+# check if treafik error pages where set
+function issetTraefikErrorPages() {
+	VDM_ERROR_PAGES="${VDM_ERROR_PAGES:-false}"
+	export VDM_ERROR_PAGES
+}
+
+# Fetch and update all Traefik global error pages from OctoJoom repository.
+function getTraefikErrorPages() {
 	# List of error pages to fetch
 	local errors=(
 		"403.html"
@@ -4596,7 +4638,7 @@ function setImageSource() {
   # get the Joomla version if not set
   while [ ${#VDM_JV} -le 1 ]; do
     # get the value
-    VDM_JV=$(getInput "Enter Joomla version tag for this container.\n[See available tags here ${vdm_tag_url}]" '5.1' 'Enter Version Tag')
+    VDM_JV=$(getInput "Enter Joomla version tag for this container.\n[See available tags here ${vdm_tag_url}]" '6.0' 'Enter Version Tag')
     # keep asking
     [ ${#VDM_JV} -ge 1 ] || {
       showError "You must enter a version tag. See available tags here ${vdm_tag_url}"
@@ -4876,26 +4918,31 @@ function setUniqueEnvVariable() {
   return 12
 }
 
-# to set a global Env Variable
+# Set a global environment variable, but do NOT overwrite existing keys
 function setEnvVariable() {
-  # check if the env file exist
-  if [ -f "${VDM_SRC_PATH}/.env" ]; then
-    grep -q "${1}" "${VDM_SRC_PATH}/.env" || echo "${1}" >>"${VDM_SRC_PATH}/.env"
-  elif (whiptail --yesno "Can we create the ${VDM_SRC_PATH}/.env file" \
-    --title "Environment Variable File" --backtitle "${BACK_TITLE}" 8 112); then
-    # make sure the folder exist
-    mkdir -p "${VDM_SRC_PATH}"
-    # so we creat the file
-    echo "${1}" >"${VDM_SRC_PATH}/.env"
-    # make sure the permissions are secured
-    chmod 600 "${VDM_SRC_PATH}/.env"
-  else
-    showError "The ${VDM_SRC_PATH}/.env file does not exist. So ${1} could not be added!"
-    # we return false
-    return 12
-  fi
-  # we return true
-  return 0
+	local line="$1"
+	local key="${line%%=*}"
+	# If .env exists, check if key already present
+	if [ -f "${VDM_SRC_PATH}/.env" ]; then
+		# Key already exists → DO NOT update or append
+		if grep -q "^${key}=" "${VDM_SRC_PATH}/.env"; then
+			return 0
+		fi
+		# Key not found → append new line
+		echo "${line}" >> "${VDM_SRC_PATH}/.env"
+		return 0
+	fi
+	# No .env file → ask user to create it
+	if whiptail --yesno "Can we create the ${VDM_SRC_PATH}/.env file" \
+		--title "Environment Variable File" --backtitle "${BACK_TITLE}" 8 112; then
+		mkdir -p "${VDM_SRC_PATH}"
+		echo "${line}" > "${VDM_SRC_PATH}/.env"
+		chmod 600 "${VDM_SRC_PATH}/.env"
+		return 0
+	else
+		showError "The ${VDM_SRC_PATH}/.env file does not exist. So ${line} could not be added!"
+		return 12
+	fi
 }
 
 # to set a container Env Variable
@@ -5053,6 +5100,7 @@ function quitProgram() {
   unset VDM_PROJECT_PATH
   unset VDM_DOMAIN
   unset VDM_MULTI_DOMAIN
+  unset VDM_ERROR_PAGES
   unset VDM_SECURE
   unset VDM_SECURE_CLOUDFLARE
   unset VDM_UPDATE_HOST
@@ -5114,19 +5162,33 @@ function saveMultiDomain() {
   return 0
 }
 
-# delete a global Environment Variable
+# Delete a global environment variable from .env
 function deleteEnvVariable() {
-  # some locals
-  local env_key
-  # check if the env file exist
-  if [ -f "${VDM_SRC_PATH}/.env" ]; then
-    # check that we have the key
-    env_key="${1:-none}"
-    # shellcheck disable=SC2015
-    grep -vx "${env_key}=.*" "${VDM_SRC_PATH}/.env" >"${VDM_SRC_PATH}/.env_tmp" &&
-      mv "${VDM_SRC_PATH}/.env_tmp" "${VDM_SRC_PATH}/.env" ||
-      rm "${VDM_SRC_PATH}/.env_tmp"
-  fi
+	# Key we want to remove
+	local env_key="${1:-}"
+
+	# Only proceed if key provided and file exists
+	[ -z "${env_key}" ] && return 0
+	[ ! -f "${VDM_SRC_PATH}/.env" ] && return 0
+
+	# Escape regex special chars in the key
+	local safe_key
+	safe_key="$(printf '%s\n' "${env_key}" | sed 's/[]\/$*.^|[]/\\&/g')"
+
+	# Create temporary file
+	local tmp_file="${VDM_SRC_PATH}/.env_tmp"
+
+	# Filter the .env file and remove matching line(s)
+	if grep -E -v "^${safe_key}=.*$" "${VDM_SRC_PATH}/.env" > "${tmp_file}"; then
+		# Preserve original permissions
+		chmod --reference="${VDM_SRC_PATH}/.env" "${tmp_file}"
+		mv "${tmp_file}" "${VDM_SRC_PATH}/.env"
+	else
+		rm -f "${tmp_file}"
+		return 1
+	fi
+
+	return 0
 }
 
 # delete multiple domains
@@ -5818,8 +5880,8 @@ Usage: octojoom [OPTION...]
 	======================================================
    -j|--joomla-version <version-tag>
 	see available tags here https://hub.docker.com/_/joomla
-	example: octojoom -j=5.1
-	example: octojoom --joomla-version=5.1
+	example: octojoom -j=6.0
+	example: octojoom --joomla-version=6.0
 	======================================================
 	AVAILABLE FOR OPENSSH CONTAINER
 	======================================================
