@@ -4385,10 +4385,22 @@ function getTraefikErrorPages() {
 	# Destination directory
 	local dest_dir="${VDM_PROJECT_PATH}/traefik/global_errors"
 
-	# Ensure destination folder exists
-	if ! mkdir -p "${dest_dir}"; then
-		showError "Failed to create directory:\n${dest_dir}"
-		return 1
+	# Try creating directory with correct permissions (755) without sudo first
+	# shellcheck disable=SC2174
+	if ! mkdir -p -m 755 "${dest_dir}" 2>/dev/null; then
+		# Ask for sudo permission
+		if whiptail --yesno "${USER^}, to create the directory:\n\n${dest_dir}\n\nwe need sudo privileges." \
+			--title "Give sudo Privileges" --backtitle "${BACK_TITLE}" 10 112; then
+
+			# Create with sudo and correct permissions
+			if ! sudo mkdir -p -m 755 "${dest_dir}"; then
+				showError "Failed to create directory with sudo:\n${dest_dir}"
+				return 1
+			fi
+		else
+			showError "Cannot continue without creating the required directory:\n${dest_dir}"
+			return 1
+		fi
 	fi
 
 	# Counter for status display
@@ -4401,6 +4413,8 @@ function getTraefikErrorPages() {
 
 		# Fetch file
 		if curl -fsSL "${src}" -o "${dest}"; then
+			# Set correct file permissions (readable by nginx)
+			chmod 644 "${dest}" || sudo chmod 644 "${dest}"
 			((updated++))
 		else
 			showError "Failed to download error page:\n${src}"
@@ -4408,7 +4422,7 @@ function getTraefikErrorPages() {
 		fi
 	done
 
-	# Show result
+  # Show result
 	showNotice "Successfully updated ${updated} Traefik global error pages.\nThey were saved to:\n${dest_dir}"
 
 	return 0
@@ -4791,10 +4805,6 @@ function setDockerEntrypoint() {
     "entrypoint.sh values" 8 112 "defaultno"; then
     # make sure the directory exist
     mkdir -p "${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}"
-    # unattended deploy
-#    if (whiptail --yesno "Would you like to to setup unattended deployment for this Joomla container" --defaultno --title "Unattended Deployment" 8 112); then
-#        echo "soon we will have this ready"
-#    fi
     # download entrypoint.sh file to the project folder
     if sudo curl --fail -L "${VDM_ENTRY_REPO}" -o "${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}/entrypoint.sh" 2>/dev/null; then
       # give little heads-up
