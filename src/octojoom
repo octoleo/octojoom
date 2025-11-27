@@ -227,6 +227,12 @@ if ! command -v docker-compose &>/dev/null; then
     exit 1
   fi
 fi
+# fix user permissions on Docker install
+if [ "$DOCKER_INSTALLED_THIS_SESSION" = true ]; then
+  whiptail --title "NOTICE | ${PROGRAM_NAME} v${_V}" --backtitle "${BACK_TITLE}" \
+      --msgbox "Docker has been successfully installed and your user was added to the required Docker group.\n\nHowever, your current terminal session is still using your OLD permissions. This is normal on Linux.\n\nTo activate your new Docker permissions, you MUST:\n\n  1. Log out of your user account completely\n  2. Log back in again (or reboot)\n\nAfter logging back in, you can run this ${PROGRAM_NAME} script again and Docker will work correctly.\n\nThis step is required only once." 20 112
+	exit 0
+fi
 # Setting the LC_ALL with respect to language, regional settings, to use POSIX locale,
 # so ASCII character set and standardizes behavior is used for consistent across different environments
 export LC_ALL=C
@@ -6307,34 +6313,6 @@ case "$OS_NUMBER" in
     exit 1
     ;;
 esac
-# fix user permissions on Docker install
-if [ "$DOCKER_INSTALLED_THIS_SESSION" = true ]; then
-	if [ "$OS_NUMBER" -eq 1 ]; then
-		# LINUX SESSION REFRESH
-		if getInputYesNo "Docker was just installed.\n\nTo activate your new Docker permissions, your current session must refresh.\n\nWe can attempt an automatic refresh now (recommended).\n\nWould you like to apply the session update now?" \
-			"Docker Permission Activation" 8 112; then
-
-			# Attempt automatic group refresh
-			echo "Refreshing Docker permissions..."
-			sg docker -c "newgrp docker <<EOF
-echo 'Docker permissions activated successfully.'
-EOF"
-			if [ $? -eq 0 ]; then
-				showNotice "Your Docker permissions are now active. No logout/login required!"
-			else
-				showNotice "Automatic activation failed.\n\nPlease LOG OUT and LOG BACK IN to enable Docker."
-				exit 0
-			fi
-		else
-			showNotice "Docker installed.\n\nYou MUST log out and log back in before Docker will work."
-			exit 0
-		fi
-	else
-		# macOS / Windows
-		showNotice "Docker was installed.\n\nYou MUST restart your terminal/session for Docker to work correctly."
-		exit 0
-	fi
-fi
 # Set the src folder path based on OS
 VDM_SRC_PATH="${VDM_HOME_PATH}/.config/octojoom"
 # Create the folder if not set
