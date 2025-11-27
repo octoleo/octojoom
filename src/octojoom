@@ -898,7 +898,7 @@ services:
       - traefik
 
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: ["CMD-SHELL", "mariadb-admin ping --silent"]
       interval: 20s
       timeout: 5s
       retries: 5
