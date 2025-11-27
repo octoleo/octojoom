@@ -4986,6 +4986,12 @@ function ensurePortsFree() {
 	local message=""
 	local os_label=""
 
+	# If Traefik container is running → skip everything
+	if isContainerRunning 'traefik'; then
+		# Traefik already has the ports → do nothing
+		return 0
+	fi
+
 	# Label OS for messaging
 	case "$OS_NUMBER" in
 		1) os_label="Linux" ;;
@@ -5071,6 +5077,33 @@ function ensurePortsFree() {
 		showError "Traefik cannot run unless ports 80 and 443 are free.\nOperation cancelled."
 		return 1
 	fi
+}
+
+# Check if the Traefik container is already running
+function isContainerRunning() {
+  local container="$1"
+	# Docker command can differ slightly per OS, especially Windows.
+	local docker_cmd="docker"
+
+	case "$OS_NUMBER" in
+		1) docker_cmd="docker" ;;        # Linux
+		2) docker_cmd="docker" ;;        # macOS
+		3) docker_cmd="docker.exe" ;;    # Windows MSYS / Git Bash
+		*) docker_cmd="docker" ;;
+	esac
+
+	# Check if Docker is even available
+	if ! command -v "$docker_cmd" >/dev/null 2>&1; then
+		# If Docker isn't installed, then Traefik can't be running.
+		return 1
+	fi
+
+	# Check if a running container named EXACTLY 'traefik' exists
+	if "$docker_cmd" ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "${container}"; then
+		return 0  # yes, running
+	fi
+
+	return 1  # not running
 }
 
 # lock a folder path
@@ -5460,7 +5493,7 @@ function getRemoteEnvValue() {
     # Execute the grep command on the remote system.
     # The command uses \$HOME so that the remote shell expands it to the logged-in user's home directory.
     # The env_key variable is expanded locally, while the file path remains intact for the remote shell.
-    remote_env_value=$(ssh "${remote_system}" "grep '^${env_key}=' \"\$HOME/.config/octojoom/.env\"" | cut -d '=' -f 2-)
+    remote_env_value=$(ssh -- "${remote_system}" "grep \"^${env_key}=\" \"\$HOME/.config/octojoom/.env\"" | cut -d '=' -f 2-)
   fi
 
   # Remove any double quotes from the returned value
