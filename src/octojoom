@@ -261,10 +261,19 @@ function traefik__TRuST__setup() {
   setSecureState
   # removed error pages by default
   VDM_REMOVE_ERROR_SERVICE="#"
+  VDM_REMOVE_CLOUDFLARE_SERVICE="#"
   # setup letsencrypt stuff
+  VDM_REMOVE_SECURE=''
+  VDM_HTTP_SCHEME="https"
+  # check if we must set the default error pages
+  setTraefikErrorPages
+  # ask if we should add default error pages
+  if $VDM_ERROR_PAGES; then
+    VDM_REMOVE_ERROR_SERVICE=""
+    getTraefikErrorPages
+  fi
   if $VDM_SECURE; then
-    VDM_REMOVE_SECURE=''
-    VDM_HTTP_SCHEME="https"
+    setSecureCloudflareState
     # get the email if not set
     while [ ${#VDM_SECURE_EMAIL} -le 1 ]; do
       # get the value
@@ -274,6 +283,30 @@ function traefik__TRuST__setup() {
         showError "You must enter an email for the Letsencrypt setup."
       }
     done
+    setContainerEnvVariable "VDM_SECURE_EMAIL=\"${VDM_SECURE_EMAIL}\""
+    if $VDM_SECURE_CLOUDFLARE; then
+      VDM_REMOVE_CLOUDFLARE_SERVICE=''
+      # get the email if not set
+      while [ ${#VDM_CLOUDFLARE_EMAIL} -le 1 ]; do
+        # get the value
+        VDM_CLOUDFLARE_EMAIL=$(getInput 'Enter your Cloudflare email used with API DNS lookup for the auto-resolver in the ACME.' '' 'Enter Valid Email')
+        # keep asking
+        [ ${#VDM_CLOUDFLARE_EMAIL} -ge 1 ] || {
+          showError "You must enter your Cloudflare email used with API DNS lookup for the auto-resolver in the ACME."
+        }
+      done
+      # get the api key if not set
+      while [ ${#VDM_CLOUDFLARE_API_KEY} -le 1 ]; do
+        # get the value
+        VDM_CLOUDFLARE_API_KEY=$(getInput 'Enter your Cloudflare API token that has Zone:DNS:Edit permission used with API DNS lookup for the auto-resolver in the ACME.' '' 'Enter Valid Email')
+        # keep asking
+        [ ${#VDM_CLOUDFLARE_API_KEY} -ge 1 ] || {
+          showError "You must enter your Cloudflare API token that has Zone:DNS:Edit permission used with API DNS lookup for the auto-resolver in the ACME."
+        }
+      done
+      setContainerEnvVariable "VDM_CLOUDFLARE_EMAIL=\"${VDM_CLOUDFLARE_EMAIL}\""
+      setContainerEnvVariable "VDM_CLOUDFLARE_API_KEY=\"${VDM_CLOUDFLARE_API_KEY}\""
+    fi
     # make sure the directory exist
     mkdir -p "${VDM_PROJECT_PATH}/traefik"
     # we must create this, else docker creates a folder
@@ -284,13 +317,6 @@ function traefik__TRuST__setup() {
     echo "{}" > "${VDM_PROJECT_PATH}/traefik/acme-cloudflare.json"
     # make sure the permission are good
     sudo chmod 600 "${VDM_PROJECT_PATH}/traefik/acme-cloudflare.json"
-    # check if we must set the default error pages
-    setTraefikErrorPages
-    # ask if we should add default error pages
-    if $VDM_ERROR_PAGES; then
-      VDM_REMOVE_ERROR_SERVICE=""
-      getTraefikErrorPages
-    fi
     # and is owned by root
     sudo chown -R root:root "${VDM_PROJECT_PATH}/traefik"
   else
@@ -309,7 +335,6 @@ function traefik__TRuST__setup() {
   export VDM_REMOVE_SECURE
   export VDM_REMOVE_ERROR_SERVICE
   export VDM_HTTP_SCHEME
-  export VDM_SECURE_EMAIL
   ## create the directory if it does not yet already exist
   # shellcheck disable=SC2174
   mkdir -p -m 700 "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}"
@@ -330,7 +355,6 @@ function traefik__TRuST__setup() {
   unset VDM_REMOVE_SECURE
   unset VDM_REMOVE_ERROR_SERVICE
   unset VDM_HTTP_SCHEME
-  unset VDM_SECURE_EMAIL
   # return a success
   return 0
 }
@@ -342,6 +366,9 @@ services:
   traefik:
     container_name: traefik
     image: "traefik:latest"
+${VDM_REMOVE_CLOUDFLARE_SERVICE}    environment:
+${VDM_REMOVE_CLOUDFLARE_SERVICE}      - CLOUDFLARE_EMAIL=\${VDM_CLOUDFLARE_EMAIL:-user@demo.com}
+${VDM_REMOVE_CLOUDFLARE_SERVICE}      - CLOUDFLARE_API_KEY=\${VDM_CLOUDFLARE_API_KEY:-}
     command:
       # Entrypoints
       - --entrypoints.web.address=:80
@@ -367,14 +394,14 @@ services:
       # ACME - HTTP resolver for non-Cloudflare domains
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge=true
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge.entrypoint=web
-${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.email=${VDM_SECURE_EMAIL:-user@demo.com}
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.email=\${VDM_SECURE_EMAIL:-user@demo.com}
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.storage=/acme.json
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.keytype=RSA4096
 
       # ACME - DNS resolver for Cloudflare-proxied domains
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.cfresolver.acme.httpchallenge=true
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.cfresolver.acme.dnschallenge.provider=cloudflare
-${VDM_REMOVE_SECURE}      - --certificatesresolvers.cfresolver.acme.email=${VDM_SECURE_EMAIL:-user@demo.com}
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.cfresolver.acme.email=\${VDM_SECURE_EMAIL:-user@demo.com}
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.cfresolver.acme.storage=/acme-cloudflare.json
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.cfresolver.acme.keytype=RSA4096
 
@@ -388,12 +415,12 @@ ${VDM_REMOVE_SECURE}      - --certificatesresolvers.cfresolver.acme.keytype=RSA4
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - "\${VDM_PROJECT_PATH}/traefik/logs:/logs"
       - "\${VDM_PROJECT_PATH}/traefik/errors:/errors"
-${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/conf:/conf"
+      - "\${VDM_PROJECT_PATH}/traefik/conf:/conf"
 ${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/acme.json:/acme.json"
 ${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/acme-cloudflare.json:/acme-cloudflare.json"
 
-${VDM_REMOVE_SECURE}    labels:
-${VDM_REMOVE_SECURE}      - "traefik.enable=true"
+    labels:
+      - "traefik.enable=true"
 
       # Global HTTP -> HTTPS redirect
 ${VDM_REMOVE_SECURE}      - "traefik.http.routers.http-catchall.rule=hostregexp(\`{host:.+}\`)"
@@ -403,16 +430,16 @@ ${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.redirect-https.redirectsch
 ${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.redirect-https.redirectscheme.permanent=true"
 
       # Security headers
-${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.stsSeconds=63072000"
-${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.stsIncludeSubdomains=true"
-${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.stsPreload=true"
-${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.browserXssFilter=true"
-${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.contentTypeNosniff=true"
-${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.frameDeny=true"
-${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.joomla-security.headers.referrerPolicy=same-origin"
+      - "traefik.http.middlewares.joomla-security.headers.stsSeconds=63072000"
+      - "traefik.http.middlewares.joomla-security.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.joomla-security.headers.stsPreload=true"
+      - "traefik.http.middlewares.joomla-security.headers.browserXssFilter=true"
+      - "traefik.http.middlewares.joomla-security.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.joomla-security.headers.frameDeny=true"
+      - "traefik.http.middlewares.joomla-security.headers.referrerPolicy=same-origin"
 
       # Cloudflare middleware
-${VDM_REMOVE_SECURE}      - "traefik.http.middlewares.cloudflare.headers.customrequestheaders.X-Forwarded-Proto=https"
+${VDM_REMOVE_CLOUDFLARE_SERVICE}      - "traefik.http.middlewares.cloudflare.headers.customrequestheaders.X-Forwarded-Proto=https"
 
       # Central error-page middleware
 ${VDM_REMOVE_ERROR_SERVICE}      - "traefik.http.middlewares.traefik-global-errors.errors.status=403,404,500,502,503,504"
