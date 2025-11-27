@@ -280,8 +280,10 @@ function traefik__TRuST__setup() {
     echo "{}" > "${VDM_PROJECT_PATH}/traefik/acme.json"
     # make sure the permission are good
     sudo chmod 600 "${VDM_PROJECT_PATH}/traefik/acme.json"
-    # and is owned by root
-    sudo chown -R root:root "${VDM_PROJECT_PATH}/traefik"
+    # we must create this, else docker creates a folder
+    echo "{}" > "${VDM_PROJECT_PATH}/traefik/acme-cloudflare.json"
+    # make sure the permission are good
+    sudo chmod 600 "${VDM_PROJECT_PATH}/traefik/acme-cloudflare.json"
     # check if we must set the default error pages
     setTraefikErrorPages
     # ask if we should add default error pages
@@ -289,6 +291,8 @@ function traefik__TRuST__setup() {
       VDM_REMOVE_ERROR_SERVICE=""
       getTraefikErrorPages
     fi
+    # and is owned by root
+    sudo chown -R root:root "${VDM_PROJECT_PATH}/traefik"
   else
     VDM_REMOVE_SECURE="#"
     VDM_HTTP_SCHEME="http"
@@ -352,20 +356,27 @@ services:
       # Providers
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
-${VDM_REMOVE_SECURE}      - --providers.file.directory=/conf
-${VDM_REMOVE_SECURE}      - --providers.file.watch=true
+      - --providers.file.directory=/conf
+      - --providers.file.watch=true
 
       # Logging
       - --log.level=INFO
       - --accesslog=true
       - --accesslog.filepath=/logs/access.log
 
-      # ACME
+      # ACME - HTTP resolver for non-Cloudflare domains
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge=true
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.httpchallenge.entrypoint=web
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.email=${VDM_SECURE_EMAIL:-user@demo.com}
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.storage=/acme.json
 ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.keytype=RSA4096
+
+      # ACME - DNS resolver for Cloudflare-proxied domains
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.cfresolver.acme.httpchallenge=true
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.cfresolver.acme.dnschallenge.provider=cloudflare
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.cfresolver.acme.email=${VDM_SECURE_EMAIL:-user@demo.com}
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.cfresolver.acme.storage=/acme-cloudflare.json
+${VDM_REMOVE_SECURE}      - --certificatesresolvers.cfresolver.acme.keytype=RSA4096
 
     restart: unless-stopped
 
@@ -376,11 +387,13 @@ ${VDM_REMOVE_SECURE}      - --certificatesresolvers.vdmresolver.acme.keytype=RSA
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - "\${VDM_PROJECT_PATH}/traefik/logs:/logs"
+      - "\${VDM_PROJECT_PATH}/traefik/errors:/errors"
 ${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/conf:/conf"
 ${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/acme.json:/acme.json"
-${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/errors:/errors"
+${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/acme-cloudflare.json:/acme-cloudflare.json"
 
 ${VDM_REMOVE_SECURE}    labels:
+${VDM_REMOVE_SECURE}      - "traefik.enable=true"
 
       # Global HTTP -> HTTPS redirect
 ${VDM_REMOVE_SECURE}      - "traefik.http.routers.http-catchall.rule=hostregexp(\`{host:.+}\`)"
@@ -438,16 +451,16 @@ function portainer__TRuST__setup() {
   setSecureState
   # setup letsencrypt stuff
   VDM_PORT_SECURE_LABELS=''
+  VDM_REMOVE_SECURE=''
+  VDM_ENTRY_POINT="websecure"
+  VDM_CERT_RESOLVER="vdmresolver"
   if $VDM_SECURE; then
-    VDM_REMOVE_SECURE=''
-    VDM_ENTRY_POINT="websecure"
+    VDM_PORT_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.portainer.entrypoints=${VDM_ENTRY_POINT}\"")
     setSecureCloudflareState
     if $VDM_SECURE_CLOUDFLARE; then
-      VDM_PORT_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.portainer.entrypoints=web\"")
-    else
-      VDM_PORT_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.portainer.entrypoints=${VDM_ENTRY_POINT}\"")
-      VDM_PORT_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.portainer.tls.certresolver=vdmresolver\"")
+      VDM_CERT_RESOLVER="cfresolver"
     fi
+    VDM_PORT_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.portainer.tls.certresolver=${VDM_CERT_RESOLVER}\"")
   else
     VDM_REMOVE_SECURE="#"
     VDM_ENTRY_POINT="web"
@@ -466,6 +479,7 @@ function portainer__TRuST__setup() {
   export VDM_REMOVE_SECURE
   export VDM_ENTRY_POINT
   export VDM_PORT_SECURE_LABELS
+  export VDM_CERT_RESOLVER
   # set host file if needed
   updateHostFile
   ## create the directory if it does not yet already exist
@@ -489,6 +503,7 @@ function portainer__TRuST__setup() {
   unset VDM_REMOVE_SECURE
   unset VDM_ENTRY_POINT
   unset VDM_PORT_SECURE_LABELS
+  unset VDM_CERT_RESOLVER
   # return a success
   return 0
 }
@@ -516,7 +531,7 @@ services:
       # Edge
 #      - "traefik.http.routers.portaineredge.rule=Host(\`${VDM_SUBDOMAIN}edge.${VDM_DOMAIN}\`)"
 #      - "traefik.http.routers.portaineredge.entrypoints=${VDM_ENTRY_POINT}"
-#      - "traefik.http.routers.portaineredge.tls.certresolver=vdmresolver"
+#      - "traefik.http.routers.portaineredge.tls.certresolver=${VDM_CERT_RESOLVER}"
 #      - "traefik.http.routers.portaineredge.service=portaineredge"
 #      - "traefik.http.services.portaineredge.loadbalancer.server.port=8000"
     networks:
@@ -547,6 +562,7 @@ function joomla__TRuST__setup() {
   local vdm_env_pass
   local vdm_key_root
   local vdm_env_root
+  local vdm_middlewares
   # get the Joomla image source
   setImageSource
   # get the key if not set
@@ -562,58 +578,38 @@ function joomla__TRuST__setup() {
   # setup letsencrypt stuff
   VDM_JOOMLA_SECURE_LABELS=''
   VDM_PHPMYADMIN_SECURE_LABELS=''
+  VDM_REMOVE_SECURE=''
+  VDM_ENTRY_POINT="websecure"
+  VDM_HTTP_SCHEME="https://"
+  VDM_CERT_RESOLVER="vdmresolver"
   if $VDM_SECURE; then
-    VDM_REMOVE_SECURE=''
-    VDM_ENTRY_POINT="websecure"
-    VDM_HTTP_SCHEME="https://"
     setSecureCloudflareState
     issetTraefikErrorPages
-    # add joomla labels
     if $VDM_SECURE_CLOUDFLARE; then
-      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.entrypoints=web\"")
-    else
-      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
-      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.tls.certresolver=vdmresolver\"")
+      VDM_CERT_RESOLVER="cfresolver"
     fi
+    VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+    VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.tls.certresolver=${VDM_CERT_RESOLVER}\"")
     VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.service=joomla${VDM_KEY}\"")
+    # add enterprise middlewares (Security and Cloudflare)
+    vdm_middlewares="joomla-security"
+    if $VDM_SECURE_CLOUDFLARE; then
+      if $VDM_ERROR_PAGES; then
+        vdm_middlewares="cloudflare,traefik-global-errors,joomla-security"
+      else
+        vdm_middlewares="cloudflare,joomla-security"
+      fi
+    elif $VDM_ERROR_PAGES; then
+      vdm_middlewares="traefik-global-errors,joomla-security"
+    fi
+    VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=${vdm_middlewares}\"")
     VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.joomla${VDM_KEY}.loadbalancer.server.port=80\"")
-    # add enterprise middlewares (Security and Cloudflare)
-    if $VDM_SECURE_CLOUDFLARE; then
-      if $VDM_ERROR_PAGES; then
-        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=cloudflare,traefik-global-errors,joomla-security\"")
-      else
-        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=cloudflare,joomla-security\"")
-      fi
-    else
-      if $VDM_ERROR_PAGES; then
-        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=traefik-global-errors,joomla-security\"")
-      else
-        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=joomla-security\"")
-      fi
-    fi
     # add phpmyadmin labels
-    if $VDM_SECURE_CLOUDFLARE; then
-      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.entrypoints=web\"")
-    else
-      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
-      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.tls.certresolver=vdmresolver\"")
-    fi
+    VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+    VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.tls.certresolver=${VDM_CERT_RESOLVER}\"")
     VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.service=phpmyadmin${VDM_KEY}\"")
+    VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=${vdm_middlewares}\"")
     VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.phpmyadmin${VDM_KEY}.loadbalancer.server.port=80\"")
-    # add enterprise middlewares (Security and Cloudflare)
-    if $VDM_SECURE_CLOUDFLARE; then
-      if $VDM_ERROR_PAGES; then
-        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=cloudflare,traefik-global-errors,joomla-security\"")
-      else
-        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=cloudflare,joomla-security\"")
-      fi
-    else
-      if $VDM_ERROR_PAGES; then
-        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=traefik-global-errors,joomla-security\"")
-      else
-        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=joomla-security\"")
-      fi
-    fi
   else
     VDM_REMOVE_SECURE="#"
     VDM_ENTRY_POINT="web"
@@ -718,12 +714,8 @@ function joomla__TRuST__setup() {
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.enable=true\"")
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}mail.${VDM_DOMAIN}\`)\"")
       if $VDM_SECURE; then
-        if $VDM_SECURE_CLOUDFLARE; then
-          VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.entrypoints=web\"")
-        else
-          VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
-          VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.tls.certresolver=vdmresolver\"")
-        fi
+        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.tls.certresolver=${VDM_CERT_RESOLVER}\"")
       fi
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.service=mailcatcher${VDM_KEY}\"")
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.services.mailcatcher${VDM_KEY}.loadbalancer.server.port=1080\"")
@@ -793,6 +785,7 @@ function joomla__TRuST__setup() {
   # container
   export VDM_REMOVE_SECURE
   export VDM_ENTRY_POINT
+  export VDM_CERT_RESOLVER
   export VDM_HTTP_SCHEME
   export VDM_PERSISTENCE
   export VDM_NOT_PERSISTENCE
@@ -842,6 +835,7 @@ function joomla__TRuST__setup() {
   unset VDM_ENV_KEY
   unset VDM_REMOVE_SECURE
   unset VDM_ENTRY_POINT
+  unset VDM_CERT_RESOLVER
   unset VDM_HTTP_SCHEME
   unset VDM_PERSISTENCE
   unset VDM_NOT_PERSISTENCE
@@ -997,6 +991,7 @@ function joomla__TRuST__bulk() {
   local vdm_database_pass
   local vdm_bulk_database_user
   local vdm_database_rootpass
+  local vdm_middlewares
   # get the Joomla image source
   setImageSource
   # set the domain
@@ -1007,11 +1002,24 @@ function joomla__TRuST__bulk() {
   # check if we have secure switch set
   setSecureState
   # setup letsencrypt stuff
+  VDM_REMOVE_SECURE=''
+  VDM_ENTRY_POINT="websecure"
+  VDM_HTTP_SCHEME="https://"
+  VDM_CERT_RESOLVER="vdmresolver"
   if $VDM_SECURE; then
-    VDM_REMOVE_SECURE=''
-    VDM_ENTRY_POINT="websecure"
-    VDM_HTTP_SCHEME="https://"
     setSecureCloudflareState
+    issetTraefikErrorPages
+    vdm_middlewares="joomla-security"
+    if $VDM_SECURE_CLOUDFLARE; then
+      VDM_CERT_RESOLVER="cfresolver"
+      if $VDM_ERROR_PAGES; then
+        vdm_middlewares="cloudflare,traefik-global-errors,joomla-security"
+      else
+        vdm_middlewares="cloudflare,joomla-security"
+      fi
+    elif $VDM_ERROR_PAGES; then
+      vdm_middlewares="traefik-global-errors,joomla-security"
+    fi
   else
     VDM_REMOVE_SECURE="#"
     VDM_ENTRY_POINT="web"
@@ -1107,6 +1115,7 @@ function joomla__TRuST__bulk() {
   # container
   export VDM_REMOVE_SECURE
   export VDM_ENTRY_POINT
+  export VDM_CERT_RESOLVER
   export VDM_HTTP_SCHEME
   export VDM_PERSISTENCE
   export VDM_NOT_PERSISTENCE
@@ -1206,12 +1215,8 @@ function joomla__TRuST__bulk() {
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.enable=true\"")
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}mail.${VDM_DOMAIN}\`)\"")
       if $VDM_SECURE; then
-        if $VDM_SECURE_CLOUDFLARE; then
-          VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.entrypoints=web\"")
-        else
-          VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
-          VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.tls.certresolver=vdmresolver\"")
-        fi
+        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+        VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.tls.certresolver=${VDM_CERT_RESOLVER}\"")
       fi
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.routers.mailcatcher${VDM_KEY}.service=mailcatcher${VDM_KEY}\"")
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine3 "- \"traefik.http.services.mailcatcher${VDM_KEY}.loadbalancer.server.port=1080\"")
@@ -1222,39 +1227,17 @@ function joomla__TRuST__bulk() {
     VDM_PHPMYADMIN_SECURE_LABELS=''
     if $VDM_SECURE; then
       # add joomla labels
-      if $VDM_SECURE_CLOUDFLARE; then
-        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.entrypoints=web\"")
-      else
-        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
-        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.tls.certresolver=vdmresolver\"")
-      fi
+      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.tls.certresolver=${VDM_CERT_RESOLVER}\"")
       VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.service=joomla${VDM_KEY}\"")
+      VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=${vdm_middlewares}\"")
       VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.joomla${VDM_KEY}.loadbalancer.server.port=80\"")
-      # add enterprise middlewares (Security and Cloudflare)
-      if $VDM_SECURE_CLOUDFLARE; then
-        # VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=cloudflare,traefik-global-errors,joomla-security\"")
-        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=cloudflare,joomla-security\"")
-      else
-        # VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=traefik-global-errors,joomla-security\"")
-        VDM_JOOMLA_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.middlewares=joomla-security\"")
-      fi
       # add phpmyadmin labels
-      if $VDM_SECURE_CLOUDFLARE; then
-        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.entrypoints=web\"")
-      else
-        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
-        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.tls.certresolver=vdmresolver\"")
-      fi
+      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.entrypoints=${VDM_ENTRY_POINT}\"")
+      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.tls.certresolver=${VDM_CERT_RESOLVER}\"")
       VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.service=phpmyadmin${VDM_KEY}\"")
+      VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=${vdm_middlewares}\"")
       VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.services.phpmyadmin${VDM_KEY}.loadbalancer.server.port=80\"")
-      # add enterprise middlewares (Security and Cloudflare)
-      if $VDM_SECURE_CLOUDFLARE; then
-        # VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=cloudflare,traefik-global-errors,joomla-security\"")
-        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=cloudflare,joomla-security\"")
-      else
-        # VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=traefik-global-errors,joomla-security\"")
-        VDM_PHPMYADMIN_SECURE_LABELS+=$(getYMLine3 "- \"traefik.http.routers.phpmyadmin${VDM_KEY}.middlewares=joomla-security\"")
-      fi
     fi
     # global
     export VDM_KEY
@@ -1299,6 +1282,7 @@ function joomla__TRuST__bulk() {
   unset VDM_ENV_KEY
   unset VDM_REMOVE_SECURE
   unset VDM_ENTRY_POINT
+  unset VDM_CERT_RESOLVER
   unset VDM_HTTP_SCHEME
   unset VDM_PERSISTENCE
   unset VDM_NOT_PERSISTENCE
