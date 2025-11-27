@@ -18,6 +18,7 @@ BACK_TITLE="    Octoleo | ${USER}@${SERVER_HOSTNAME}"
 
 #####################################################################################################################VDM
 ######################################## The environment preparation
+DOCKER_INSTALLED_THIS_SESSION=false
 # make sure curl is installed
 command -v curl >/dev/null 2>&1 || {
   echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script require curl."
@@ -124,6 +125,8 @@ function install_docker_linux() {
   # Enable and start the Docker service.
   sudo systemctl enable docker.service
   sudo systemctl start docker.service
+
+  DOCKER_INSTALLED_THIS_SESSION=true
   echo "Docker is installed."
 }
 # Check and install Docker on macOS
@@ -131,6 +134,7 @@ function install_docker_macos() {
   echo "Installing Docker on macOS..."
   brew install --cask docker
   open /Applications/Docker.app
+  DOCKER_INSTALLED_THIS_SESSION=true
   echo "Docker is installed. Please follow the prompts to complete the installation."
 }
 # Check and install Docker on Windows (MSYS/Cygwin)
@@ -6303,6 +6307,34 @@ case "$OS_NUMBER" in
     exit 1
     ;;
 esac
+# fix user permissions on Docker install
+if [ "$DOCKER_INSTALLED_THIS_SESSION" = true ]; then
+	if [ "$OS_NUMBER" -eq 1 ]; then
+		# LINUX SESSION REFRESH
+		if getInputYesNo "Docker was just installed.\n\nTo activate your new Docker permissions, your current session must refresh.\n\nWe can attempt an automatic refresh now (recommended).\n\nWould you like to apply the session update now?" \
+			"Docker Permission Activation" 8 112; then
+
+			# Attempt automatic group refresh
+			echo "Refreshing Docker permissions..."
+			sg docker -c "newgrp docker <<EOF
+echo 'Docker permissions activated successfully.'
+EOF"
+			if [ $? -eq 0 ]; then
+				showNotice "Your Docker permissions are now active. No logout/login required!"
+			else
+				showNotice "Automatic activation failed.\n\nPlease LOG OUT and LOG BACK IN to enable Docker."
+				exit 0
+			fi
+		else
+			showNotice "Docker installed.\n\nYou MUST log out and log back in before Docker will work."
+			exit 0
+		fi
+	else
+		# macOS / Windows
+		showNotice "Docker was installed.\n\nYou MUST restart your terminal/session for Docker to work correctly."
+		exit 0
+	fi
+fi
 # Set the src folder path based on OS
 VDM_SRC_PATH="${VDM_HOME_PATH}/.config/octojoom"
 # Create the folder if not set
