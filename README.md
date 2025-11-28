@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/macOS-tested-blue?logo=apple&logoColor=white" alt="macOS Tested">
   <img src="https://img.shields.io/badge/Windows-supported-0078D6?logo=windows&logoColor=white" alt="Windows Supported">
   <img src="https://img.shields.io/badge/License-GPLv2-blue.svg" alt="License GPLv2">
-  <img src="https://img.shields.io/badge/Version-3.7.1-orange" alt="Version 3.7.1">
+  <img src="https://img.shields.io/badge/Version-3.8.0-orange" alt="Version 3.8.0">
 </p>
 
 <p align="center">
