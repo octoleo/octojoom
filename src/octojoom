@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # The most recent program version.
-_VERSION="3.8.1"
+_VERSION="3.8.2"
 _V="3.8"
 
 # Bash version required
@@ -4639,27 +4639,32 @@ function setImageSource() {
 
 # check version
 function isVersionAbove() {
-    local tag="$1"
-    local target_version="$2"
-    local tag_major
-    local tag_minor
-    local target_major
-    local target_minor
+	local tag="$1"
+	local target_version="$2"
+	local tag_major
+	local tag_minor
+	local target_major
+	local target_minor
 
-    # Extract major and minor versions for the tag and the target_version
-    tag_major=$(echo "$tag" | awk -F'[.-]' '{print $1}')
-    tag_minor=$(echo "$tag" | awk -F'[.-]' '{print $2}')
-    target_major=$(echo "$target_version" | awk -F'.' '{print $1}')
-    target_minor=$(echo "$target_version" | awk -F'.' '{print $2}')
+	# Special case: "latest" is always valid
+	if [[ "$tag" == "latest" ]]; then
+		return 0
+	fi
 
-    # Compare major versions
-    if [[ "$tag_major" -gt "$target_major" ]]; then
-        return 0
-    elif [[ "$tag_major" -eq "$target_major" && "$tag_minor" -ge "$target_minor" ]]; then
-        return 0
-    fi
+	# Extract major and minor versions for the tag and the target_version
+	tag_major=$(echo "$tag" | awk -F'[.-]' '{print $1}')
+	tag_minor=$(echo "$tag" | awk -F'[.-]' '{print $2}')
+	target_major=$(echo "$target_version" | awk -F'.' '{print $1}')
+	target_minor=$(echo "$target_version" | awk -F'.' '{print $2}')
 
-    return 1
+	# Compare major versions
+	if [[ "$tag_major" -gt "$target_major" ]]; then
+		return 0
+	elif [[ "$tag_major" -eq "$target_major" && "$tag_minor" -ge "$target_minor" ]]; then
+		return 0
+	fi
+
+	return 1
 }
 
 # set persistence volumes
