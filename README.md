@@ -351,7 +351,7 @@ Remove Octojoom cleanly:
 octojoom --uninstall
 ```
 
-You’ll be asked to choose:
+You'll be asked to choose:
 
 * **Complete Uninstall:** Removes script, containers, and persistent volumes.
 * **Script Only:** Keeps containers but removes Octojoom.
@@ -376,14 +376,14 @@ We welcome contributions of all levels — from documentation to new distro supp
 5. **Submit** a pull request with a clear explanation
 
 > 💬 Found a bug or want to suggest improvements?
-> Open an issue — we’d love your feedback!
+> Open an issue — we'd love your feedback!
 
 ---
 
 ## 🧾 License
 
 ```text
-Copyright (C) 2021–2025
+Copyright (C) 2021-2026
 Llewellyn van der Merwe
 
 Licensed under the GNU General Public License v2 (GPLv2)

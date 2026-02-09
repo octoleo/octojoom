@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # The most recent program version.
-_VERSION="3.8.0"
+_VERSION="3.8.1"
 _V="3.8"
 
 # Bash version required
@@ -744,6 +744,11 @@ function joomla__TRuST__setup() {
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_EXTENSIONS_URLS=\"${VDM_J_EXTENSIONS_URLS}\""
       VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_EXTENSIONS_URLS=\${VDM_${VDM_ENV_KEY^^}_EXTENSIONS_URLS}")
     fi
+    if [[ -n "${VDM_J_CLI_COMMANDS}" && "${#VDM_J_CLI_COMMANDS}" -gt 2 ]]; then
+      # add extra Joomla envs
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_CLI_COMMANDS=\"${VDM_J_CLI_COMMANDS}\""
+      VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_CLI_COMMANDS=\${VDM_${VDM_ENV_KEY^^}_CLI_COMMANDS}")
+    fi
   fi
   # add PHP settings
   VDM_PHP_PROJECT_PATH="${VDM_KEY}"
@@ -835,6 +840,7 @@ function joomla__TRuST__setup() {
   unset VDM_J_EMAIL
   unset VDM_J_PASSWORD
   unset VDM_J_EXTENSIONS_URLS
+  unset VDM_J_CLI_COMMANDS
   # container lower
   unset vdm_database_name
   unset vdm_database_user
@@ -1068,6 +1074,7 @@ function joomla__TRuST__bulk() {
   # we only do autodeploy for Joomla 4.3 and above
   enable_autodeploy=false
   enable_extension_autodeploy=false
+  enable_command_autodeploy=false
   if isVersionAbove "$VDM_JV" "4.3"; then
     # get website setup details
     setJoomlaWebsiteDetails
@@ -1075,6 +1082,9 @@ function joomla__TRuST__bulk() {
       enable_autodeploy=true
       if [[ -n "${VDM_J_EXTENSIONS_URLS}" && "${#VDM_J_EXTENSIONS_URLS}" -gt 2 ]]; then
         enable_extension_autodeploy=true
+      fi
+      if [[ -n "${VDM_J_CLI_COMMANDS}" && "${#VDM_J_CLI_COMMANDS}" -gt 2 ]]; then
+        enable_command_autodeploy=true
       fi
     fi
   fi
@@ -1149,6 +1159,11 @@ function joomla__TRuST__bulk() {
         # add extra Joomla envs
         setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_EXTENSIONS_URLS=\"${VDM_J_EXTENSIONS_URLS}\""
         VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_EXTENSIONS_URLS=\${VDM_${VDM_ENV_KEY^^}_EXTENSIONS_URLS}")
+      fi
+      if $enable_command_autodeploy; then
+        # add extra Joomla envs
+        setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_CLI_COMMANDS=\"${VDM_J_CLI_COMMANDS}\""
+        VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_CLI_COMMANDS=\${VDM_${VDM_ENV_KEY^^}_CLI_COMMANDS}")
       fi
     fi
     # set persistence
@@ -1275,6 +1290,7 @@ function joomla__TRuST__bulk() {
   unset VDM_J_EMAIL
   unset VDM_J_PASSWORD
   unset VDM_J_EXTENSIONS_URLS
+  unset VDM_J_CLI_COMMANDS
   # container lower
   unset vdm_database_name
   unset vdm_database_user
@@ -3957,18 +3973,21 @@ function getImageSource() {
   local image_source
   local images_source
   local default
+  local default_joomengine
   local default_octojoom
   # menu for dynamic addition
   local menu_options=()
   # our counter
-  local i=2
+  local i=3
   # set the defaults
   default="joomla|https://hub.docker.com/_/joomla?tab=tags;https://raw.githubusercontent.com/joomla-docker/docker-joomla/master/docker-entrypoint.sh"
+  default_joomengine="octoleo/joomengine|https://hub.docker.com/r/octoleo/joomengine/tags;https://raw.githubusercontent.com/octoleo/joomengine/refs/heads/master/src/docker/docker-entrypoint.sh"
   default_octojoom="llewellyn/joomla|https://hub.docker.com/r/llewellyn/joomla/tags;https://raw.githubusercontent.com/octoleo/docker-joomla/refs/heads/octoleo/docker-entrypoint.sh"
   # we only ask if we are in expert mode
   if isExpert; then
     # set the base images source
     menu_options+=("${default}" "Joomla official image" "OFF")
+    menu_options+=("${default_joomengine}" "JoomEngine official image" "OFF")
     menu_options+=("${default_octojoom}" "Octoleo Joomla image" "OFF")
     # get existing source
     if [ -f "${VDM_SRC_PATH}/.images-source" ] && readarray -t images_source <"${VDM_SRC_PATH}/.images-source"; then
@@ -3982,7 +4001,9 @@ function getImageSource() {
           image_desc="${image##*,}"
           # make sure we have a value, and it is not the defaults already set
           if [ "${#image_name}" -ge 1 ] && [ "${#image_desc}" -ge 1 ] &&
-            [ "${image_name}" != "${default}" ] && [ "${image_name}" != "${default_octojoom}" ]; then
+            [ "${image_name}" != "${default}" ] &&
+            [ "${image_name}" != "${default_joomengine}" ] &&
+            [ "${image_name}" != "${default_octojoom}" ]; then
             # load the source name and description
             menu_options+=("${image_name}" "${image_desc}" "OFF")
             # increment our counter
@@ -4324,6 +4345,11 @@ function setJoomlaWebsiteDetails() {
 
     # ask for extension URLs
     setJoomlaExtensionUrls
+
+    # ask for the commands if we are targeting the correct set of images
+    if [[ "${VDM_J_REPO}" == "octoleo/joomengine" ]]; then
+      setJoomlaCommands
+    fi
   fi
 }
 
@@ -4446,6 +4472,70 @@ function setJoomlaExtensionUrls() {
     fi
 }
 
+# This function asks for Joomla commands using whiptail, validates them,
+# and concatenates them into a single environment variable.
+function setJoomlaCommands() {
+    local j_commands=()
+    local input=""
+    local prompt_message="Enter Joomla cli command passed to cli/joomla.php script (leave empty for none):"
+    local title="Enter a Joomla command"
+
+    # Loop to collect commands until an empty string or cancellation
+    while true; do
+        input=$(getInput "$prompt_message" "" "$title")
+
+        # Break loop if input is empty
+        if [[ -z "$input" ]]; then
+            break
+        fi
+
+        # Validate command format
+       if joomlaValidateCliCommand "$input"; then
+            j_commands+=("$input")
+        else
+            showNotice "Invalid Joomla CLI command. Please enter a valid joomla cli command." 10
+        fi
+    done
+
+    # Join Commands with semicolons
+    if [ ${#j_commands[@]} -gt 0 ]; then
+        VDM_J_CLI_COMMANDS=$(IFS=';'; echo "${j_commands[*]}")
+        export VDM_J_CLI_COMMANDS
+    fi
+}
+
+# Validate Joomla CLI command (ENV + Docker safe)
+function joomlaValidateCliCommand() {
+
+	local cmd="$1"
+	local len
+
+	# Must not be empty
+	[[ -n "$cmd" ]] || return 1
+
+	# Length check
+	len=${#cmd}
+	(( len >= 5 && len <= 4096 )) || return 1
+
+	# Must be single-line (no CR/LF)
+	[[ "$cmd" != *$'\n'* ]] || return 1
+	[[ "$cmd" != *$'\r'* ]] || return 1
+
+	# No NULL bytes
+	[[ "$cmd" != *$'\0'* ]] || return 1
+
+	# Only allow printable ASCII (space to tilde)
+	# This excludes control chars automatically
+	[[ "$cmd" =~ ^[[:print:]]+$ ]] || return 1
+
+	# Block shell command substitution
+	[[ "$cmd" != *'`'* ]] || return 1
+	# shellcheck disable=SC2016
+	[[ "$cmd" != *'$('* ]] || return 1
+
+	return 0
+}
+
 # set the number of containers to build
 function setNumberContainers() {
   local valid=0
@@ -4535,7 +4625,7 @@ function setImageSource() {
   # get the Joomla version if not set
   while [ ${#VDM_JV} -le 1 ]; do
     # get the value
-    VDM_JV=$(getInput "Enter Joomla version tag for this container.\n[See available tags here ${vdm_tag_url}]" '6.0' 'Enter Version Tag')
+    VDM_JV=$(getInput "Enter Joomla version tag for this container.\n[See available tags here ${vdm_tag_url}]" 'latest' 'Enter Version Tag')
     # keep asking
     [ ${#VDM_JV} -ge 1 ] || {
       showError "You must enter a version tag. See available tags here ${vdm_tag_url}"
