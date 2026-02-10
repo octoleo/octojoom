@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # The most recent program version.
-_VERSION="3.8.2"
+_VERSION="3.8.3"
 _V="3.8"
 
 # Bash version required
@@ -2728,7 +2728,7 @@ function clonePersistentVolume() {
     local persistent
     local new_persistent
     # get containers to enable
-    vdm_clone_volume=$(getSelectedDirectory "Select persistent volume\s to delete." \
+    vdm_clone_volume=$(getSelectedDirectory "Select persistent volume\s to clone." \
       "${VDM_PROJECT_PATH}" "Select Persistent Volume to Clone")
     # check that we have something, else return to main menu
     if [ ${#vdm_clone_volume} -ge 1 ]; then
@@ -4520,9 +4520,6 @@ function joomlaValidateCliCommand() {
 	# Must be single-line (no CR/LF)
 	[[ "$cmd" != *$'\n'* ]] || return 1
 	[[ "$cmd" != *$'\r'* ]] || return 1
-
-	# No NULL bytes
-	[[ "$cmd" != *$'\0'* ]] || return 1
 
 	# Only allow printable ASCII (space to tilde)
 	# This excludes control chars automatically
