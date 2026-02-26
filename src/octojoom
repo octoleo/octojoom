@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # The most recent program version.
-_VERSION="3.8.3"
+_VERSION="3.8.4"
 _V="3.8"
 
 # Bash version required
@@ -113,29 +113,206 @@ command -v awk >/dev/null 2>&1 || {
 # Check and install Docker on Linux
 function install_docker_linux() {
   echo "Installing Docker on Linux..."
- # Add Docker GPG key and repository to sources.list.
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-  # Update package index and install Docker.
-  sudo apt-get update
-  sudo apt-get install docker-ce docker-ce-cli containerd.io -y
+
+  # Detect the distribution.
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    DISTRO="${ID}"
+    # For derivatives (e.g., Linux Mint, Pop!_OS, Zorin), use the parent distro.
+    if [ -n "${ID_LIKE}" ]; then
+      case "${ID_LIKE}" in
+        *debian*|*ubuntu*) DISTRO_FAMILY="debian" ;;
+        *fedora*|*rhel*)   DISTRO_FAMILY="rhel" ;;
+        *suse*)            DISTRO_FAMILY="suse" ;;
+        *)                 DISTRO_FAMILY="${ID_LIKE}" ;;
+      esac
+    else
+      case "${DISTRO}" in
+        ubuntu|debian)          DISTRO_FAMILY="debian" ;;
+        fedora)                 DISTRO_FAMILY="fedora" ;;
+        centos|rhel|rocky|alma) DISTRO_FAMILY="rhel" ;;
+        opensuse*|sles)         DISTRO_FAMILY="suse" ;;
+        *)                      DISTRO_FAMILY="" ;;
+      esac
+    fi
+  else
+    echo >&2 "ERROR: Cannot detect Linux distribution. /etc/os-release not found."
+    exit 1
+  fi
+
+  # Remove any conflicting/unofficial Docker packages.
+  echo "Removing any conflicting Docker packages..."
+  case "${DISTRO_FAMILY}" in
+    debian)
+      # shellcheck disable=SC2086
+      for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
+        sudo apt-get remove -y "$pkg" 2>/dev/null || true
+      done
+      ;;
+    fedora|rhel)
+      for pkg in docker docker-client docker-client-latest docker-common \
+                 docker-latest docker-latest-logrotate docker-logrotate \
+                 docker-engine podman podman-docker containerd runc; do
+        sudo dnf remove -y "$pkg" 2>/dev/null || sudo yum remove -y "$pkg" 2>/dev/null || true
+      done
+      ;;
+    suse)
+      for pkg in docker docker-compose podman podman-docker containerd runc; do
+        sudo zypper remove -y "$pkg" 2>/dev/null || true
+      done
+      ;;
+  esac
+
+  # Install Docker based on the distribution family.
+  case "${DISTRO_FAMILY}" in
+    debian)
+      # Install prerequisites.
+      sudo apt-get update
+      sudo apt-get install -y ca-certificates curl gnupg
+
+      # Set up the official Docker GPG key.
+      sudo install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL "https://download.docker.com/linux/${DISTRO}/gpg" | \
+        sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+      # Add the Docker repository.
+      # For derivatives, map to the parent distro's repo.
+      REPO_DISTRO="${DISTRO}"
+      case "${DISTRO}" in
+        linuxmint|pop|zorin|elementary|neon|kali) REPO_DISTRO="ubuntu" ;;
+        raspbian)                                  REPO_DISTRO="debian" ;;
+      esac
+
+      # Use VERSION_CODENAME, fall back to UBUNTU_CODENAME for derivatives.
+      CODENAME="${VERSION_CODENAME}"
+      if [ -z "${CODENAME}" ] && [ -n "${UBUNTU_CODENAME}" ]; then
+        CODENAME="${UBUNTU_CODENAME}"
+      fi
+
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+        https://download.docker.com/linux/${REPO_DISTRO} ${CODENAME} stable" | \
+        sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+      # Install Docker Engine, CLI, containerd, and Compose plugin.
+      sudo apt-get update
+      sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
+        docker-buildx-plugin docker-compose-plugin
+      ;;
+
+    fedora)
+      # Install prerequisites.
+      sudo dnf install -y dnf-plugins-core
+
+      # Add the Docker repository.
+      sudo dnf config-manager --add-repo \
+        https://download.docker.com/linux/fedora/docker-ce.repo
+
+      # Install Docker Engine, CLI, containerd, and Compose plugin.
+      sudo dnf install -y docker-ce docker-ce-cli containerd.io \
+        docker-buildx-plugin docker-compose-plugin
+      ;;
+
+    rhel)
+      # Works for CentOS, RHEL, Rocky Linux, AlmaLinux.
+      if command -v dnf &>/dev/null; then
+        sudo dnf install -y dnf-plugins-core
+        sudo dnf config-manager --add-repo \
+          https://download.docker.com/linux/centos/docker-ce.repo
+        sudo dnf install -y docker-ce docker-ce-cli containerd.io \
+          docker-buildx-plugin docker-compose-plugin
+      else
+        sudo yum install -y yum-utils
+        sudo yum-config-manager --add-repo \
+          https://download.docker.com/linux/centos/docker-ce.repo
+        sudo yum install -y docker-ce docker-ce-cli containerd.io \
+          docker-buildx-plugin docker-compose-plugin
+      fi
+      ;;
+
+    suse)
+      # openSUSE / SLES.
+      sudo zypper addrepo \
+        https://download.docker.com/linux/sles/docker-ce.repo 2>/dev/null || true
+      sudo zypper refresh
+      sudo zypper install -y docker-ce docker-ce-cli containerd.io \
+        docker-buildx-plugin docker-compose-plugin
+      ;;
+
+    *)
+      echo >&2 "ERROR: Unsupported Linux distribution '${DISTRO}' (family: '${DISTRO_FAMILY}')."
+      echo >&2 "Please install Docker manually: https://docs.docker.com/engine/install/"
+      exit 1
+      ;;
+  esac
+
+  # Create the docker group (may already exist).
+  sudo groupadd docker 2>/dev/null || true
+
   # Add the current user to the docker group.
-  sudo groupadd docker
   sudo usermod -aG docker "$USER"
+
   # Enable and start the Docker service.
   sudo systemctl enable docker.service
   sudo systemctl start docker.service
+  sudo systemctl enable containerd.service
+  sudo systemctl start containerd.service
 
   DOCKER_INSTALLED_THIS_SESSION=true
   echo "Docker is installed."
+  docker --version
+  docker compose version
 }
 # Check and install Docker on macOS
 function install_docker_macos() {
   echo "Installing Docker on macOS..."
+  # Check if Homebrew is installed.
+  if ! command -v brew &>/dev/null; then
+    echo "Homebrew is not installed. Installing Homebrew first..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # Add Homebrew to PATH for Apple Silicon Macs (default install location changed).
+    if [[ -f /opt/homebrew/bin/brew ]]; then
+      eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [[ -f /usr/local/bin/brew ]]; then
+      eval "$(/usr/local/bin/brew shellenv)"
+    fi
+    if ! command -v brew &>/dev/null; then
+      echo >&2 "ERROR: Homebrew installation failed. Please install it manually:"
+      echo >&2 "https://brew.sh"
+      exit 1
+    fi
+  fi
+  # Check if Docker Desktop is already installed but just not in PATH.
+  if [[ -d "/Applications/Docker.app" ]]; then
+    echo "Docker Desktop is already installed but Docker CLI is not available."
+    echo "Starting Docker Desktop..."
+    open /Applications/Docker.app
+    echo "Please wait for Docker Desktop to finish starting, then re-run this script."
+    exit 0
+  fi
+  # Install Docker Desktop via Homebrew.
   brew install --cask docker
+  # Start Docker Desktop.
   open /Applications/Docker.app
+  # Wait for Docker daemon to become available.
+  echo "Waiting for Docker Desktop to start..."
+  TIMEOUT=120
+  ELAPSED=0
+  while ! docker info &>/dev/null; do
+    if [[ ${ELAPSED} -ge ${TIMEOUT} ]]; then
+      echo >&2 "WARNING: Docker Desktop did not start within ${TIMEOUT} seconds."
+      echo >&2 "Please finish setup manually, then re-run this script."
+      exit 1
+    fi
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+    printf "."
+  done
+  echo ""
   DOCKER_INSTALLED_THIS_SESSION=true
-  echo "Docker is installed. Please follow the prompts to complete the installation."
+  echo "Docker is installed and running."
+  docker --version
+  docker compose version
 }
 # Check and install Docker on Windows (MSYS/Cygwin)
 function install_docker_windows() {
@@ -171,36 +348,53 @@ if ! command -v docker &>/dev/null; then
     exit 1
   fi
 fi
-# Install Docker Compose on Linux
+# Install Docker Compose V2 plugin on Linux (via package manager)
 function install_docker_compose_linux() {
-  echo "Installing Docker Compose on Linux..."
-  # Download the latest Docker Compose binary.
-  COMPOSE_VERSION=$(curl --silent https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-  sudo curl -SL "https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-  # Make the Docker Compose binary executable.
-  sudo chmod +x /usr/local/bin/docker-compose
-  sudo ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
-  echo "Docker Compose is installed."
+  echo "Installing Docker Compose plugin on Linux..."
+  # The official Docker repo (which should already be configured if Docker is installed)
+  # provides the Compose plugin as a package.
+  if command -v apt-get &>/dev/null; then
+    sudo apt-get update
+    sudo apt-get install -y docker-compose-plugin
+  elif command -v dnf &>/dev/null; then
+    sudo dnf install -y docker-compose-plugin
+  elif command -v yum &>/dev/null; then
+    sudo yum install -y docker-compose-plugin
+  else
+    echo >&2 "ERROR: Could not detect a supported package manager (apt, dnf, yum)."
+    echo >&2 "Please install docker-compose-plugin manually."
+    exit 1
+  fi
+  echo "Docker Compose plugin is installed."
+  docker compose version
 }
-# Install Docker Compose on macOS
+# Install Docker Compose V2 plugin on macOS
 function install_docker_compose_macos() {
-  echo "Installing Docker Compose on macOS..."
-  # Download the latest Docker Compose binary.
+  echo "Installing Docker Compose plugin on macOS..."
+  # Docker Desktop for macOS includes Compose V2 by default.
+  # If Docker Desktop is installed, the plugin should already be available.
+  if docker compose version &>/dev/null; then
+    echo "Docker Compose plugin is already available via Docker Desktop."
+    docker compose version
+    return 0
+  fi
+  # If not available (e.g., Docker installed via Homebrew without Desktop), install manually.
+  mkdir -p "$HOME/.docker/cli-plugins"
   COMPOSE_VERSION=$(curl --silent https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-  sudo curl -SL "https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-  # Make the Docker Compose binary executable.
-  sudo chmod +x /usr/local/bin/docker-compose
-  sudo ln -s /usr/local/bin/docker-compose /usr/local/bin/docker-compose
-  echo "Docker Compose is installed."
+  curl -SL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" \
+    -o "$HOME/.docker/cli-plugins/docker-compose"
+  chmod +x "$HOME/.docker/cli-plugins/docker-compose"
+  echo "Docker Compose plugin v${COMPOSE_VERSION} is installed."
 }
 # Install Docker Compose on Windows (MSYS/Cygwin)
 function install_docker_compose_windows() {
-  echo "Please download Docker Compose from https://github.com/docker/compose/releases"
-  echo "and place it in a directory included in your PATH."
+  echo "Docker Desktop for Windows includes Docker Compose V2 by default."
+  echo "Please install or update Docker Desktop from https://www.docker.com/products/docker-desktop/"
+  echo "After installation, 'docker compose' will be available."
   exit 0
 }
 # Check if Docker Compose is installed
-if ! command -v docker-compose &>/dev/null; then
+if ! docker compose version &>/dev/null; then
   # If Docker Compose is not installed, ask the user if they want to install it
   if whiptail --yesno "Docker Compose is not installed. Do you want to install it now?" \
         --backtitle "${BACK_TITLE}" 10 60; then
@@ -223,7 +417,7 @@ if ! command -v docker-compose &>/dev/null; then
   else
     # If the user chooses No, exit the script with an error message
     echo >&2 "ERROR: ${PROGRAM_NAME} v${_VERSION} script requires docker-compose."
-    echo >&2 "NOTICE: Please install docker-compose first and then re-run this script again."
+    echo >&2 "NOTICE: Please install docker compose first and then re-run this script again."
     exit 1
   fi
 fi
@@ -1678,8 +1872,8 @@ function joomla__TRuST__enable() {
       }
       # make sure the docker image is started
       # shellcheck disable=SC2015
-      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" up -d || {
-        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" up -d
+      [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" up -d || {
+        docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" up -d
       }
     else
       showError "The (${VDM_CONTAINER}) container does not exist."
@@ -1717,8 +1911,8 @@ function joomla__TRuST__enable() {
         }
         # make sure the docker image is started
         # shellcheck disable=SC2015
-        [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" up -d || {
-          docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" up -d
+        [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" up -d || {
+          docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" up -d
         }
       done
     fi
@@ -1750,8 +1944,8 @@ function openssh__TRuST__enable() {
       }
       # make sure the docker image is started
       # shellcheck disable=SC2015
-      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" up -d || {
-        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" up -d
+      [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" up -d || {
+        docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" up -d
       }
     else
       showError "The (${VDM_CONTAINER}) container does not exist."
@@ -1789,8 +1983,8 @@ function openssh__TRuST__enable() {
         }
         # make sure the docker image is started
         # shellcheck disable=SC2015
-        [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" up -d || {
-          docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" up -d
+        [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" up -d || {
+          docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" up -d
         }
       done
     fi
@@ -1814,8 +2008,8 @@ function traefik__TRuST__enable() {
     }
     # make sure the docker image is started
     # shellcheck disable=SC2015
-    [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" up -d || {
-      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" up -d
+    [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" up -d || {
+      docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" up -d
     }
   fi
 }
@@ -1837,8 +2031,8 @@ function portainer__TRuST__enable() {
     }
     # make sure the docker image is started
     # shellcheck disable=SC2015
-    [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" up -d || {
-      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" up -d
+    [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" up -d || {
+      docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" up -d
     }
   fi
 }
@@ -1862,8 +2056,8 @@ function joomla__TRuST__disable() {
       }
       # make sure the docker image is stopped
       # shellcheck disable=SC2015
-      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans || {
-        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans
+      [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans || {
+        docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans
       }
       # then remove soft link
       rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
@@ -1897,8 +2091,8 @@ function joomla__TRuST__disable() {
         }
         # make sure the docker image is stopped
         # shellcheck disable=SC2015
-        [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans || {
-          docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans
+        [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans || {
+          docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans
         }
         # then remove soft link
         rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
@@ -1926,8 +2120,8 @@ function openssh__TRuST__disable() {
       }
       # make sure the docker image is stopped
       # shellcheck disable=SC2015
-      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans || {
-        docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans
+      [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans || {
+        docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}/docker-compose.yml" down --remove-orphans
       }
       # then remove soft link
       rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}"
@@ -1961,8 +2155,8 @@ function openssh__TRuST__disable() {
         }
         # make sure the docker image is stopped
         # shellcheck disable=SC2015
-        [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans || {
-          docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans
+        [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans || {
+          docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down --remove-orphans
         }
         # then remove soft link
         rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
@@ -1988,8 +2182,8 @@ function traefik__TRuST__disable() {
     }
     # make sure the docker image is stopped
     # shellcheck disable=SC2015
-    [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down || {
-      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
+    [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down || {
+      docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
     }
   fi
 }
@@ -2011,8 +2205,8 @@ function portainer__TRuST__disable() {
     }
     # make sure the docker image is stopped
     # shellcheck disable=SC2015
-    [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down || {
-      docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
+    [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down || {
+      docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
     }
   fi
 }
@@ -2041,8 +2235,8 @@ function joomla__TRuST__up() {
       }
       # make sure the docker image is started
       # shellcheck disable=SC2015
-      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${yml}" up -d || {
-        docker-compose --file "${yml}" up -d
+      [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${yml}" up -d || {
+        docker compose --file "${yml}" up -d
       }
     done
   fi
@@ -2072,8 +2266,8 @@ function openssh__TRuST__up() {
       }
       # make sure the docker image is started
       # shellcheck disable=SC2015
-      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${yml}" up -d || {
-        docker-compose --file "${yml}" up -d
+      [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${yml}" up -d || {
+        docker compose --file "${yml}" up -d
       }
     done
   fi
@@ -2101,8 +2295,8 @@ function joomla__TRuST__down() {
       }
       # make sure the docker image is started
       # shellcheck disable=SC2015
-      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${yml}" down || {
-        docker-compose --file "${yml}" down
+      [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${yml}" down || {
+        docker compose --file "${yml}" down
       }
     done
   fi
@@ -2129,8 +2323,8 @@ function openssh__TRuST__down() {
       }
       # make sure the docker image is started
       # shellcheck disable=SC2015
-      [ ${#evn_file} -ge 1 ] && docker-compose --env-file "${evn_file}" --file "${yml}" down || {
-        docker-compose --file "${yml}" down
+      [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${yml}" down || {
+        docker compose --file "${yml}" down
       }
     done
   fi
@@ -2198,7 +2392,7 @@ function joomla__TRuST__delete() {
         # check if the container is still enabled
         if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ]; then
           # make sure the docker image is stopped
-          docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down
+          docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down
           # then remove soft link
           rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
         fi
@@ -2246,7 +2440,7 @@ function openssh__TRuST__delete() {
         # check if the container is still enabled
         if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ]; then
           # make sure the docker image is stopped
-          docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down
+          docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down
           # then remove soft link
           rm -fr "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
         fi
@@ -2269,7 +2463,7 @@ function traefik__TRuST__delete() {
     showError "There is no ${VDM_CONTAINER_TYPE^} container to delete."
   else
     # make sure the docker image is stopped
-    docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
+    docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
     # before deleting the config we ask to make sure
     if getInputYesNo "Would you like to delete the ${VDM_CONTAINER_TYPE^} container's docker-compose.yml file?" \
       "Delete Docker Compose Yaml" 8 112; then
@@ -2287,7 +2481,7 @@ function portainer__TRuST__delete() {
     showError "There is no ${VDM_CONTAINER_TYPE^} container to delete."
   else
     # make sure the docker image is stopped
-    docker-compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
+    docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/docker-compose.yml" down
     # before deleting the config we ask to make sure
     if getInputYesNo "Would you like to delete the ${VDM_CONTAINER_TYPE^} container's docker-compose.yml file?" \
       "Delete Docker Compose Yaml" 8 112; then
