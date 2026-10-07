@@ -2785,7 +2785,7 @@ function fixContainersPermissions() {
           # Change the folder permissions
           progressSwitchOn
           {
-            sudo find /"home/${USER}/Projects/${persistent}/joomla" -type d -exec chmod 755 {} \;
+            sudo find "${VDM_PROJECT_PATH}/${persistent}/joomla" -type d -exec chmod 755 {} \;
             # lock jetbrains folder
             [ -e "${VDM_PROJECT_PATH}/${persistent}/joomla/.idea" ] && {
               sudo chmod -R 700 "${VDM_PROJECT_PATH}/${persistent}/joomla/.idea"
