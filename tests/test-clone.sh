@@ -207,6 +207,62 @@ rewriteJoomlaComposeIdentity "${WORK}/extra-host/old.yml" "${WORK}/extra-host/go
 rc=$?
 [ "${rc}" -eq 2 ] && pass "rewrite refuses a hand added host it cannot rename" || fail "rewrite extra host returned ${rc}"
 
+# mounts written in a way the rewrite cannot rename must stop it, never be copied as they are
+for variant in unbraced absolute long-syntax; do
+  mkdir -p "${WORK}/mount-${variant}"
+  gen_compose jcb JCB jcb vdm.dev false false false false false false >"${WORK}/mount-${variant}/old.yml"
+  case "${variant}" in
+  unbraced) sed -i.bak 's#"${VDM_PROJECT_PATH}/jcb/db:#"$VDM_PROJECT_PATH/jcb/db:#' "${WORK}/mount-${variant}/old.yml" ;;
+  absolute) sed -i.bak 's#"${VDM_PROJECT_PATH}/jcb/db:#"/srv/data/jcb/db:#' "${WORK}/mount-${variant}/old.yml" ;;
+  long-syntax) printf '      - type: bind\n        source: /srv/data/jcb/db\n        target: /var/lib/mysql\n' >>"${WORK}/mount-${variant}/old.yml" ;;
+  esac
+  rm -f "${WORK}/mount-${variant}/old.yml.bak"
+  rewriteJoomlaComposeIdentity "${WORK}/mount-${variant}/old.yml" "${WORK}/mount-${variant}/got.yml" jcb test JCB TEST jcb test vdm.dev vdm.dev
+  rc=$?
+  [ "${rc}" -eq 2 ] && pass "rewrite refuses a ${variant} database mount" || fail "rewrite ${variant} database mount returned ${rc}"
+done
+
+# an old mount left commented out above the moved one: the active mount is the one that counts
+mkdir -p "${WORK}/mount-commented"
+gen_compose jcb JCB jcb vdm.dev false false false false false false |
+  awk '/^ *- "\$\{VDM_PROJECT_PATH\}\/jcb\/(db|joomla):/ {
+    old = $0; sub(/- /, "# - ", old); print old
+    new = $0; sub(/\/jcb\//, "/legacy/", new); print new
+    next
+  } { print }' >"${WORK}/mount-commented/old.yml"
+getJoomlaComposeIdentity "${WORK}/mount-commented/old.yml"
+[ "${VDM_SRC_PROJECT_FOLDER}" = "legacy" ] && pass "identity ignores a commented old mount" || fail "identity took folder ${VDM_SRC_PROJECT_FOLDER} from a comment"
+rewriteJoomlaComposeIdentity "${WORK}/mount-commented/old.yml" "${WORK}/mount-commented/got.yml" jcb test JCB TEST jcb test vdm.dev vdm.dev "${VDM_SRC_PROJECT_FOLDER}"
+rc=$?
+if [ "${rc}" -eq 0 ] && grep -v '^ *#' "${WORK}/mount-commented/got.yml" | grep -q 'PROJECT_PATH}/test/db:/var/lib/mysql' &&
+  ! grep -v '^ *#' "${WORK}/mount-commented/got.yml" | grep -q 'legacy'; then
+  pass "rewrite moves the active mounts when an old one is commented out"
+else
+  fail "rewrite commented mount: returned ${rc}" "$(grep -n 'PROJECT_PATH' "${WORK}/mount-commented/got.yml")"
+fi
+# the same file, with the folder taken from the comment as the old code did, must be refused
+rewriteJoomlaComposeIdentity "${WORK}/mount-commented/old.yml" "${WORK}/mount-commented/got2.yml" jcb test JCB TEST jcb test vdm.dev vdm.dev jcb
+rc=$?
+[ "${rc}" -eq 2 ] && pass "rewrite refuses when the active mounts stay on another folder" || fail "rewrite stale folder returned ${rc}"
+
+# host rules the rewrite cannot rename must stop it
+for variant in double-quotes two-hosts regexp; do
+  mkdir -p "${WORK}/host-${variant}"
+  gen_compose jcb JCB jcb vdm.dev false false false false false false >"${WORK}/host-${variant}/old.yml"
+  case "${variant}" in
+  double-quotes) sed -i.bak 's/rule=Host(`jcb.vdm.dev`)/rule=Host(\\"jcb.vdm.dev\\")/' "${WORK}/host-${variant}/old.yml" ;;
+  two-hosts) sed -i.bak 's/rule=Host(`jcb.vdm.dev`)/rule=Host(`jcb.vdm.dev`, `www.jcb.vdm.dev`)/' "${WORK}/host-${variant}/old.yml" ;;
+  regexp) sed -i.bak 's/rule=Host(`jcb.vdm.dev`)/rule=HostRegexp(`^jcb[.]vdm[.]dev$`)/' "${WORK}/host-${variant}/old.yml" ;;
+  esac
+  rm -f "${WORK}/host-${variant}/old.yml.bak"
+  rewriteJoomlaComposeIdentity "${WORK}/host-${variant}/old.yml" "${WORK}/host-${variant}/got.yml" jcb test JCB TEST jcb test vdm.dev vdm.dev
+  rc=$?
+  [ "${rc}" -eq 2 ] && pass "rewrite refuses a ${variant} host rule" || fail "rewrite ${variant} host rule returned ${rc}"
+done
+
+# a sub-domain typed with capitals is still the clone's own host
+rewrite_case mixed-case-sub     jcb    JCB    jcb    vdm.dev    true  true   false false false false  test    TEST    Test    vdm.dev
+
 # the rewrite never touches the router name of another service on a Host line
 if grep -q 'routers.joomlashop.rule=Host(`shop.joomlasite.com`)' "${WORK}/key-in-domain/got.yml"; then
   pass "rewrite key-in-domain renames the router and keeps the domain"

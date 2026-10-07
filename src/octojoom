@@ -3446,8 +3446,8 @@ function getJoomlaComposeIdentity() {
   [ -f "${yml}" ] || return 1
   # the key is the suffix of the database container name
   VDM_SRC_KEY=$(sed -nE 's/^[[:space:]]*container_name:[[:space:]]*mariadb([A-Za-z]+)[[:space:]]*$/\1/p' "${yml}" | head -n 1)
-  # the env key is the middle part of the database name variable
-  VDM_SRC_ENV_KEY=$(sed -nE 's/^.*MARIADB_DATABASE=[$][{]VDM_([A-Za-z]+)_DB[}].*$/\1/p' "${yml}" | head -n 1)
+  # the env key is the middle part of the database name variable (comment lines are ignored)
+  VDM_SRC_ENV_KEY=$(sed -nE '/^[[:space:]]*#/!s/^.*MARIADB_DATABASE=[$][{]VDM_([A-Za-z]+)_DB[}].*$/\1/p' "${yml}" | head -n 1)
   if [ ${#VDM_SRC_KEY} -lt 1 ] || [ ${#VDM_SRC_ENV_KEY} -lt 1 ]; then
     return 1
   fi
@@ -3455,10 +3455,10 @@ function getJoomlaComposeIdentity() {
   grep -qE "^[[:space:]]*container_name:[[:space:]]*mailcatcher${VDM_SRC_KEY}[[:space:]]*$" "${yml}" && VDM_SRC_MAILCATCHER=true
   grep -qE "^[[:space:]]*-[[:space:]]*${VDM_SRC_KEY,,}_(web|db):/var/" "${yml}" && VDM_SRC_NAMED_VOLUMES=true
   grep -qE 'entrypoints=websecure|tls\.certresolver=' "${yml}" && VDM_SRC_SECURE=true
-  # the project folder (persistent volume) named in the bind mounts
-  VDM_SRC_PROJECT_FOLDER=$(sed -nE 's#^.*PROJECT_PATH[}]/([^/]+)/db:/var/lib/mysql.*$#\1#p' "${yml}" | head -n 1)
+  # the project folder (persistent volume) named in the active bind mounts (comment lines are ignored)
+  VDM_SRC_PROJECT_FOLDER=$(sed -nE '/^[[:space:]]*#/!s#^.*PROJECT_PATH[}]/([^/]+)/db:/var/lib/mysql.*$#\1#p' "${yml}" | head -n 1)
   [ -n "${VDM_SRC_PROJECT_FOLDER}" ] ||
-    VDM_SRC_PROJECT_FOLDER=$(sed -nE 's#^.*PROJECT_PATH[}]/([^/]+)/joomla:/var/www/html.*$#\1#p' "${yml}" | head -n 1)
+    VDM_SRC_PROJECT_FOLDER=$(sed -nE '/^[[:space:]]*#/!s#^.*PROJECT_PATH[}]/([^/]+)/joomla:/var/www/html.*$#\1#p' "${yml}" | head -n 1)
   export VDM_SRC_KEY
   export VDM_SRC_ENV_KEY
   export VDM_SRC_PROJECT_FOLDER
@@ -3503,7 +3503,12 @@ function rewriteJoomlaComposeIdentity() {
   local folder
   local folder_re
   local pattern
+  local active
   local mount
+  local mount_source
+  local mount_target
+  local mount_folder
+  local mount_volume
   local host
   local -a sed_args=()
   local -a leftovers=()
@@ -3539,28 +3544,48 @@ function rewriteJoomlaComposeIdentity() {
     leftovers+=('[$][{]VDM_'"${old_env}"'_('"${suffixes}"')[}]')
   fi
   sed -E "${sed_args[@]}" "${src}" > "${dst}" || return 1
+  # the checks below look at the active lines only (comments never reach docker compose)
+  active=$(sed -E '/^[[:space:]]*#/d' "${dst}")
   # make sure nothing of the old identity survived (host values are checked below)
   for pattern in "${leftovers[@]}"; do
     # shellcheck disable=SC2016
-    if sed -E 's/Host\(`[^`]*`\)/Host()/g' "${dst}" | grep -qE "${pattern}"; then
+    if printf '%s\n' "${active}" | sed -E 's/Host\(`[^`]*`\)/Host()/g' | grep -qE "${pattern}"; then
       return 2
     fi
   done
-  # every host must be one of the clone's own hosts
+  # a host rule must use the single backtick Host() form the rewrite understands
+  # (double quotes, several hosts in one Host() or HostRegexp() cannot be renamed safely)
+  # shellcheck disable=SC2016
+  if printf '%s\n' "${active}" | sed -E 's/Host\(`[^`]*`\)//g' | grep -qE 'Host(Regexp|SNI|SNIRegexp)?\('; then
+    return 2
+  fi
+  # every host must be one of the clone's own hosts (host names are not case sensitive)
   # shellcheck disable=SC2016
   while IFS= read -r host; do
-    case "${host}" in
-    "${new_sub}.${new_domain}" | "${new_sub}db.${new_domain}" | "${new_sub}mail.${new_domain}") ;;
+    case "${host,,}" in
+    "${new_sub,,}.${new_domain,,}" | "${new_sub,,}db.${new_domain,,}" | "${new_sub,,}mail.${new_domain,,}") ;;
     *) return 2 ;;
     esac
-  done < <(grep -oE 'Host\(`[^`]*`\)' "${dst}" | sed -E 's/^Host\(`(.*)`\)$/\1/')
-  # every project bind mount of the source must now be one of the clone's own
-  for mount in 'db:/var/lib/mysql' 'joomla:/var/www/html'; do
-    if grep -qE 'PROJECT_PATH[}]/[^/]+/'"${mount}" "${src}" &&
-      ! grep -qF "PROJECT_PATH}/${new_key}/${mount}" "${dst}"; then
+  done < <(printf '%s\n' "${active}" | grep -oE 'Host\(`[^`]*`\)' | sed -E 's/^Host\(`(.*)`\)$/\1/')
+  # the long volume syntax is never written by ${PROGRAM_NAME}, and cannot be checked
+  if printf '%s\n' "${active}" | grep -qE 'target:[[:space:]]*"?/var/(lib/mysql|www/html)/?"?[[:space:]]*$'; then
+    return 2
+  fi
+  # every database and web root mount must be the clone's own folder (or named volume)
+  while IFS= read -r mount; do
+    mount=$(printf '%s' "${mount}" | sed -E 's/^[[:space:]]*-[[:space:]]*//; s/^"//; s/"[[:space:]]*$//')
+    mount_source="${mount%%:/var/*}"
+    mount_target="${mount#"${mount_source}":}"
+    case "${mount_target%%:*}" in
+    /var/lib/mysql) mount_folder='db' mount_volume="${new_key,,}_db" ;;
+    *) mount_folder='joomla' mount_volume="${new_key,,}_web" ;;
+    esac
+    # shellcheck disable=SC2016
+    if [ "${mount_source}" != '${VDM_PROJECT_PATH}/'"${new_key}/${mount_folder}" ] &&
+      [ "${mount_source}" != "${mount_volume}" ]; then
       return 2
     fi
-  done
+  done < <(printf '%s\n' "${active}" | grep -E ':/var/(lib/mysql|www/html)/?(:[a-z,]+)?"?[[:space:]]*$')
   return 0
 }
 
