@@ -42,7 +42,7 @@ extract_function() {
 }
 
 for fn in getYMLine1 getYMLine2 getYMLine3 joomlaContainer \
-  getJoomlaEnvSuffixes getJoomlaComposeIdentity rewriteJoomlaComposeIdentity \
+  getJoomlaEnvSuffixes getEscapedRegex getJoomlaComposeIdentity rewriteJoomlaComposeIdentity \
   getJoomlaConfigValue cloneJoomlaConfiguration cloneContainerEnvVariables \
   cloneContainerEnvFile removeContainerEnvVariables; do
   src=$(extract_function "${fn}")
@@ -177,6 +177,41 @@ rewrite_case upper-case-key       Jcb    JCB    jcb    vdm.dev    true  true   f
 rewrite_case named-volumes        jcb    JCB    jcb    vdm.dev    true  true   true  false false true   test    TEST    test    vdm.dev
 rewrite_case env-key-project      jcb    PROJECT jcb   vdm.dev    true  true   true  true  true  false  test    TEST    test    vdm.dev
 rewrite_case bulk-php-ini         abcde  ABCDE  site   vdm.dev    true  true   true  true  false false  test    TEST    test    vdm.dev   bulk
+rewrite_case key-in-domain        site   SITE   www    joomlasite.com true true false false false false  shop    SHOP    shop    joomlasite.com
+rewrite_case key-in-subdomain     jcb    JCB    joomlajcb vdm.dev true  true   false false false false  test    TEST    test    vdm.dev
+rewrite_case key-in-new-domain    jcb    JCB    jcb    vdm.dev    true  true   false false false false  test    TEST    shop    joomlajcb.dev
+
+# a source that mounts a project folder other than its key (hand edited, or a renamed folder)
+mkdir -p "${WORK}/mount-folder"
+gen_compose jcb JCB jcb vdm.dev true true true true true false |
+  sed 's#PROJECT_PATH}/jcb/#PROJECT_PATH}/legacy/#g' >"${WORK}/mount-folder/old.yml"
+gen_compose test TEST test vdm.dev true true true true true false >"${WORK}/mount-folder/expected.yml"
+rewriteJoomlaComposeIdentity "${WORK}/mount-folder/old.yml" "${WORK}/mount-folder/got.yml" jcb test JCB TEST jcb test vdm.dev vdm.dev legacy
+rc=$?
+if [ "${rc}" -eq 0 ] && diff -q "${WORK}/mount-folder/expected.yml" "${WORK}/mount-folder/got.yml" >/dev/null; then
+  pass "rewrite moves the mounts of a differently named project folder to the new key"
+else
+  fail "rewrite mount-folder: returned ${rc}" "$(diff "${WORK}/mount-folder/expected.yml" "${WORK}/mount-folder/got.yml" | head -n 10)"
+fi
+# without the folder the rewrite must refuse instead of keeping the source's mounts
+rewriteJoomlaComposeIdentity "${WORK}/mount-folder/old.yml" "${WORK}/mount-folder/got2.yml" jcb test JCB TEST jcb test vdm.dev vdm.dev
+rc=$?
+[ "${rc}" -eq 2 ] && pass "rewrite refuses when the source mounts stay unknown" || fail "rewrite unknown mount folder returned ${rc}"
+
+# a host that is not one of the source's hosts (hand added) must not be copied silently
+mkdir -p "${WORK}/extra-host"
+gen_compose jcb JCB jcb vdm.dev false true false false false false |
+  sed 's/rule=Host(`jcb.vdm.dev`)/rule=Host(`jcb.vdm.dev`) || Host(`www.customer.com`)/' >"${WORK}/extra-host/old.yml"
+rewriteJoomlaComposeIdentity "${WORK}/extra-host/old.yml" "${WORK}/extra-host/got.yml" jcb test JCB TEST jcb test vdm.dev vdm.dev
+rc=$?
+[ "${rc}" -eq 2 ] && pass "rewrite refuses a hand added host it cannot rename" || fail "rewrite extra host returned ${rc}"
+
+# the rewrite never touches the router name of another service on a Host line
+if grep -q 'routers.joomlashop.rule=Host(`shop.joomlasite.com`)' "${WORK}/key-in-domain/got.yml"; then
+  pass "rewrite key-in-domain renames the router and keeps the domain"
+else
+  fail "rewrite key-in-domain router line" "$(grep 'rule=Host' "${WORK}/key-in-domain/got.yml")"
+fi
 
 # the shared bulk/php.ini path must survive untouched
 if grep -q 'PROJECT_PATH}/bulk/php.ini' "${WORK}/bulk-php-ini/got.yml"; then

@@ -2461,6 +2461,11 @@ The clone needs the env values of the source container."
     showError "The (${project}) folder is not a Joomla project folder, it must have a joomla and a db sub-folder."
     return 0
   fi
+  if [ -n "${VDM_SRC_PROJECT_FOLDER}" ] && [ "${project}" != "${VDM_SRC_PROJECT_FOLDER}" ] &&
+    ! getInputYesNo "The docker-compose.yml of (${container}) mounts the (${VDM_SRC_PROJECT_FOLDER}) project folder, but you selected (${project}).\n\n\
+The clone will be a copy of (${project}). Would you like to continue?" "Different Project Folder" 12 112 "defaultno"; then
+    return 0
+  fi
   config="${VDM_PROJECT_PATH}/${project}/joomla/configuration.php"
   if [ ! -f "${config}" ]; then
     showError "The (${project}) project has no joomla/configuration.php file, so Joomla is not installed yet.\n\n\
@@ -2593,11 +2598,13 @@ The (${project}) folder needs $((needed / 1024)) MB but only $((available / 1024
   ### 14. the docker-compose.yml of the clone
   rc=0
   rewriteJoomlaComposeIdentity "${src_yml}" "${new_yml}" "${old_key}" "${VDM_KEY}" "${old_env}" "${new_env}" \
-    "${old_sub}" "${VDM_SUBDOMAIN}" "${old_domain}" "${VDM_DOMAIN}" || rc=$?
+    "${old_sub}" "${VDM_SUBDOMAIN}" "${old_domain}" "${VDM_DOMAIN}" "${VDM_SRC_PROJECT_FOLDER}" || rc=$?
   if [ "${rc}" -ne 0 ]; then
     if [ "${rc}" -eq 2 ]; then
-      showError "A value of the (${container}) container survived the rewrite of its docker-compose.yml, so the clone was rolled back.\n\n\
-Please open an issue and report octojoom-clone-error-2 with a copy of the docker-compose.yml."
+      showError "The docker-compose.yml of (${container}) has a value the clone cannot rename safely\n\
+(a container name, host, mount or env variable that still points at the source), so the clone was rolled back.\n\n\
+This happens when the file was edited by hand. Clone it by hand, or open an issue and report\n\
+octojoom-clone-error-2 with a copy of the docker-compose.yml." 14
     else
       showError "The docker-compose.yml of the clone could not be written, so the clone was rolled back."
     fi
@@ -3400,7 +3407,7 @@ function getJoomlaComposeIdentity() {
   # optional features
   grep -qE "^[[:space:]]*container_name:[[:space:]]*mailcatcher${VDM_SRC_KEY}[[:space:]]*$" "${yml}" && VDM_SRC_MAILCATCHER=true
   grep -qE "^[[:space:]]*-[[:space:]]*${VDM_SRC_KEY,,}_(web|db):/var/" "${yml}" && VDM_SRC_NAMED_VOLUMES=true
-  grep -qE 'entrypoints=websecure' "${yml}" && VDM_SRC_SECURE=true
+  grep -qE 'entrypoints=websecure|tls\.certresolver=' "${yml}" && VDM_SRC_SECURE=true
   # the project folder (persistent volume) named in the bind mounts
   VDM_SRC_PROJECT_FOLDER=$(sed -nE 's#^.*PROJECT_PATH[}]/([^/]+)/db:/var/lib/mysql.*$#\1#p' "${yml}" | head -n 1)
   [ -n "${VDM_SRC_PROJECT_FOLDER}" ] ||
@@ -3414,14 +3421,24 @@ function getJoomlaComposeIdentity() {
   return 0
 }
 
+# escape a string for use inside an extended regular expression (also escapes the # delimiter)
+function getEscapedRegex() {
+  # shellcheck disable=SC2016
+  printf '%s' "${1:-}" | sed -e 's/[][\.*^$(){}?+|#/]/\\&/g'
+}
+
 # write a copy of a Joomla docker-compose.yml with a new identity
 # $1: source docker-compose.yml   $2: target docker-compose.yml
 # $3: old key                     $4: new key
 # $5: old env key                 $6: new env key
 # $7: old sub-domain              $8: new sub-domain
 # $9: old domain                  $10: new domain
+# $11 (optional): the project folder the source mounts, when it is not the old key
 # Keys are alphabetical only, so every token can be anchored on a non-letter.
-# returns 1 when the source is missing or sed failed, 2 when an old value survived the rewrite
+# Lines with a Traefik Host() rule are handled on their own, so a domain that happens
+# to contain a service name and the key (joomlasite.com with key site) is never touched.
+# returns 1 when the source is missing or sed failed,
+#         2 when a value of the source survived, or a host or mount is not the clone's own
 function rewriteJoomlaComposeIdentity() {
   local src="${1:-}"
   local dst="${2:-}"
@@ -3433,23 +3450,38 @@ function rewriteJoomlaComposeIdentity() {
   local new_sub="${8:-}"
   local old_domain="${9:-}"
   local new_domain="${10:-}"
+  local src_folder="${11:-$3}"
   local suffixes
   local old_domain_re
+  local folder
+  local folder_re
   local pattern
-  local host_suffix
-  local old_host
+  local mount
+  local host
   local -a sed_args=()
   local -a leftovers=()
   [ -f "${src}" ] || return 1
+  [ -n "${src_folder}" ] || src_folder="${old_key}"
   suffixes=$(getJoomlaEnvSuffixes)
-  # escape the dots of the domain for the regular expressions
-  old_domain_re="${old_domain//./\\.}"
+  old_domain_re=$(getEscapedRegex "${old_domain}")
+  # lines with a Traefik Host() rule: only the router name and the hosts change
+  # shellcheck disable=SC2016
+  sed_args+=(-e '/Host\(`/{')
+  sed_args+=(-e 's/(routers\.)(mariadb|joomla|phpmyadmin|mailcatcher)'"${old_key}"'\./\1\2'"${new_key}"'./g')
+  if [ "${old_sub}.${old_domain}" != "${new_sub}.${new_domain}" ]; then
+    # shellcheck disable=SC2016
+    sed_args+=(-e 's/Host\(`'"${old_sub}"'(db|mail)?\.'"${old_domain_re}"'`\)/Host(`'"${new_sub}"'\1.'"${new_domain}"'`)/g')
+  fi
+  sed_args+=(-e 'b' -e '}')
   # service names, container names, database host, SMTP host and Traefik router/service names
   sed_args+=(-e 's/(mariadb|joomla|phpmyadmin|mailcatcher)'"${old_key}"'([^A-Za-z]|$)/\1'"${new_key}"'\2/g')
   leftovers+=('(mariadb|joomla|phpmyadmin|mailcatcher)'"${old_key}"'([^A-Za-z]|$)')
   # bind mounts under the project path (joomla, db, php.ini, entrypoint.sh)
-  sed_args+=(-e 's#PROJECT_PATH[}]/'"${old_key}"'/#PROJECT_PATH}/'"${new_key}"'/#g')
-  leftovers+=('PROJECT_PATH[}]/'"${old_key}"'/')
+  for folder in "${src_folder}" "${old_key}"; do
+    folder_re=$(getEscapedRegex "${folder}")
+    sed_args+=(-e 's#PROJECT_PATH[}]/'"${folder_re}"'/#PROJECT_PATH}/'"${new_key}"'/#g')
+    leftovers+=('PROJECT_PATH[}]/'"${folder_re}"'/')
+  done
   # named volumes (expert mode without persistence)
   sed_args+=(-e 's/(^|[^A-Za-z_])'"${old_key,,}"'_(web|db)([^A-Za-z_]|$)/\1'"${new_key,,}"'_\2\3/g')
   leftovers+=('(^|[^A-Za-z_])'"${old_key,,}"'_(web|db)([^A-Za-z_]|$)')
@@ -3459,33 +3491,29 @@ function rewriteJoomlaComposeIdentity() {
     sed_args+=(-e 's/[$][{]VDM_'"${old_env}"'_('"${suffixes}"')[}]/${VDM_'"${new_env}"'_\1}/g')
     leftovers+=('[$][{]VDM_'"${old_env}"'_('"${suffixes}"')[}]')
   fi
-  # Traefik host rules (site, phpmyadmin and mailcatcher)
-  if [ "${old_sub}.${old_domain}" != "${new_sub}.${new_domain}" ]; then
-    # shellcheck disable=SC2016
-    sed_args+=(-e 's/Host\(`'"${old_sub}"'(db|mail)?\.'"${old_domain_re}"'`\)/Host(`'"${new_sub}"'\1.'"${new_domain}"'`)/g')
-  fi
   sed -E "${sed_args[@]}" "${src}" > "${dst}" || return 1
-  # make sure nothing of the old identity survived
+  # make sure nothing of the old identity survived (host values are checked below)
   for pattern in "${leftovers[@]}"; do
-    if grep -qE "${pattern}" "${dst}"; then
+    # shellcheck disable=SC2016
+    if sed -E 's/Host\(`[^`]*`\)/Host()/g' "${dst}" | grep -qE "${pattern}"; then
       return 2
     fi
   done
-  # the old hosts may not survive either, unless they are also hosts of the clone
-  # (a sub-domain (x) cloned to (y) where (y)db equals (x) is legitimate)
-  if [ "${old_sub}.${old_domain}" != "${new_sub}.${new_domain}" ]; then
-    for host_suffix in '' 'db' 'mail'; do
-      old_host="${old_sub}${host_suffix}.${old_domain}"
-      case "${old_host}" in
-      "${new_sub}.${new_domain}" | "${new_sub}db.${new_domain}" | "${new_sub}mail.${new_domain}")
-        continue
-        ;;
-      esac
-      if grep -qF 'Host(`'"${old_host}"'`)' "${dst}"; then
-        return 2
-      fi
-    done
-  fi
+  # every host must be one of the clone's own hosts
+  # shellcheck disable=SC2016
+  while IFS= read -r host; do
+    case "${host}" in
+    "${new_sub}.${new_domain}" | "${new_sub}db.${new_domain}" | "${new_sub}mail.${new_domain}") ;;
+    *) return 2 ;;
+    esac
+  done < <(grep -oE 'Host\(`[^`]*`\)' "${dst}" | sed -E 's/^Host\(`(.*)`\)$/\1/')
+  # every project bind mount of the source must now be one of the clone's own
+  for mount in 'db:/var/lib/mysql' 'joomla:/var/www/html'; do
+    if grep -qE 'PROJECT_PATH[}]/[^/]+/'"${mount}" "${src}" &&
+      ! grep -qF "PROJECT_PATH}/${new_key}/${mount}" "${dst}"; then
+      return 2
+    fi
+  done
   return 0
 }
 
