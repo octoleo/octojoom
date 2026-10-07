@@ -2401,7 +2401,7 @@ function cloneJoomlaContainer() {
   local new_yml
   local new_project
   local env_target
-  local env_added=false
+  local env_added=''
   local project_created=false
   local env_file
   local validation
@@ -2501,8 +2501,8 @@ Would you like to continue without changing the database host?" "Database Host M
   while true; do
     setEnvironmentKey
     new_env="${VDM_ENV_KEY^^}"
-    if ! ${per_container_env} && [ "${new_env}" != "${old_env}" ] && grep -qE "^VDM_${new_env}_DB=" "${shared_env}"; then
-      showError "The environment key (${new_env}) is already used in ${shared_env}, select another."
+    if ! ${per_container_env} && [ "${new_env}" != "${old_env}" ] && hasContainerEnvVariables "${shared_env}" "${new_env}"; then
+      showError "The environment key (${new_env}) already has values in ${shared_env}, select another."
       unset VDM_ENV_KEY
     else
       break
@@ -2583,16 +2583,15 @@ The (${project}) folder needs $((needed / 1024)) MB but only $((available / 1024
   if ${per_container_env}; then
     if ! cloneContainerEnvFile "${src_dir}/.env" "${env_target}" "${old_env}" "${new_env}"; then
       showError "The env file ${env_target} could not be written, nothing was changed."
-      cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" false "${new_env}"
+      cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" ''
       return 0
     fi
   elif [ "${old_env}" != "${new_env}" ]; then
-    if ! cloneContainerEnvVariables "${shared_env}" "${old_env}" "${new_env}"; then
+    if ! env_added=$(cloneContainerEnvVariables "${shared_env}" "${old_env}" "${new_env}"); then
       showError "The VDM_${new_env}_* values could not be added to ${shared_env}, nothing was changed."
-      cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" true "${new_env}"
+      cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" "${env_added}"
       return 0
     fi
-    env_added=true
   fi
   ##########################
   ### 14. the docker-compose.yml of the clone
@@ -2608,7 +2607,7 @@ octojoom-clone-error-2 with a copy of the docker-compose.yml." 14
     else
       showError "The docker-compose.yml of the clone could not be written, so the clone was rolled back."
     fi
-    cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" "${env_added}" "${new_env}"
+    cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" "${env_added}"
     return 0
   fi
   chmod 600 "${new_yml}"
@@ -2624,7 +2623,7 @@ octojoom-clone-error-2 with a copy of the docker-compose.yml." 14
     # shellcheck disable=SC2181
     if [ $? -ne 0 ]; then
       showError "docker compose rejected the docker-compose.yml of the clone, so the clone was rolled back:\n\n${validation}" 20
-      cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" "${env_added}" "${new_env}"
+      cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" "${env_added}"
       return 0
     fi
   fi
@@ -2634,7 +2633,7 @@ octojoom-clone-error-2 with a copy of the docker-compose.yml." 14
     showInfo "Stopping the (${container}) containers for the copy, please wait..." 7
     if ! composeSourceContainer "${container}" 'stop'; then
       showError "The (${container}) containers could not be stopped, so the clone was rolled back."
-      cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" "${env_added}" "${new_env}"
+      cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" "${env_added}"
       return 0
     fi
   fi
@@ -2662,7 +2661,7 @@ octojoom-clone-error-2 with a copy of the docker-compose.yml." 14
   if [ "${copy_status}" != "0" ]; then
     showError "The project folder could not be copied, so the clone was rolled back:\n\n$(cat "${VDM_SRC_PATH}/.clone_error" 2>/dev/null)" 16
     rm -f "${VDM_SRC_PATH}/.clone_status" "${VDM_SRC_PATH}/.clone_error"
-    cloneJoomlaRollback "${new_dir}" "${new_project}" "${project_created}" "${shared_env}" "${env_added}" "${new_env}"
+    cloneJoomlaRollback "${new_dir}" "${new_project}" "${project_created}" "${shared_env}" "${env_added}"
     return 0
   fi
   rm -f "${VDM_SRC_PATH}/.clone_status" "${VDM_SRC_PATH}/.clone_error"
@@ -2671,7 +2670,7 @@ octojoom-clone-error-2 with a copy of the docker-compose.yml." 14
   if ${patch_host}; then
     if ! cloneJoomlaConfiguration "${new_project}/joomla/configuration.php" "${old_key}" "${VDM_KEY}" "${site_name}"; then
       showError "The configuration.php of the clone could not be updated, so the clone was rolled back."
-      cloneJoomlaRollback "${new_dir}" "${new_project}" "${project_created}" "${shared_env}" "${env_added}" "${new_env}"
+      cloneJoomlaRollback "${new_dir}" "${new_project}" "${project_created}" "${shared_env}" "${env_added}"
       return 0
     fi
   fi
@@ -2740,14 +2739,15 @@ function composeSourceContainer() {
 
 # remove what a failed clone created, so the host is left as it was
 # $1: new compose directory   $2: new project folder   $3: true when the project folder was created
-# $4: shared env file         $5: true when env values were added to it   $6: new env key
+# $4: shared env file         $5: the env variable names added to it (one per line, as printed
+#                                 by cloneContainerEnvVariables)
 function cloneJoomlaRollback() {
   local new_dir="${1:-}"
   local new_project="${2:-}"
   local project_created="${3:-false}"
   local shared_env="${4:-}"
-  local env_added="${5:-false}"
-  local new_env="${6:-}"
+  local env_added="${5:-}"
+  local -a env_names=()
   # the compose directory (and a per-container .env in it)
   if [ -n "${new_dir}" ] && [ -d "${new_dir}" ]; then
     rm -rf "${new_dir}"
@@ -2757,9 +2757,11 @@ function cloneJoomlaRollback() {
     [[ "${new_project}" == "${VDM_PROJECT_PATH}/"?* ]]; then
     sudo rm -rf "${new_project}"
   fi
-  # the env values added to the shared env file
-  if [ "${env_added}" = "true" ]; then
-    removeContainerEnvVariables "${shared_env}" "${new_env}"
+  # only the env values this clone added to the shared env file
+  if [ -n "${env_added}" ]; then
+    mapfile -t env_names <<<"${env_added}"
+    removeContainerEnvVariables "${shared_env}" "${env_names[@]}" ||
+      showError "The VDM_* values added by the clone could not be removed from ${shared_env}.\n\nRemove these lines by hand:\n${env_added}" 16
   fi
 }
 
@@ -3582,6 +3584,7 @@ function cloneJoomlaConfiguration() {
 # $1: env file to read   $2: old env key   $3: new env key
 # $4 (optional): env file to write (default: the file read)
 # A line is only added when the new key does not already have that value.
+# Prints the name of every variable it added (one per line), so a rollback can remove exactly those.
 function cloneContainerEnvVariables() {
   local src_file="${1:-}"
   local old_env="${2:-}"
@@ -3591,10 +3594,17 @@ function cloneContainerEnvVariables() {
   local line
   local suffix
   local value
+  local -a lines=()
   [ -f "${src_file}" ] || return 1
   [ "${old_env}" = "${new_env}" ] && [ "${src_file}" = "${dst_file}" ] && return 0
   suffixes=$(getJoomlaEnvSuffixes)
-  while IFS= read -r line || [ -n "${line}" ]; do
+  # read everything first, so we never read the lines we append (source and target can be the same file)
+  mapfile -t lines < "${src_file}" || return 1
+  # the target must end with a new line, else the first value is glued onto its last line
+  if [ -s "${dst_file}" ] && [ -n "$(tail -c 1 "${dst_file}")" ]; then
+    printf '\n' >> "${dst_file}" || return 1
+  fi
+  for line in "${lines[@]}"; do
     [[ "${line}" =~ ^VDM_${old_env}_(${suffixes})=(.*)$ ]] || continue
     suffix="${BASH_REMATCH[1]}"
     value="${BASH_REMATCH[2]}"
@@ -3602,8 +3612,18 @@ function cloneContainerEnvVariables() {
       continue
     fi
     printf 'VDM_%s_%s=%s\n' "${new_env}" "${suffix}" "${value}" >> "${dst_file}" || return 1
-  done < "${src_file}"
+    echo "VDM_${new_env}_${suffix}"
+  done
   return 0
+}
+
+# check if an env file already has values for a Joomla env key
+# $1: env file   $2: env key
+function hasContainerEnvVariables() {
+  local env_file="${1:-}"
+  local env_key="${2:-}"
+  [ -f "${env_file}" ] && [ -n "${env_key}" ] &&
+    grep -qE "^VDM_${env_key}_($(getJoomlaEnvSuffixes))=" "${env_file}"
 }
 
 # copy a per-container env file for a cloned container, renaming the env key
@@ -3625,22 +3645,34 @@ function cloneContainerEnvFile() {
   return 0
 }
 
-# remove all env values of a Joomla env key from an env file (used to roll back a failed clone)
-# $1: env file   $2: env key
+# remove env variables by name from an env file (used to roll back a failed clone)
+# $1: env file   $2...: the variable names to remove (as printed by cloneContainerEnvVariables)
+# Only these exact names are removed; the file is replaced in one step, never truncated first.
 function removeContainerEnvVariables() {
   local env_file="${1:-}"
-  local env_key="${2:-}"
-  local suffixes
+  local name
+  local names=''
   local tmp_file
+  local rc
   [ -f "${env_file}" ] || return 0
-  [ -n "${env_key}" ] || return 0
-  suffixes=$(getJoomlaEnvSuffixes)
-  tmp_file="${env_file}_tmp"
+  shift
+  for name in "$@"; do
+    [[ "${name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    names+="${names:+|}${name}"
+  done
+  [ -n "${names}" ] || return 0
+  tmp_file=$(mktemp "${env_file}.XXXXXX") || return 1
   # grep returns 1 when no line is left, which is still a valid result
-  grep -vE "^VDM_${env_key}_(${suffixes})=" "${env_file}" > "${tmp_file}"
-  # write back into the existing file so its permissions are kept
-  cat "${tmp_file}" > "${env_file}"
-  rm -f "${tmp_file}"
+  grep -vE "^(${names})=" "${env_file}" > "${tmp_file}"
+  rc=$?
+  if [ "${rc}" -gt 1 ]; then
+    rm -f "${tmp_file}"
+    return 1
+  fi
+  if ! chmod 600 "${tmp_file}" || ! mv -f "${tmp_file}" "${env_file}"; then
+    rm -f "${tmp_file}"
+    return 1
+  fi
   return 0
 }
 

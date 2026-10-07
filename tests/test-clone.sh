@@ -44,7 +44,7 @@ extract_function() {
 for fn in getYMLine1 getYMLine2 getYMLine3 joomlaContainer \
   getJoomlaEnvSuffixes getEscapedRegex getJoomlaComposeIdentity rewriteJoomlaComposeIdentity \
   getJoomlaConfigValue cloneJoomlaConfiguration cloneContainerEnvVariables \
-  cloneContainerEnvFile removeContainerEnvVariables; do
+  hasContainerEnvVariables cloneContainerEnvFile removeContainerEnvVariables; do
   src=$(extract_function "${fn}")
   if [ -z "${src}" ]; then
     echo "FAIL - function ${fn} not found in ${SCRIPT}"
@@ -355,28 +355,57 @@ VDM_JCBX_DB="other"
 VDM_JCB_UNKNOWN="not copied"
 ENVFILE
 cp "${ENV}" "${ENV}.orig"
-cloneContainerEnvVariables "${ENV}" JCB TEST
+ADDED=$(cloneContainerEnvVariables "${ENV}" JCB TEST)
 rc=$?
 [ "${rc}" -eq 0 ] && pass "env copy returns 0" || fail "env copy returned ${rc}"
 [ "$(grep -c '^VDM_TEST_' "${ENV}")" -eq 9 ] && pass "env copy added the 9 known values" || fail "env copy added $(grep -c '^VDM_TEST_' "${ENV}") values" "$(grep '^VDM_TEST_' "${ENV}")"
+[ "$(printf '%s\n' "${ADDED}" | grep -c '^VDM_TEST_')" -eq 9 ] && pass "env copy reports the 9 names it added" || fail "env copy reported" "${ADDED}"
+hasContainerEnvVariables "${ENV}" TEST && pass "env key TEST is now in use" || fail "env key TEST not reported in use"
+hasContainerEnvVariables "${ENV}" JCBX && pass "env key JCBX is in use" || fail "env key JCBX not reported in use"
+hasContainerEnvVariables "${ENV}" NONE && fail "env key NONE reported in use" || pass "env key NONE is free"
 grep -qF 'VDM_TEST_DB_PASS="p@ss[word]"' "${ENV}" && pass "env copy keeps values verbatim" || fail "env copy changed a value"
 grep -qF 'VDM_TEST_PUID="#1000"' "${ENV}" && pass "env copy keeps the uid marker" || fail "env copy lost the uid marker"
 grep -q '^VDM_TEST_UNKNOWN' "${ENV}" && fail "env copy copied an unknown suffix" || pass "env copy skips unknown suffixes"
 [ "$(grep -c '^VDM_JCBX_DB=' "${ENV}")" -eq 1 ] && pass "env copy leaves other keys alone" || fail "env copy touched another key"
-cloneContainerEnvVariables "${ENV}" JCB TEST
-[ "$(grep -c '^VDM_TEST_' "${ENV}")" -eq 9 ] && pass "env copy is idempotent" || fail "env copy duplicated values"
-cloneContainerEnvVariables "${ENV}" JCB JCB
+AGAIN=$(cloneContainerEnvVariables "${ENV}" JCB TEST)
+[ "$(grep -c '^VDM_TEST_' "${ENV}")" -eq 9 ] && [ -z "${AGAIN}" ] && pass "env copy is idempotent" || fail "env copy duplicated values"
+cloneContainerEnvVariables "${ENV}" JCB JCB >/dev/null
 [ "$(grep -c '^VDM_JCB_' "${ENV}")" -eq 10 ] && pass "env copy with the same key is a no-op" || fail "env copy with the same key changed the file"
-removeContainerEnvVariables "${ENV}" TEST
+mapfile -t NAMES <<<"${ADDED}"
+removeContainerEnvVariables "${ENV}" "${NAMES[@]}"
 if diff -q "${ENV}.orig" "${ENV}" >/dev/null; then
   pass "env remove restores the original file"
 else
   fail "env remove left differences" "$(diff "${ENV}.orig" "${ENV}")"
 fi
+[ "$(stat -c '%a' "${ENV}" 2>/dev/null || stat -f '%Lp' "${ENV}")" = "600" ] && pass "env remove leaves the file mode 600" || fail "env remove file mode"
+ls "${ENV}".?????? >/dev/null 2>&1 && fail "env remove left a temp file" || pass "env remove leaves no temp file"
+
+# a value the clone did not add survives the rollback
+printf 'VDM_NEW_PUID="#1000"\nVDM_OLD_DB="db"\nVDM_OLD_PUID="#2000"\n' >"${WORK}/.env5"
+ADDED=$(cloneContainerEnvVariables "${WORK}/.env5" OLD NEW)
+mapfile -t NAMES <<<"${ADDED}"
+removeContainerEnvVariables "${WORK}/.env5" "${NAMES[@]}"
+if grep -qx 'VDM_NEW_PUID="#1000"' "${WORK}/.env5" && ! grep -q '^VDM_NEW_DB=' "${WORK}/.env5"; then
+  pass "env remove only removes what the clone added"
+else
+  fail "env remove removed a value it did not add" "$(cat "${WORK}/.env5")"
+fi
+removeContainerEnvVariables "${WORK}/.env5" && pass "env remove without names is a no-op" || fail "env remove without names failed"
+
+# a shared env file without a final new line must not get glued lines
+printf 'VDM_JCB_DB="x"\nVDM_JCB_DB_USER="u"' >"${WORK}/.env6"
+cloneContainerEnvVariables "${WORK}/.env6" JCB TEST >/dev/null
+if [ "$(wc -l <"${WORK}/.env6")" -eq 4 ] && grep -qx 'VDM_JCB_DB_USER="u"' "${WORK}/.env6" &&
+  grep -qx 'VDM_TEST_DB="x"' "${WORK}/.env6" && grep -qx 'VDM_TEST_DB_USER="u"' "${WORK}/.env6"; then
+  pass "env copy into a file without a final new line"
+else
+  fail "env copy into a file without a final new line" "$(cat -A "${WORK}/.env6" 2>/dev/null || cat "${WORK}/.env6")"
+fi
 
 # env key PROJECT must not drag VDM_PROJECT_PATH along
 printf 'VDM_PROJECT_PATH="/p"\nVDM_PROJECT_DB="db"\n' >"${WORK}/.env2"
-cloneContainerEnvVariables "${WORK}/.env2" PROJECT NEW
+cloneContainerEnvVariables "${WORK}/.env2" PROJECT NEW >/dev/null
 if grep -q '^VDM_NEW_DB="db"' "${WORK}/.env2" && ! grep -q '^VDM_NEW_PATH' "${WORK}/.env2"; then
   pass "env copy with key PROJECT leaves VDM_PROJECT_PATH alone"
 else
