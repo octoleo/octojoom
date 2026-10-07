@@ -2591,8 +2591,8 @@ Would you like to continue anyway?" "Database Is Running" 14 112 "defaultno"; th
     return 0
   fi
   ##########################
-  ### 11. we need sudo for the copy (db files are owned by the database user), where sudo exists
-  if command -v sudo >/dev/null 2>&1; then
+  ### 11. we need sudo for the copy (db files are owned by the database user), where sudo is used
+  if useSudo; then
     if ! getInputYesNo "${USER^}, to copy the project folder and update its configuration.php we need sudo privileges." \
         "Give sudo Privileges" 8 112; then
       showNotice "The clone was cancelled, nothing was changed." 8
@@ -3747,17 +3747,24 @@ function removeContainerEnvVariables() {
 }
 
 # check if a host name is already routed by Traefik for any container ${PROGRAM_NAME} knows
-# $1: host (sub.domain.tld)
+# $1: host (sub.domain.tld), compared without case like DNS and Traefik do
 function isJoomlaHostInUse() {
   local host="${1:-}"
   [ -n "${host}" ] || return 0
   # shellcheck disable=SC2016
-  grep -qsF 'Host(`'"${host}"'`)' "${VDM_REPO_PATH}/"*/available/*/docker-compose.yml "${VDM_REPO_PATH}/"*/docker-compose.yml
+  grep -qsiF 'Host(`'"${host}"'`)' "${VDM_REPO_PATH}/"*/available/*/docker-compose.yml "${VDM_REPO_PATH}/"*/docker-compose.yml
 }
 
-# run a command with sudo where sudo exists (Linux, macOS), else directly (Windows MSYS/Git Bash)
+# check if privileged commands should go through sudo
+# Linux and macOS use sudo; on Windows (MSYS/Git Bash) the files belong to the user, and a sudo
+# found there is the unrelated Windows sudo.exe, so commands run directly.
+function useSudo() {
+  [ "${OS_NUMBER:-0}" != "3" ] && command -v sudo >/dev/null 2>&1
+}
+
+# run a command with sudo where useSudo says so, else directly
 function runPrivileged() {
-  if command -v sudo >/dev/null 2>&1; then
+  if useSudo; then
     sudo "$@"
   else
     "$@"

@@ -41,7 +41,7 @@ extract_function() {
   awk -v name="$1" '$0 ~ "^function "name"\\(\\) \\{$" {p=1} p {print} p && /^}$/ {p=0; exit}' "${SCRIPT}"
 }
 
-for fn in getYMLine1 getYMLine2 getYMLine3 joomlaContainer runPrivileged getDialogHeight \
+for fn in getYMLine1 getYMLine2 getYMLine3 joomlaContainer useSudo runPrivileged getDialogHeight \
   getJoomlaEnvSuffixes getEscapedRegex getJoomlaComposeIdentity rewriteJoomlaComposeIdentity \
   getJoomlaConfigValue cloneJoomlaConfiguration cloneContainerEnvVariables \
   hasContainerEnvVariables cloneContainerEnvFile removeContainerEnvVariables \
@@ -494,6 +494,16 @@ isJoomlaHostInUse demomail.vdm.dev && pass "mailcatcher host is in use" || fail 
 isJoomlaHostInUse port.vdm.dev && pass "portainer host is in use" || fail "host port.vdm.dev not found"
 isJoomlaHostInUse demo.vdm.io && fail "host demo.vdm.io reported in use" || pass "host on another domain is free"
 isJoomlaHostInUse emo.vdm.dev && fail "host emo.vdm.dev reported in use" || pass "a host is matched whole, not as a suffix"
+isJoomlaHostInUse DEMO.vdm.dev && pass "a host differing only in case is in use" || fail "host DEMO.vdm.dev not found"
+
+OS_NUMBER=3
+useSudo && fail "sudo is used on Windows" || pass "sudo is never used on Windows (MSYS/Git Bash)"
+OS_NUMBER=1
+# shellcheck disable=SC2317
+sudo() { return 0; }
+useSudo && pass "sudo is used on Linux when it exists" || fail "sudo not used on Linux"
+unset -f sudo
+unset OS_NUMBER
 
 SHORT='one\ntwo\nthree'
 LONG="$(printf '%0300d' 0)"
