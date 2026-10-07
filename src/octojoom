@@ -2376,6 +2376,7 @@ function joomla__TRuST__delete() {
     # set some local variables
     local vdm_delete_me
     local container
+    local evn_file
     # saved the file
     showNotice "Only delete containers of which you have made absolutely sure it's no longer needed! Better to just disable them if all you want is to just take them down."
     # get containers to enable
@@ -2391,8 +2392,13 @@ function joomla__TRuST__delete() {
         container="${containered//\"/}"
         # check if the container is still enabled
         if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ]; then
+          # check if image has its own env file also
+          evn_file=$(getContainerEnvFile "${VDM_CONTAINER_TYPE}" "${container}")
           # make sure the docker image is stopped
-          docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down
+          # shellcheck disable=SC2015
+          [ ${#evn_file} -ge 1 ] && docker compose --env-file "${evn_file}" --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down || {
+            docker compose --file "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml" down
+          }
           # then remove soft link
           rm -rf "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}"
         fi
@@ -5157,6 +5163,26 @@ function setContainerEnvVariable() {
   fi
   # we return true
   return 0
+}
+
+# get the env file to use with a container's docker-compose.yml
+# $1: container type (joomla, openssh, ...)
+# $2: container name (sub.domain.tld)
+# $3 (optional): state directory to look in (enabled or available), default enabled
+# A per-container .env (available/<container>/.env, also reachable through the
+# enabled/<container> symlink) wins over the shared <type>/.env file.
+# Prints the path, or nothing when neither file exists.
+function getContainerEnvFile() {
+  local container_type="${1:-$VDM_CONTAINER_TYPE}"
+  local container="${2:-}"
+  local state="${3:-enabled}"
+  if [ -n "${container}" ] && [ -f "${VDM_REPO_PATH}/${container_type}/${state}/${container}/.env" ]; then
+    echo "${VDM_REPO_PATH}/${container_type}/${state}/${container}/.env"
+  elif [ -f "${VDM_REPO_PATH}/${container_type}/.env" ]; then
+    echo "${VDM_REPO_PATH}/${container_type}/.env"
+  else
+    echo ''
+  fi
 }
 
 # check if a Directory exist and if it has sub-directories
