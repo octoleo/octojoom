@@ -2530,10 +2530,20 @@ Would you like to continue without changing the database host?" "Database Host M
     [ "${site_name}" = "${current_site_name}" ] && site_name=''
   fi
   ##########################
-  ### 9. check if the source is running (it will be stopped during the copy)
-  if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ] && isContainerRunning "mariadb${old_key}"; then
-    source_running=true
-    stop_line="The (${container}) containers will be stopped during the copy and started again afterwards.\n"
+  ### 9. check if the source is running (an enabled source is stopped during the copy)
+  if isContainerRunning "mariadb${old_key}"; then
+    if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ]; then
+      source_running=true
+      stop_line="The (${container}) containers will be stopped during the copy and started again afterwards.\n"
+    elif getInputYesNo "The database container (mariadb${old_key}) is running, but (${container}) is not enabled,\n\
+so it was started outside ${PROGRAM_NAME} and cannot be stopped for the copy.\n\n\
+Copying a running database can produce an inconsistent copy. Stop it first, or continue at your own risk.\n\n\
+Would you like to continue anyway?" "Database Is Running" 14 112 "defaultno"; then
+      warnings+="  - The database of (${container}) was copied while it was running, check the clone's data.\n"
+    else
+      showNotice "The clone was cancelled, nothing was changed." 8
+      return 0
+    fi
   fi
   ##########################
   ### 10. confirm the plan (nothing has been written yet)
@@ -2630,9 +2640,18 @@ octojoom-clone-error-2 with a copy of the docker-compose.yml." 14
   ##########################
   ### 16. stop the source containers so the database files are copied in a consistent state
   if ${source_running}; then
-    showInfo "Stopping the (${container}) containers for the copy, please wait..." 7
-    if ! composeSourceContainer "${container}" 'stop'; then
-      showError "The (${container}) containers could not be stopped, so the clone was rolled back."
+    echo "Stopping the (${container}) containers for the copy, please wait..."
+    if ! composeSourceContainer "${container}" 'stop' || isContainerRunning "mariadb${old_key}"; then
+      # some containers may already be stopped, so we start them all again
+      echo "Starting the (${container}) containers again..."
+      if composeSourceContainer "${container}" 'start'; then
+        showError "The (${container}) containers could not be stopped cleanly, so the clone was rolled back.\n\n\
+They were started again, nothing was changed."
+      else
+        showError "The (${container}) containers could not be stopped cleanly, so the clone was rolled back.\n\n\
+They could also not be started again: use (Enable existing container) or (Pull up all enabled containers)\n\
+to start (${container}) again." 12
+      fi
       cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" "${env_added}"
       return 0
     fi
@@ -2654,9 +2673,13 @@ octojoom-clone-error-2 with a copy of the docker-compose.yml." 14
   ##########################
   ### 18. start the source containers again (even when the copy failed)
   if ${source_running}; then
-    showInfo "Starting the (${container}) containers again, please wait..." 7
-    composeSourceContainer "${container}" 'start' ||
-      warnings+="  - The (${container}) containers could not be started again, enable them from the menu.\n"
+    echo "Starting the (${container}) containers again, please wait..."
+    if ! composeSourceContainer "${container}" 'start'; then
+      # shown right away, so it is never lost when the clone is rolled back below
+      showError "The (${container}) containers could not be started again after the copy.\n\n\
+Use (Enable existing container) or (Pull up all enabled containers) to start (${container}) again." 12
+      warnings+="  - The (${container}) containers could not be started again, start them from the menu.\n"
+    fi
   fi
   if [ "${copy_status}" != "0" ]; then
     showError "The project folder could not be copied, so the clone was rolled back:\n\n$(cat "${VDM_SRC_PATH}/.clone_error" 2>/dev/null)" 16
