@@ -3436,6 +3436,8 @@ function rewriteJoomlaComposeIdentity() {
   local suffixes
   local old_domain_re
   local pattern
+  local host_suffix
+  local old_host
   local -a sed_args=()
   local -a leftovers=()
   [ -f "${src}" ] || return 1
@@ -3461,7 +3463,6 @@ function rewriteJoomlaComposeIdentity() {
   if [ "${old_sub}.${old_domain}" != "${new_sub}.${new_domain}" ]; then
     # shellcheck disable=SC2016
     sed_args+=(-e 's/Host\(`'"${old_sub}"'(db|mail)?\.'"${old_domain_re}"'`\)/Host(`'"${new_sub}"'\1.'"${new_domain}"'`)/g')
-    leftovers+=('Host\(`'"${old_sub}"'(db|mail)?\.'"${old_domain_re}"'`\)')
   fi
   sed -E "${sed_args[@]}" "${src}" > "${dst}" || return 1
   # make sure nothing of the old identity survived
@@ -3470,6 +3471,21 @@ function rewriteJoomlaComposeIdentity() {
       return 2
     fi
   done
+  # the old hosts may not survive either, unless they are also hosts of the clone
+  # (a sub-domain (x) cloned to (y) where (y)db equals (x) is legitimate)
+  if [ "${old_sub}.${old_domain}" != "${new_sub}.${new_domain}" ]; then
+    for host_suffix in '' 'db' 'mail'; do
+      old_host="${old_sub}${host_suffix}.${old_domain}"
+      case "${old_host}" in
+      "${new_sub}.${new_domain}" | "${new_sub}db.${new_domain}" | "${new_sub}mail.${new_domain}")
+        continue
+        ;;
+      esac
+      if grep -qF 'Host(`'"${old_host}"'`)' "${dst}"; then
+        return 2
+      fi
+    done
+  fi
   return 0
 }
 
