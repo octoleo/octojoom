@@ -41,10 +41,11 @@ extract_function() {
   awk -v name="$1" '$0 ~ "^function "name"\\(\\) \\{$" {p=1} p {print} p && /^}$/ {p=0; exit}' "${SCRIPT}"
 }
 
-for fn in getYMLine1 getYMLine2 getYMLine3 joomlaContainer \
+for fn in getYMLine1 getYMLine2 getYMLine3 joomlaContainer runPrivileged getDialogHeight \
   getJoomlaEnvSuffixes getEscapedRegex getJoomlaComposeIdentity rewriteJoomlaComposeIdentity \
   getJoomlaConfigValue cloneJoomlaConfiguration cloneContainerEnvVariables \
-  hasContainerEnvVariables cloneContainerEnvFile removeContainerEnvVariables; do
+  hasContainerEnvVariables cloneContainerEnvFile removeContainerEnvVariables \
+  isJoomlaHostInUse; do
   src=$(extract_function "${fn}")
   if [ -z "${src}" ]; then
     echo "FAIL - function ${fn} not found in ${SCRIPT}"
@@ -423,6 +424,25 @@ fi
 [ "$(stat -c '%a' "${WORK}/.env3" 2>/dev/null || stat -f '%Lp' "${WORK}/.env3")" = "600" ] && pass "env file copy is mode 600" || fail "env file copy mode"
 cloneContainerEnvFile "${ENV}.orig" "${WORK}/.env4" JCB JCB
 diff -q "${ENV}.orig" "${WORK}/.env4" >/dev/null && pass "env file copy with the same key is identical" || fail "env file copy with the same key differs"
+
+###############################################################################
+echo "# isJoomlaHostInUse / getDialogHeight"
+
+VDM_REPO_PATH="${WORK}/repo"
+mkdir -p "${VDM_REPO_PATH}/joomla/available/demo.vdm.dev" "${VDM_REPO_PATH}/portainer"
+gen_compose demo DEMO demo vdm.dev true false false false false false >"${VDM_REPO_PATH}/joomla/available/demo.vdm.dev/docker-compose.yml"
+printf '      - "traefik.http.routers.portainer.rule=Host(`port.vdm.dev`)"\n' >"${VDM_REPO_PATH}/portainer/docker-compose.yml"
+isJoomlaHostInUse demo.vdm.dev && pass "host of a Joomla site is in use" || fail "host demo.vdm.dev not found"
+isJoomlaHostInUse demodb.vdm.dev && pass "phpmyadmin host is in use" || fail "host demodb.vdm.dev not found"
+isJoomlaHostInUse demomail.vdm.dev && pass "mailcatcher host is in use" || fail "host demomail.vdm.dev not found"
+isJoomlaHostInUse port.vdm.dev && pass "portainer host is in use" || fail "host port.vdm.dev not found"
+isJoomlaHostInUse demo.vdm.io && fail "host demo.vdm.io reported in use" || pass "host on another domain is free"
+isJoomlaHostInUse emo.vdm.dev && fail "host emo.vdm.dev reported in use" || pass "a host is matched whole, not as a suffix"
+
+SHORT='one\ntwo\nthree'
+LONG="$(printf '%0300d' 0)"
+[ "$(TERM=dumb getDialogHeight "${SHORT}" 8 2>/dev/null)" -ge 11 ] && pass "dialog height fits three lines" || fail "dialog height for three lines"
+[ "$(TERM=dumb getDialogHeight "${LONG}" 8 2>/dev/null)" -ge 11 ] && pass "dialog height counts wrapped lines" || fail "dialog height for a wrapped line"
 
 ###############################################################################
 echo

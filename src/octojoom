@@ -2413,6 +2413,9 @@ function cloneJoomlaContainer() {
   local warnings=''
   local message
   local rc
+  local host_conflict
+  local host_suffix
+  local shared_note=''
   ##########################
   ### 1. select the source container
   container=$(getSelectedDirectory "Select the container you would like to clone." \
@@ -2442,7 +2445,10 @@ It was probably written by hand, so it must also be cloned by hand." 12
 Cloning named volumes is not supported yet." 10
     return 0
   fi
-  ${VDM_SRC_SECURE} && scheme='https://'
+  # older compose files behind Cloudflare have no certificate resolver, so the global switch also counts
+  if ${VDM_SRC_SECURE} || [ "${VDM_SECURE:-false}" = "true" ]; then
+    scheme='https://'
+  fi
   # the env file the source uses (a per-container .env wins over the shared one)
   shared_env="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
   [ -f "${src_dir}/.env" ] && per_container_env=true
@@ -2509,9 +2515,21 @@ Would you like to continue without changing the database host?" "Database Host M
     fi
   done
   ##########################
-  ### 7. get the domain and the new sub-domain
+  ### 7. get the domain and the new sub-domain (none of the clone's hosts may be used by another container)
   setDomain
-  setSubDomain "${VDM_KEY,,}" "joomla"
+  while true; do
+    setSubDomain "${VDM_KEY,,}" "joomla"
+    host_conflict=''
+    for host_suffix in '' 'db' 'mail'; do
+      if isJoomlaHostInUse "${VDM_SUBDOMAIN}${host_suffix}.${VDM_DOMAIN}"; then
+        host_conflict="${VDM_SUBDOMAIN}${host_suffix}.${VDM_DOMAIN}"
+        break
+      fi
+    done
+    [ -z "${host_conflict}" ] && break
+    showError "The host (${host_conflict}) is already used by another container, select another sub-domain."
+    unset VDM_SUBDOMAIN
+  done
   new_container="${VDM_SUBDOMAIN}.${VDM_DOMAIN}"
   new_dir="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${new_container}"
   new_yml="${new_dir}/docker-compose.yml"
@@ -2559,27 +2577,35 @@ Would you like to continue anyway?" "Database Is Running" 14 112 "defaultno"; th
     message+=$(printf '  %-18s %-28s %s' 'Database host:' "${host}" "${host} (NOT changed)")"\n"
   fi
   [ -n "${site_name}" ] && message+=$(printf '  %-18s %-28s %s' 'Site name:' "${current_site_name}" "${site_name}")"\n"
-  message+="\nThis will create:\n  ${new_yml}\n  ${new_project}  (a full copy of ${VDM_PROJECT_PATH}/${project})\n  VDM_${new_env}_* values in ${env_target}\n\n"
+  if ! ${per_container_env} && [ "${old_env}" = "${new_env}" ]; then
+    shared_note=" (shared with ${container})"
+  fi
+  message+="\nThis will create:\n  ${new_yml}\n  ${new_project}  (a full copy of ${project})\n"
+  message+="  VDM_${new_env}_* values${shared_note} in ${env_target}\n\n"
   message+="${stop_line}"
   message+="The database name, users, passwords and table prefix stay exactly as they are.\nThe clone is placed in available/ and is not enabled.\n\nContinue?"
-  if ! getInputYesNo "${message}" "Confirm Clone" 26 112; then
+  if [ "${VDM_FORCE:-false}" != "true" ] &&
+    ! whiptail --yesno "${message}" "$(getDialogHeight "${message}" 7)" 112 --scrolltext \
+      --title "Confirm Clone" --backtitle "${BACK_TITLE}" 3>&1 1>&2 2>&3; then
     showNotice "The clone was cancelled, nothing was changed." 8
     return 0
   fi
   ##########################
-  ### 11. we need sudo for the copy (db files are owned by the database user)
-  if ! getInputYesNo "${USER^}, to copy the project folder and update its configuration.php we need sudo privileges." \
-      "Give sudo Privileges" 8 112; then
-    showNotice "The clone was cancelled, nothing was changed." 8
-    return 0
-  fi
-  if ! sudo -v; then
-    showError "The clone needs sudo privileges to copy the project folder, nothing was changed."
-    return 0
+  ### 11. we need sudo for the copy (db files are owned by the database user), where sudo exists
+  if command -v sudo >/dev/null 2>&1; then
+    if ! getInputYesNo "${USER^}, to copy the project folder and update its configuration.php we need sudo privileges." \
+        "Give sudo Privileges" 8 112; then
+      showNotice "The clone was cancelled, nothing was changed." 8
+      return 0
+    fi
+    if ! sudo -v; then
+      showError "The clone needs sudo privileges to copy the project folder, nothing was changed."
+      return 0
+    fi
   fi
   ##########################
   ### 12. make sure there is enough free space for the copy
-  needed=$(sudo du -sk "${VDM_PROJECT_PATH}/${project}" 2>/dev/null | cut -f1)
+  needed=$(runPrivileged du -sk "${VDM_PROJECT_PATH}/${project}" 2>/dev/null | cut -f1)
   available=$(df -Pk "${VDM_PROJECT_PATH}" 2>/dev/null | awk 'NR==2 {print $4}')
   if [[ "${needed}" =~ ^[0-9]+$ ]] && [[ "${available}" =~ ^[0-9]+$ ]] && [ "${needed}" -gt "${available}" ]; then
     showError "Not enough free space in ${VDM_PROJECT_PATH}.\n\n\
@@ -2663,7 +2689,7 @@ to start (${container}) again." 12
   rm -f "${VDM_SRC_PATH}/.clone_status"
   progressSwitchOn
   {
-    sudo cp -a "${VDM_PROJECT_PATH}/${project}/." "${new_project}/" 2>"${VDM_SRC_PATH}/.clone_error"
+    runPrivileged cp -a "${VDM_PROJECT_PATH}/${project}/." "${new_project}/" 2>"${VDM_SRC_PATH}/.clone_error"
     echo $? >"${VDM_SRC_PATH}/.clone_status"
     progressSwitchOff
   } &
@@ -2715,7 +2741,7 @@ Use (Enable existing container) or (Pull up all enabled containers) to start (${
   if [ -n "$(getJoomlaConfigValue "${new_project}/joomla/configuration.php" 'cookie_domain')" ]; then
     warnings+="  - configuration.php sets \$cookie_domain, check that it fits ${new_container}.\n"
   fi
-  if sudo grep -qs "${container}" "${new_project}/joomla/.htaccess" "${new_project}/joomla/robots.txt" "${new_project}/joomla/web.config"; then
+  if runPrivileged grep -qs "${container}" "${new_project}/joomla/.htaccess" "${new_project}/joomla/robots.txt" "${new_project}/joomla/web.config"; then
     warnings+="  - ${container} is mentioned in .htaccess, robots.txt or web.config of the clone, check them.\n"
   fi
   ##########################
@@ -2738,7 +2764,7 @@ Use (Enable existing container) or (Pull up all enabled containers) to start (${
   [ -n "${warnings}" ] && message+="
   Please check:
 ${warnings}"
-  whiptail --msgbox "${message}" --fb --backtitle "${BACK_TITLE}" 30 112
+  whiptail --msgbox "${message}" --fb --scrolltext --title "Clone Complete" --backtitle "${BACK_TITLE}" "$(getDialogHeight "${message}" 9)" 112
   # return a success
   return 0
 }
@@ -2778,7 +2804,7 @@ function cloneJoomlaRollback() {
   # the copied project folder (only the one we created, and only inside the projects path)
   if [ "${project_created}" = "true" ] && [ -n "${new_project}" ] && [ -d "${new_project}" ] &&
     [[ "${new_project}" == "${VDM_PROJECT_PATH}/"?* ]]; then
-    sudo rm -rf "${new_project}"
+    runPrivileged rm -rf "${new_project}"
   fi
   # only the env values this clone added to the shared env file
   if [ -n "${env_added}" ]; then
@@ -3592,9 +3618,9 @@ function cloneJoomlaConfiguration() {
       return 1
     }
   else
-    # tee (run with sudo) is what writes the file, the redirects only feed it
+    # tee (run privileged) is what writes the file, the redirects only feed it
     # shellcheck disable=SC2024
-    sudo tee "${file}" < "${tmp_file}" > /dev/null || {
+    runPrivileged tee "${file}" < "${tmp_file}" > /dev/null || {
       rm -f "${tmp_file}"
       return 1
     }
@@ -3697,6 +3723,41 @@ function removeContainerEnvVariables() {
     return 1
   fi
   return 0
+}
+
+# check if a host name is already routed by Traefik for any container ${PROGRAM_NAME} knows
+# $1: host (sub.domain.tld)
+function isJoomlaHostInUse() {
+  local host="${1:-}"
+  [ -n "${host}" ] || return 0
+  # shellcheck disable=SC2016
+  grep -qsF 'Host(`'"${host}"'`)' "${VDM_REPO_PATH}/"*/available/*/docker-compose.yml "${VDM_REPO_PATH}/"*/docker-compose.yml
+}
+
+# run a command with sudo where sudo exists (Linux, macOS), else directly (Windows MSYS/Git Bash)
+function runPrivileged() {
+  if command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    "$@"
+  fi
+}
+
+# get a whiptail height that fits a message (long lines wrap), capped at the terminal height
+# $1: message (with \n new lines)   $2 (optional): rows the dialog needs besides the text (default 8)
+function getDialogHeight() {
+  local message="${1:-}"
+  local extra="${2:-8}"
+  local lines
+  local rows
+  local height
+  lines=$(printf '%b\n' "${message}" | awk '{ n += (length($0) > 106) ? int((length($0) + 105) / 106) : 1 } END { print n + 0 }')
+  height=$((lines + extra))
+  rows=$(tput lines 2>/dev/null)
+  if [[ "${rows}" =~ ^[0-9]+$ ]] && [ "${rows}" -gt 10 ] && [ "${height}" -gt "${rows}" ]; then
+    height="${rows}"
+  fi
+  echo "${height}"
 }
 
 # check if a key is already used by a Joomla project folder, a compose file or a docker container
