@@ -3397,21 +3397,17 @@ function clonePersistentVolume() {
         if isContainerRunning "mariadb${persistent}" && ! getInputYesNo "The database container (mariadb${persistent}) is running.\n\
 Copying a running database can produce an inconsistent copy. Disable the container first, or continue at your own risk.\n\n\
 Would you like to continue anyway?" "Database Is Running" 12 112 "defaultno"; then
+          showNotice "The (${persistent}) project folder was not copied, because its database container is running." 8
           return 0
         fi
         # set the new persistent volume name
         new_persistent="${persistent}"
-        while [ ${#new_persistent} -le 1 ] || [[ "${new_persistent}" =~ [^a-zA-Z] ]] ||
-          [ -d "${VDM_PROJECT_PATH}/${new_persistent}" ]; do
+        while [ -d "${VDM_PROJECT_PATH}/${new_persistent}" ]; do
           # get the value
-          new_persistent=$(getInput "Enter a new persistent volume name\n[Text with no spaces that is only alphabetical, do not use (${persistent}) or any other existing volume names]" '' 'Enter Persistent Name')
+          new_persistent=$(getInput "Enter a new persistent volume name\n[do not use (${persistent}) or any other existing volume names]" '' 'Enter Persistent Name')
           # keep asking
-          if [ ${#new_persistent} -ge 1 ] && [ -d "${VDM_PROJECT_PATH}/${new_persistent}" ]; then
+          if [ -d "${VDM_PROJECT_PATH}/${new_persistent}" ]; then
             showError "You must enter a persistent volume name that does not already exist.\n\n${new_persistent} already exist."
-          elif [[ "${new_persistent}" =~ [^a-zA-Z] ]]; then
-            showError "You must enter a persistent volume name with no spaces that is only alphabetical!"
-          elif [ ${#new_persistent} -le 1 ]; then
-            showError "You must enter a persistent volume name!"
           fi
         done
         # create this new folder
