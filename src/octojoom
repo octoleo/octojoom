@@ -2992,6 +2992,254 @@ Would you like to continue anyway?" "Database Is Running" 12 112 "defaultno"; th
   fi
 }
 
+#####################################################################################################################VDM
+######################################## CLONE HELPERS (no user interaction, so they can be tested)
+
+# the env variable name suffixes a Joomla container reads through its env key (VDM_<ENV_KEY>_<suffix>)
+# returned as an extended regular expression alternation
+function getJoomlaEnvSuffixes() {
+  echo 'DB|DB_USER|DB_PASS|DB_ROOT|PUID|PGID|JOOMLA_[A-Z_]+|EXTENSIONS_URLS|CLI_COMMANDS'
+}
+
+# read the identity of a Joomla container from its docker-compose.yml
+# $1: path to the docker-compose.yml
+# sets: VDM_SRC_KEY, VDM_SRC_ENV_KEY, VDM_SRC_PROJECT_FOLDER, VDM_SRC_MAILCATCHER,
+#       VDM_SRC_NAMED_VOLUMES, VDM_SRC_SECURE
+# returns 1 when the key or env key could not be found (hand written file)
+function getJoomlaComposeIdentity() {
+  local yml="${1:-}"
+  VDM_SRC_KEY=''
+  VDM_SRC_ENV_KEY=''
+  VDM_SRC_PROJECT_FOLDER=''
+  VDM_SRC_MAILCATCHER=false
+  VDM_SRC_NAMED_VOLUMES=false
+  VDM_SRC_SECURE=false
+  [ -f "${yml}" ] || return 1
+  # the key is the suffix of the database container name
+  VDM_SRC_KEY=$(sed -nE 's/^[[:space:]]*container_name:[[:space:]]*mariadb([A-Za-z]+)[[:space:]]*$/\1/p' "${yml}" | head -n 1)
+  # the env key is the middle part of the database name variable
+  VDM_SRC_ENV_KEY=$(sed -nE 's/^.*MARIADB_DATABASE=[$][{]VDM_([A-Za-z]+)_DB[}].*$/\1/p' "${yml}" | head -n 1)
+  if [ ${#VDM_SRC_KEY} -lt 1 ] || [ ${#VDM_SRC_ENV_KEY} -lt 1 ]; then
+    return 1
+  fi
+  # optional features
+  grep -qE "^[[:space:]]*container_name:[[:space:]]*mailcatcher${VDM_SRC_KEY}[[:space:]]*$" "${yml}" && VDM_SRC_MAILCATCHER=true
+  grep -qE "^[[:space:]]*-[[:space:]]*${VDM_SRC_KEY,,}_(web|db):/var/" "${yml}" && VDM_SRC_NAMED_VOLUMES=true
+  grep -qE 'entrypoints=websecure' "${yml}" && VDM_SRC_SECURE=true
+  # the project folder (persistent volume) named in the bind mounts
+  VDM_SRC_PROJECT_FOLDER=$(sed -nE 's#^.*PROJECT_PATH[}]/([^/]+)/db:/var/lib/mysql.*$#\1#p' "${yml}" | head -n 1)
+  [ -n "${VDM_SRC_PROJECT_FOLDER}" ] ||
+    VDM_SRC_PROJECT_FOLDER=$(sed -nE 's#^.*PROJECT_PATH[}]/([^/]+)/joomla:/var/www/html.*$#\1#p' "${yml}" | head -n 1)
+  export VDM_SRC_KEY
+  export VDM_SRC_ENV_KEY
+  export VDM_SRC_PROJECT_FOLDER
+  export VDM_SRC_MAILCATCHER
+  export VDM_SRC_NAMED_VOLUMES
+  export VDM_SRC_SECURE
+  return 0
+}
+
+# write a copy of a Joomla docker-compose.yml with a new identity
+# $1: source docker-compose.yml   $2: target docker-compose.yml
+# $3: old key                     $4: new key
+# $5: old env key                 $6: new env key
+# $7: old sub-domain              $8: new sub-domain
+# $9: old domain                  $10: new domain
+# Keys are alphabetical only, so every token can be anchored on a non-letter.
+# returns 1 when the source is missing or sed failed, 2 when an old value survived the rewrite
+function rewriteJoomlaComposeIdentity() {
+  local src="${1:-}"
+  local dst="${2:-}"
+  local old_key="${3:-}"
+  local new_key="${4:-}"
+  local old_env="${5:-}"
+  local new_env="${6:-}"
+  local old_sub="${7:-}"
+  local new_sub="${8:-}"
+  local old_domain="${9:-}"
+  local new_domain="${10:-}"
+  local suffixes
+  local old_domain_re
+  local pattern
+  local -a sed_args=()
+  local -a leftovers=()
+  [ -f "${src}" ] || return 1
+  suffixes=$(getJoomlaEnvSuffixes)
+  # escape the dots of the domain for the regular expressions
+  old_domain_re="${old_domain//./\\.}"
+  # service names, container names, database host, SMTP host and Traefik router/service names
+  sed_args+=(-e 's/(mariadb|joomla|phpmyadmin|mailcatcher)'"${old_key}"'([^A-Za-z]|$)/\1'"${new_key}"'\2/g')
+  leftovers+=('(mariadb|joomla|phpmyadmin|mailcatcher)'"${old_key}"'([^A-Za-z]|$)')
+  # bind mounts under the project path (joomla, db, php.ini, entrypoint.sh)
+  sed_args+=(-e 's#PROJECT_PATH[}]/'"${old_key}"'/#PROJECT_PATH}/'"${new_key}"'/#g')
+  leftovers+=('PROJECT_PATH[}]/'"${old_key}"'/')
+  # named volumes (expert mode without persistence)
+  sed_args+=(-e 's/(^|[^A-Za-z_])'"${old_key,,}"'_(web|db)([^A-Za-z_]|$)/\1'"${new_key,,}"'_\2\3/g')
+  leftovers+=('(^|[^A-Za-z_])'"${old_key,,}"'_(web|db)([^A-Za-z_]|$)')
+  # environment variable references (only the names a Joomla container reads)
+  if [ "${old_env}" != "${new_env}" ]; then
+    # shellcheck disable=SC2016
+    sed_args+=(-e 's/[$][{]VDM_'"${old_env}"'_('"${suffixes}"')[}]/${VDM_'"${new_env}"'_\1}/g')
+    leftovers+=('[$][{]VDM_'"${old_env}"'_('"${suffixes}"')[}]')
+  fi
+  # Traefik host rules (site, phpmyadmin and mailcatcher)
+  if [ "${old_sub}.${old_domain}" != "${new_sub}.${new_domain}" ]; then
+    # shellcheck disable=SC2016
+    sed_args+=(-e 's/Host\(`'"${old_sub}"'(db|mail)?\.'"${old_domain_re}"'`\)/Host(`'"${new_sub}"'\1.'"${new_domain}"'`)/g')
+    leftovers+=('Host\(`'"${old_sub}"'(db|mail)?\.'"${old_domain_re}"'`\)')
+  fi
+  sed -E "${sed_args[@]}" "${src}" > "${dst}" || return 1
+  # make sure nothing of the old identity survived
+  for pattern in "${leftovers[@]}"; do
+    if grep -qE "${pattern}" "${dst}"; then
+      return 2
+    fi
+  done
+  return 0
+}
+
+# get a value from a Joomla configuration.php file
+# $1: path to configuration.php   $2: setting name (host, db, sitename, ...)
+function getJoomlaConfigValue() {
+  local file="${1:-}"
+  local name="${2:-}"
+  [ -f "${file}" ] || return 1
+  sed -nE "s/^[[:space:]]*public[[:space:]]+[\$]${name}[[:space:]]*=[[:space:]]*'(.*)';[[:space:]]*\$/\\1/p" "${file}" | head -n 1
+}
+
+# point a cloned Joomla configuration.php at the clone's own containers
+# $1: path to the cloned configuration.php
+# $2: old key   $3: new key
+# $4 (optional): new site name ('' keeps the current one)
+# The file is written in place so it keeps its owner and mode (normally 0444, owned by the container user).
+# returns 1 when the file is missing or could not be written, 2 when the database host is not mariadb<old key>
+function cloneJoomlaConfiguration() {
+  local file="${1:-}"
+  local old_key="${2:-}"
+  local new_key="${3:-}"
+  local site_name="${4:-}"
+  local host
+  local tmp_file
+  local q="'"
+  local -a sed_args=()
+  [ -f "${file}" ] || return 1
+  host=$(getJoomlaConfigValue "${file}" 'host')
+  # only a site that uses this container's database can be re-pointed safely
+  [[ "${host}" =~ ^mariadb${old_key}(:[0-9]+)?$ ]] || return 2
+  # database host (the port, if any, is kept)
+  sed_args+=(-e 's/^([[:space:]]*public[[:space:]]+[$]host[[:space:]]*=[[:space:]]*'"${q}"')mariadb'"${old_key}"'((:[0-9]+)?'"${q}"';)/\1mariadb'"${new_key}"'\2/')
+  # mailcatcher host (only when it pointed at this container's mailcatcher)
+  sed_args+=(-e 's/^([[:space:]]*public[[:space:]]+[$]smtphost[[:space:]]*=[[:space:]]*'"${q}"')mailcatcher'"${old_key}"'('"${q}"';)/\1mailcatcher'"${new_key}"'\2/')
+  # site name
+  if [ -n "${site_name}" ]; then
+    # escape for a PHP single quoted string (\ and '), then escape the result for the sed replacement (\ & |)
+    site_name=$(printf '%s' "${site_name}" | sed -e 's/[\\]/\\\\/g' -e "s/'/\\\\'/g" -e 's/[\\]/\\\\/g' -e 's/[&|]/\\&/g')
+    sed_args+=(-e 's|^([[:space:]]*public[[:space:]]+[$]sitename[[:space:]]*=[[:space:]]*'"${q}"').*('"${q}"';[[:space:]]*)$|\1'"${site_name}"'\2|')
+  fi
+  tmp_file=$(mktemp) || return 1
+  if ! sed -E "${sed_args[@]}" "${file}" > "${tmp_file}"; then
+    rm -f "${tmp_file}"
+    return 1
+  fi
+  # write back into the existing file so owner and mode are kept
+  if [ -w "${file}" ]; then
+    cat "${tmp_file}" > "${file}" || {
+      rm -f "${tmp_file}"
+      return 1
+    }
+  else
+    # tee (run with sudo) is what writes the file, the redirects only feed it
+    # shellcheck disable=SC2024
+    sudo tee "${file}" < "${tmp_file}" > /dev/null || {
+      rm -f "${tmp_file}"
+      return 1
+    }
+  fi
+  rm -f "${tmp_file}"
+  return 0
+}
+
+# copy the env values of one Joomla env key to another env key
+# $1: env file to read   $2: old env key   $3: new env key
+# $4 (optional): env file to write (default: the file read)
+# A line is only added when the new key does not already have that value.
+function cloneContainerEnvVariables() {
+  local src_file="${1:-}"
+  local old_env="${2:-}"
+  local new_env="${3:-}"
+  local dst_file="${4:-$1}"
+  local suffixes
+  local line
+  local suffix
+  local value
+  [ -f "${src_file}" ] || return 1
+  [ "${old_env}" = "${new_env}" ] && [ "${src_file}" = "${dst_file}" ] && return 0
+  suffixes=$(getJoomlaEnvSuffixes)
+  while IFS= read -r line || [ -n "${line}" ]; do
+    [[ "${line}" =~ ^VDM_${old_env}_(${suffixes})=(.*)$ ]] || continue
+    suffix="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+    if [ -f "${dst_file}" ] && grep -qE "^VDM_${new_env}_${suffix}=" "${dst_file}"; then
+      continue
+    fi
+    printf 'VDM_%s_%s=%s\n' "${new_env}" "${suffix}" "${value}" >> "${dst_file}" || return 1
+  done < "${src_file}"
+  return 0
+}
+
+# copy a per-container env file for a cloned container, renaming the env key
+# $1: source .env   $2: target .env   $3: old env key   $4: new env key
+function cloneContainerEnvFile() {
+  local src_file="${1:-}"
+  local dst_file="${2:-}"
+  local old_env="${3:-}"
+  local new_env="${4:-}"
+  local suffixes
+  [ -f "${src_file}" ] || return 1
+  suffixes=$(getJoomlaEnvSuffixes)
+  if [ "${old_env}" = "${new_env}" ]; then
+    cp "${src_file}" "${dst_file}" || return 1
+  else
+    sed -E 's/^VDM_'"${old_env}"'_('"${suffixes}"')=/VDM_'"${new_env}"'_\1=/' "${src_file}" > "${dst_file}" || return 1
+  fi
+  chmod 600 "${dst_file}"
+  return 0
+}
+
+# remove all env values of a Joomla env key from an env file (used to roll back a failed clone)
+# $1: env file   $2: env key
+function removeContainerEnvVariables() {
+  local env_file="${1:-}"
+  local env_key="${2:-}"
+  local suffixes
+  local tmp_file
+  [ -f "${env_file}" ] || return 0
+  [ -n "${env_key}" ] || return 0
+  suffixes=$(getJoomlaEnvSuffixes)
+  tmp_file="${env_file}_tmp"
+  # grep returns 1 when no line is left, which is still a valid result
+  grep -vE "^VDM_${env_key}_(${suffixes})=" "${env_file}" > "${tmp_file}"
+  # write back into the existing file so its permissions are kept
+  cat "${tmp_file}" > "${env_file}"
+  rm -f "${tmp_file}"
+  return 0
+}
+
+# check if a key is already used by a Joomla project folder, a compose file or a docker container
+# $1: key
+function isJoomlaKeyInUse() {
+  local key="${1:-}"
+  [ -n "${key}" ] || return 0
+  [ -d "${VDM_PROJECT_PATH}/${key}" ] && return 0
+  grep -qsE "^[[:space:]]*container_name:[[:space:]]*(mariadb|joomla|phpmyadmin|mailcatcher)${key}[[:space:]]*$" \
+    "${VDM_REPO_PATH}/joomla/available/"*/docker-compose.yml && return 0
+  if command -v docker >/dev/null 2>&1 &&
+    docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qxE "(mariadb|joomla|phpmyadmin|mailcatcher)${key}"; then
+    return 0
+  fi
+  return 1
+}
+
 # reset persistent Joomla volume
 function resetPersistentJoomlaVolumes() {
   # we first check if we have some volumes
