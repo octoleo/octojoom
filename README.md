@@ -373,6 +373,7 @@ We welcome contributions of all levels — from documentation to new distro supp
    ```bash
    shellcheck src/octojoom
    bash tests/test-clone.sh
+   bash tests/test-clone-flow.sh
    ```
 5. **Submit** a pull request with a clear explanation
 
