@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/macOS-tested-blue?logo=apple&logoColor=white" alt="macOS Tested">
   <img src="https://img.shields.io/badge/Windows-supported-0078D6?logo=windows&logoColor=white" alt="Windows Supported">
   <img src="https://img.shields.io/badge/License-GPLv2-blue.svg" alt="License GPLv2">
-  <img src="https://img.shields.io/badge/Version-3.8.0-orange" alt="Version 3.8.0">
+  <img src="https://img.shields.io/badge/Version-3.9.0-orange" alt="Version 3.9.0">
 </p>
 
 <p align="center">
@@ -368,10 +368,11 @@ We welcome contributions of all levels — from documentation to new distro supp
 1. **Fork** this repository
 2. **Create** a feature branch
 3. **Make your changes**
-4. **Run lint check:**
+4. **Run lint check and tests:**
 
    ```bash
    shellcheck src/octojoom
+   bash tests/test-clone.sh
    ```
 5. **Submit** a pull request with a clear explanation
 
@@ -398,6 +399,8 @@ See LICENSE for details.
 | ------------------------------------- | ------------------------- |
 | `octojoom -h`                         | Show help menu            |
 | `octojoom --type joomla --task setup` | Create a Joomla container |
+| `octojoom --type joomla --task clone` | Clone a Joomla container (compose file, env values and project files) |
+| `octojoom --type joomla --task clonefiles` | Clone only the project files of a container |
 | `octojoom --update`                   | Update the script         |
 | `octojoom --uninstall`                | Uninstall Octojoom        |
 | `octojoom`                            | Launch interactive mode   |
