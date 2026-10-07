@@ -2351,33 +2351,408 @@ function joomla__TRuST__clone() {
   # check if this type have available containers
   if ! hasDirectories "${VDM_CONTAINER_TYPE}/available/"; then
     showError "The path ${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/ does not exist or is empty, first run a ${VDM_CONTAINER_TYPE^} setup."
+  elif ! hasDirectories '' "${VDM_PROJECT_PATH}"; then
+    showError "There are no project folders (persistent volumes) found in ${VDM_PROJECT_PATH}."
   else
-    # ask if they want to clone a volume
-    if getInputYesNo "Would you like to clone a persistent volume found in (${VDM_PROJECT_PATH})?" \
-        "Continue To Clone Persistent Volume" 12 112; then
-      # trigger the volumes clone script
-      clonePersistentVolume
+    # run the clone
+    cloneJoomlaContainer
+    ##########################
+    ### unset all no longer needed (so a setup in the same session asks again)
+    unset VDM_SUBDOMAIN
+    unset VDM_KEY
+    unset VDM_ENV_KEY
+    unset VDM_SRC_KEY
+    unset VDM_SRC_ENV_KEY
+    unset VDM_SRC_PROJECT_FOLDER
+    unset VDM_SRC_MAILCATCHER
+    unset VDM_SRC_NAMED_VOLUMES
+    unset VDM_SRC_SECURE
+  fi
+  # return a success
+  return 0
+}
+
+# clone a complete Joomla container: docker-compose.yml, env values and project folder
+# Only namespace values change (key, env key, sub-domain, domain); the database name,
+# users, passwords and table prefix are copied as they are. The clone is placed in
+# available/ and is NOT enabled.
+function cloneJoomlaContainer() {
+  # set some local variables
+  local container
+  local old_key
+  local old_env
+  local old_sub
+  local old_domain
+  local src_dir
+  local src_yml
+  local src_env_file
+  local shared_env
+  local per_container_env=false
+  local project
+  local config
+  local host
+  local patch_host=true
+  local current_site_name
+  local site_name=''
+  local source_running=false
+  local new_env
+  local new_container
+  local new_dir
+  local new_yml
+  local new_project
+  local env_target
+  local env_added=false
+  local project_created=false
+  local env_file
+  local validation
+  local needed
+  local available
+  local copy_status
+  local scheme='http://'
+  local stop_line=''
+  local warnings=''
+  local message
+  local rc
+  ##########################
+  ### 1. select the source container
+  container=$(getSelectedDirectory "Select the container you would like to clone." \
+    "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" '' "Clone ${VDM_CONTAINER_TYPE^} Container")
+  # check that we have something, else return to main menu
+  [ ${#container} -ge 1 ] || return 0
+  src_dir="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}"
+  src_yml="${src_dir}/docker-compose.yml"
+  if [ ! -f "${src_yml}" ]; then
+    showError "The (${container}) container has no docker-compose.yml file to clone."
+    return 0
+  fi
+  ##########################
+  ### 2. read the identity of the source from its docker-compose.yml
+  if ! getJoomlaComposeIdentity "${src_yml}"; then
+    showError "The docker-compose.yml of (${container}) does not follow the ${PROGRAM_NAME} layout\n\
+(no mariadb<key> container name or VDM_<ENV_KEY>_DB variable found).\n\n\
+It was probably written by hand, so it must also be cloned by hand." 12
+    return 0
+  fi
+  old_key="${VDM_SRC_KEY}"
+  old_env="${VDM_SRC_ENV_KEY}"
+  old_sub="${container%%.*}"
+  old_domain="${container#*.}"
+  if ${VDM_SRC_NAMED_VOLUMES}; then
+    showError "The (${container}) container keeps its files in named docker volumes instead of a project folder.\n\n\
+Cloning named volumes is not supported yet." 10
+    return 0
+  fi
+  ${VDM_SRC_SECURE} && scheme='https://'
+  # the env file the source uses (a per-container .env wins over the shared one)
+  shared_env="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
+  [ -f "${src_dir}/.env" ] && per_container_env=true
+  src_env_file=$(getContainerEnvFile "${VDM_CONTAINER_TYPE}" "${container}" 'available')
+  if [ ${#src_env_file} -lt 1 ]; then
+    showError "No .env file was found for (${container}), neither ${src_dir}/.env nor ${shared_env}.\n\n\
+The clone needs the env values of the source container."
+    return 0
+  fi
+  ##########################
+  ### 3. select the project folder (persistent volume) of the source
+  project=$(getSelectedDirectory "Select the project folder (persistent volume) of the (${container}) container.\n\
+[The folder named in its docker-compose.yml is pre-selected]" \
+    "${VDM_PROJECT_PATH}" "${VDM_SRC_PROJECT_FOLDER}" "Select Project Folder")
+  if [ ${#project} -lt 1 ] || [ ! -d "${VDM_PROJECT_PATH}/${project}/joomla" ] || [ ! -d "${VDM_PROJECT_PATH}/${project}/db" ]; then
+    showError "The (${project}) folder is not a Joomla project folder, it must have a joomla and a db sub-folder."
+    return 0
+  fi
+  config="${VDM_PROJECT_PATH}/${project}/joomla/configuration.php"
+  if [ ! -f "${config}" ]; then
+    showError "The (${project}) project has no joomla/configuration.php file, so Joomla is not installed yet.\n\n\
+Setup a new container instead of cloning this one."
+    return 0
+  fi
+  ##########################
+  ### 4. make sure the site uses the database of the container being cloned
+  host=$(getJoomlaConfigValue "${config}" 'host')
+  if ! [[ "${host}" =~ ^mariadb${old_key}(:[0-9]+)?$ ]]; then
+    if ! getInputYesNo "The configuration.php of (${project}) connects to the database host (${host}) and not to (mariadb${old_key}).\n\n\
+The clone would keep using that same database, which is only safe when it is not the database of another container.\n\n\
+Would you like to continue without changing the database host?" "Database Host Mismatch" 14 112 "defaultno"; then
+      return 0
     fi
-    # ask if they want to clone a container
-    if getInputYesNo "Would you like to clone a ${VDM_CONTAINER_TYPE^} container?" \
-        "Continue To Clone Container (feature not ready)" 12 112 "defaultno"; then
-      # set some local variables
-      local vdm_clone_me
-      local container
-      # list containers... and allow selection to edit
-      container=$(getSelectedDirectory "Select a container you would like to clone." \
-        "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" '' "Clone ${VDM_CONTAINER_TYPE^} Container (feature not ready)")
-      # check that we have something, else return to main menu
-      if [ ${#container} -ge 1 ]; then
-        # add the parent dir back
-        vdm_clone_me="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}/docker-compose.yml"
-        # check if this docker-composer.yml exist
-        if [ -f "${vdm_clone_me}" ]; then
-          # give little heads-up
-          showNotice "Feature not ready!!\nYou have selected: ${vdm_clone_me}" 13
-        fi
-      fi
+    patch_host=false
+  fi
+  ##########################
+  ### 5. get the new key (container names and project folder)
+  while true; do
+    setUniqueKey "Enter a new key for the clone of (${container}).\nIt is used for the container names and the project folder name."
+    if [ "${VDM_KEY}" = "${old_key}" ]; then
+      showError "The key (${VDM_KEY}) is the key of the container being cloned, select another."
+    elif isJoomlaKeyInUse "${VDM_KEY}"; then
+      showError "The key (${VDM_KEY}) is already used by another container or project folder, select another."
+    else
+      break
     fi
+    unset VDM_KEY
+  done
+  ##########################
+  ### 6. get the new env key
+  while true; do
+    setEnvironmentKey
+    new_env="${VDM_ENV_KEY^^}"
+    if ! ${per_container_env} && [ "${new_env}" != "${old_env}" ] && grep -qE "^VDM_${new_env}_DB=" "${shared_env}"; then
+      showError "The environment key (${new_env}) is already used in ${shared_env}, select another."
+      unset VDM_ENV_KEY
+    else
+      break
+    fi
+  done
+  ##########################
+  ### 7. get the domain and the new sub-domain
+  setDomain
+  setSubDomain "${VDM_KEY,,}" "joomla"
+  new_container="${VDM_SUBDOMAIN}.${VDM_DOMAIN}"
+  new_dir="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${new_container}"
+  new_yml="${new_dir}/docker-compose.yml"
+  new_project="${VDM_PROJECT_PATH}/${VDM_KEY}"
+  if ${per_container_env}; then
+    env_target="${new_dir}/.env"
+  else
+    env_target="${shared_env}"
+  fi
+  ##########################
+  ### 8. only in expert mode ask for a new site name
+  if isExpert && ${patch_host}; then
+    current_site_name=$(getJoomlaConfigValue "${config}" 'sitename')
+    site_name=$(getInput "Enter the site name of the clone.\n[Keep the current name (${current_site_name}) to leave it unchanged]" \
+      "${current_site_name} (clone)" 'Enter Site Name')
+    [ "${site_name}" = "${current_site_name}" ] && site_name=''
+  fi
+  ##########################
+  ### 9. check if the source is running (it will be stopped during the copy)
+  if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ] && isContainerRunning "mariadb${old_key}"; then
+    source_running=true
+    stop_line="The (${container}) containers will be stopped during the copy and started again afterwards.\n"
+  fi
+  ##########################
+  ### 10. confirm the plan (nothing has been written yet)
+  message="You are about to clone the (${container}) container.\n\n"
+  message+=$(printf '  %-18s %-28s %s' '' 'FROM' 'TO')"\n"
+  message+=$(printf '  %-18s %-28s %s' 'Key:' "${old_key}" "${VDM_KEY}")"\n"
+  message+=$(printf '  %-18s %-28s %s' 'Env key:' "VDM_${old_env}_*" "VDM_${new_env}_*")"\n"
+  message+=$(printf '  %-18s %-28s %s' 'Site:' "${container}" "${new_container}")"\n"
+  message+=$(printf '  %-18s %-28s %s' 'Project folder:' "${project}" "${VDM_KEY}")"\n"
+  if ${patch_host}; then
+    message+=$(printf '  %-18s %-28s %s' 'Database host:' "mariadb${old_key}" "mariadb${VDM_KEY} (patched in configuration.php)")"\n"
+  else
+    message+=$(printf '  %-18s %-28s %s' 'Database host:' "${host}" "${host} (NOT changed)")"\n"
+  fi
+  [ -n "${site_name}" ] && message+=$(printf '  %-18s %-28s %s' 'Site name:' "${current_site_name}" "${site_name}")"\n"
+  message+="\nThis will create:\n  ${new_yml}\n  ${new_project}  (a full copy of ${VDM_PROJECT_PATH}/${project})\n  VDM_${new_env}_* values in ${env_target}\n\n"
+  message+="${stop_line}"
+  message+="The database name, users, passwords and table prefix stay exactly as they are.\nThe clone is placed in available/ and is not enabled.\n\nContinue?"
+  if ! getInputYesNo "${message}" "Confirm Clone" 26 112; then
+    showNotice "The clone was cancelled, nothing was changed." 8
+    return 0
+  fi
+  ##########################
+  ### 11. we need sudo for the copy (db files are owned by the database user)
+  if ! getInputYesNo "${USER^}, to copy the project folder and update its configuration.php we need sudo privileges." \
+      "Give sudo Privileges" 8 112; then
+    showNotice "The clone was cancelled, nothing was changed." 8
+    return 0
+  fi
+  if ! sudo -v; then
+    showError "The clone needs sudo privileges to copy the project folder, nothing was changed."
+    return 0
+  fi
+  ##########################
+  ### 12. make sure there is enough free space for the copy
+  needed=$(sudo du -sk "${VDM_PROJECT_PATH}/${project}" 2>/dev/null | cut -f1)
+  available=$(df -Pk "${VDM_PROJECT_PATH}" 2>/dev/null | awk 'NR==2 {print $4}')
+  if [[ "${needed}" =~ ^[0-9]+$ ]] && [[ "${available}" =~ ^[0-9]+$ ]] && [ "${needed}" -gt "${available}" ]; then
+    showError "Not enough free space in ${VDM_PROJECT_PATH}.\n\n\
+The (${project}) folder needs $((needed / 1024)) MB but only $((available / 1024)) MB are free. Nothing was changed."
+    return 0
+  fi
+  ##########################
+  ### 13. the env values of the clone
+  # shellcheck disable=SC2174
+  mkdir -p -m 700 "${new_dir}"
+  if ${per_container_env}; then
+    if ! cloneContainerEnvFile "${src_dir}/.env" "${env_target}" "${old_env}" "${new_env}"; then
+      showError "The env file ${env_target} could not be written, nothing was changed."
+      cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" false "${new_env}"
+      return 0
+    fi
+  elif [ "${old_env}" != "${new_env}" ]; then
+    if ! cloneContainerEnvVariables "${shared_env}" "${old_env}" "${new_env}"; then
+      showError "The VDM_${new_env}_* values could not be added to ${shared_env}, nothing was changed."
+      cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" true "${new_env}"
+      return 0
+    fi
+    env_added=true
+  fi
+  ##########################
+  ### 14. the docker-compose.yml of the clone
+  rc=0
+  rewriteJoomlaComposeIdentity "${src_yml}" "${new_yml}" "${old_key}" "${VDM_KEY}" "${old_env}" "${new_env}" \
+    "${old_sub}" "${VDM_SUBDOMAIN}" "${old_domain}" "${VDM_DOMAIN}" || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    if [ "${rc}" -eq 2 ]; then
+      showError "A value of the (${container}) container survived the rewrite of its docker-compose.yml, so the clone was rolled back.\n\n\
+Please open an issue and report octojoom-clone-error-2 with a copy of the docker-compose.yml."
+    else
+      showError "The docker-compose.yml of the clone could not be written, so the clone was rolled back."
+    fi
+    cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" "${env_added}" "${new_env}"
+    return 0
+  fi
+  chmod 600 "${new_yml}"
+  ##########################
+  ### 15. let docker compose validate the new file (with the env file the clone will use)
+  env_file=$(getContainerEnvFile "${VDM_CONTAINER_TYPE}" "${new_container}" 'available')
+  if command -v docker >/dev/null 2>&1; then
+    if [ ${#env_file} -ge 1 ]; then
+      validation=$(docker compose --env-file "${env_file}" --file "${new_yml}" config -q 2>&1)
+    else
+      validation=$(docker compose --file "${new_yml}" config -q 2>&1)
+    fi
+    # shellcheck disable=SC2181
+    if [ $? -ne 0 ]; then
+      showError "docker compose rejected the docker-compose.yml of the clone, so the clone was rolled back:\n\n${validation}" 20
+      cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" "${env_added}" "${new_env}"
+      return 0
+    fi
+  fi
+  ##########################
+  ### 16. stop the source containers so the database files are copied in a consistent state
+  if ${source_running}; then
+    showInfo "Stopping the (${container}) containers for the copy, please wait..." 7
+    if ! composeSourceContainer "${container}" 'stop'; then
+      showError "The (${container}) containers could not be stopped, so the clone was rolled back."
+      cloneJoomlaRollback "${new_dir}" '' false "${shared_env}" "${env_added}" "${new_env}"
+      return 0
+    fi
+  fi
+  ##########################
+  ### 17. copy the project folder (including hidden files, keeping owners and permissions)
+  mkdir -p "${new_project}"
+  project_created=true
+  rm -f "${VDM_SRC_PATH}/.clone_status"
+  progressSwitchOn
+  {
+    sudo cp -a "${VDM_PROJECT_PATH}/${project}/." "${new_project}/" 2>"${VDM_SRC_PATH}/.clone_error"
+    echo $? >"${VDM_SRC_PATH}/.clone_status"
+    progressSwitchOff
+  } &
+  showProgress "Copying the (${project}) project folder to (${VDM_KEY}).\n(cp -a ${project}/. ${VDM_KEY}/)" "Cloning Project Files"
+  wait
+  copy_status=$(cat "${VDM_SRC_PATH}/.clone_status" 2>/dev/null)
+  ##########################
+  ### 18. start the source containers again (even when the copy failed)
+  if ${source_running}; then
+    showInfo "Starting the (${container}) containers again, please wait..." 7
+    composeSourceContainer "${container}" 'start' ||
+      warnings+="  - The (${container}) containers could not be started again, enable them from the menu.\n"
+  fi
+  if [ "${copy_status}" != "0" ]; then
+    showError "The project folder could not be copied, so the clone was rolled back:\n\n$(cat "${VDM_SRC_PATH}/.clone_error" 2>/dev/null)" 16
+    rm -f "${VDM_SRC_PATH}/.clone_status" "${VDM_SRC_PATH}/.clone_error"
+    cloneJoomlaRollback "${new_dir}" "${new_project}" "${project_created}" "${shared_env}" "${env_added}" "${new_env}"
+    return 0
+  fi
+  rm -f "${VDM_SRC_PATH}/.clone_status" "${VDM_SRC_PATH}/.clone_error"
+  ##########################
+  ### 19. point the cloned configuration.php at the clone's own database (and mailcatcher)
+  if ${patch_host}; then
+    if ! cloneJoomlaConfiguration "${new_project}/joomla/configuration.php" "${old_key}" "${VDM_KEY}" "${site_name}"; then
+      showError "The configuration.php of the clone could not be updated, so the clone was rolled back."
+      cloneJoomlaRollback "${new_dir}" "${new_project}" "${project_created}" "${shared_env}" "${env_added}" "${new_env}"
+      return 0
+    fi
+  fi
+  ##########################
+  ### 20. set host file if needed
+  updateHostFile
+  # also set the database domain
+  updateHostFile "${VDM_SUBDOMAIN}db"
+  # and the mailcatcher domain
+  ${VDM_SRC_MAILCATCHER} && updateHostFile "${VDM_SUBDOMAIN}mail"
+  ##########################
+  ### 21. things we do not change, but the user should know about
+  if ! ${patch_host}; then
+    warnings+="  - The database host (${host}) was NOT changed, the clone shares that database.\n"
+  fi
+  if [ -n "$(getJoomlaConfigValue "${new_project}/joomla/configuration.php" 'live_site')" ]; then
+    warnings+="  - configuration.php sets \$live_site, check that it fits ${new_container}.\n"
+  fi
+  if [ -n "$(getJoomlaConfigValue "${new_project}/joomla/configuration.php" 'cookie_domain')" ]; then
+    warnings+="  - configuration.php sets \$cookie_domain, check that it fits ${new_container}.\n"
+  fi
+  if sudo grep -qs "${container}" "${new_project}/joomla/.htaccess" "${new_project}/joomla/robots.txt" "${new_project}/joomla/web.config"; then
+    warnings+="  - ${container} is mentioned in .htaccess, robots.txt or web.config of the clone, check them.\n"
+  fi
+  ##########################
+  ### 22. show the details of the clone
+  message="                                                                      ${PROGRAM_NAME} v$_VERSION
+
+  The (${container}) container was cloned to (${new_container}).
+  --------------------------------------------------------------------
+    URL:              ${scheme}${new_container}
+    PHPMYADMIN:       ${scheme}${VDM_SUBDOMAIN}db.${VDM_DOMAIN}
+    DATABASE_HOST:    mariadb${VDM_KEY}:3306
+  --------------------------------------------------------------------
+    DOCKER COMPOSE:   ${new_yml}
+    PROJECT FOLDER:   ${new_project}
+    ENV VALUES:       VDM_${new_env}_* in ${env_target}
+  --------------------------------------------------------------------
+  The database name, users, passwords and table prefix are the same as in (${container}).
+  The clone is NOT enabled yet, use (Enable existing container) to start it.
+"
+  [ -n "${warnings}" ] && message+="
+  Please check:
+${warnings}"
+  whiptail --msgbox "${message}" --fb --backtitle "${BACK_TITLE}" 30 112
+  # return a success
+  return 0
+}
+
+# stop or start the containers of an enabled Joomla container
+# $1: container name (sub.domain.tld)   $2: stop or start
+function composeSourceContainer() {
+  local container="${1:-}"
+  local action="${2:-stop}"
+  local yml="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}/docker-compose.yml"
+  local evn_file
+  [ -f "${yml}" ] || return 1
+  # check if image has its own env file also
+  evn_file=$(getContainerEnvFile "${VDM_CONTAINER_TYPE}" "${container}")
+  if [ ${#evn_file} -ge 1 ]; then
+    docker compose --env-file "${evn_file}" --file "${yml}" "${action}"
+  else
+    docker compose --file "${yml}" "${action}"
+  fi
+}
+
+# remove what a failed clone created, so the host is left as it was
+# $1: new compose directory   $2: new project folder   $3: true when the project folder was created
+# $4: shared env file         $5: true when env values were added to it   $6: new env key
+function cloneJoomlaRollback() {
+  local new_dir="${1:-}"
+  local new_project="${2:-}"
+  local project_created="${3:-false}"
+  local shared_env="${4:-}"
+  local env_added="${5:-false}"
+  local new_env="${6:-}"
+  # the compose directory (and a per-container .env in it)
+  if [ -n "${new_dir}" ] && [ -d "${new_dir}" ]; then
+    rm -rf "${new_dir}"
+  fi
+  # the copied project folder (only the one we created, and only inside the projects path)
+  if [ "${project_created}" = "true" ] && [ -n "${new_project}" ] && [ -d "${new_project}" ] &&
+    [[ "${new_project}" == "${VDM_PROJECT_PATH}/"?* ]]; then
+    sudo rm -rf "${new_project}"
+  fi
+  # the env values added to the shared env file
+  if [ "${env_added}" = "true" ]; then
+    removeContainerEnvVariables "${shared_env}" "${new_env}"
   fi
 }
 
