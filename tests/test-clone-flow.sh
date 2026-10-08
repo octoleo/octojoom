@@ -147,6 +147,13 @@ docker() {
 
 sudo() {
   [ "${1:-}" = "-v" ] && return 0
+  # like root, write into a read-only file (the tests run as a normal user)
+  if [ "${1:-}" = "tee" ] && [ -f "${2:-}" ] && [ ! -w "${2:-}" ]; then
+    chmod u+w "$2" && "$@"
+    local rc=$?
+    chmod u-w "$2"
+    return "${rc}"
+  fi
   "$@"
 }
 
@@ -223,6 +230,7 @@ PHP
   echo 'RewriteEngine On' >"${VDM_PROJECT_PATH}/jcb/joomla/.htaccess"
   echo 'ibdata' >"${VDM_PROJECT_PATH}/jcb/db/ibdata1"
   echo 'max_execution_time = 124' >"${VDM_PROJECT_PATH}/jcb/php.ini"
+  rm -f "${WORK}/configuration.orig"
   cp "${VDM_PROJECT_PATH}/jcb/joomla/configuration.php" "${WORK}/configuration.orig"
   cp "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/docker-compose.yml" "${WORK}/compose.orig"
   # the source is running
@@ -356,7 +364,8 @@ check_source_untouched "expert"
 echo "# a disabled source is not touched"
 
 setup_home false
-rm -f "${VDM_REPO_PATH}/joomla/enabled/jcb.vdm.dev"
+# a link, or a copied folder where links are not supported (Windows)
+rm -rf "${VDM_REPO_PATH}/joomla/enabled/jcb.vdm.dev"
 printf '%s\n' traefik >"${RUNNING}"
 printf '%s\n' jcb.vdm.dev jcb test TEST test yes yes >"${ANSWERS}"
 cloneJoomlaContainer

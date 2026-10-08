@@ -109,6 +109,9 @@ octojoom_setup() {
 
   octojoom_load
   octojoom_globals
+  # on Windows the script calls docker.exe; send it to the docker stand-in
+  docker.exe() { docker "$@"; }
+  export -f docker.exe
 
   VDM_HOME_PATH="${OCTOJOOM_HOME}"
   VDM_SRC_PATH="${VDM_HOME_PATH}/.config/octojoom"

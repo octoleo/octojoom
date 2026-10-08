@@ -7,6 +7,7 @@
 # /usr/local/bin, system services, package managers, chown to other users) is
 # logged to ${STUB_DIR}/commands.log as "sudo-skipped ..." and succeeds without
 # running. What a skipped "tee" would have written is kept in ${STUB_DIR}/sudo-tee.log.
+# Like root, it can write read-only files (tee) and remove read-only trees (rm).
 
 # shellcheck source=tests/helpers/stub-lib.bash
 source "$(dirname "${BASH_SOURCE[0]}")/../stub-lib.bash"
@@ -53,4 +54,26 @@ for arg in "$@"; do
     ;;
   esac
 done
+
+# root may write read-only files and remove read-only trees; the tests run as a
+# normal user, so lift the owner write bit for the call and put it back after
+case "$1" in
+tee)
+  locked=()
+  for arg in "${@:2}"; do
+    if [[ "${arg}" != -* ]] && [ -f "${arg}" ] && [ ! -w "${arg}" ]; then
+      chmod u+w "${arg}" && locked+=("${arg}")
+    fi
+  done
+  "$@"
+  rc=$?
+  [ ${#locked[@]} -eq 0 ] || chmod u-w "${locked[@]}"
+  exit "${rc}"
+  ;;
+rm)
+  for arg in "${@:2}"; do
+    [[ "${arg}" != -* ]] && [ -d "${arg}" ] && chmod -R u+w "${arg}" 2>/dev/null
+  done
+  ;;
+esac
 exec "$@"
