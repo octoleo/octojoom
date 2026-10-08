@@ -49,7 +49,7 @@ jobs:
         run: |
           shellcheck -x tests/run.sh tests/test-clone.sh tests/test-clone-flow.sh \
             tests/helpers/common.bash tests/helpers/stub-lib.bash tests/helpers/bin/*
-          find tests -name '*.bats' -print0 | xargs -0 shellcheck -s bash
+          find tests -path tests/.cache -prune -o -name '*.bats' -print0 | xargs -0 shellcheck -s bash
 
   test:
     name: Tests (${{ matrix.os }})
