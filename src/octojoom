@@ -7356,8 +7356,9 @@ fi
 #####################################################################################################################VDM
 ######################################## SETUP KEY PATHS
 # we set a home path based on OS
-VDM_HOME_PATH=''
-case "$OS_NUMBER" in
+# (OCTOJOOM_HOME replaces it when set, so the test suite never touches a real home)
+VDM_HOME_PATH="${OCTOJOOM_HOME:-}"
+[ -n "${VDM_HOME_PATH}" ] || case "$OS_NUMBER" in
   1) # Linux
     VDM_HOME_PATH="/home/${USER}"
     ;;
