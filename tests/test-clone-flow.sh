@@ -32,6 +32,14 @@ pass() {
   echo "ok   - $1"
 }
 
+# file modes are not real on Windows (MSYS/Git Bash), so mode checks are skipped there
+mode_is() {
+  if [[ "${OSTYPE}" == "msys" || "${OSTYPE}" == "cygwin" ]]; then
+    return 0
+  fi
+  [ "$(stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1")" = "$2" ]
+}
+
 fail() {
   FAILED=$((FAILED + 1))
   echo "FAIL - $1"
@@ -265,7 +273,7 @@ fi
 [ "$(getJoomlaConfigValue "${CLONE_CONFIG}" db)" = "vdm_io" ] && [ "$(getJoomlaConfigValue "${CLONE_CONFIG}" dbprefix)" = "jcb_" ] &&
   [ "$(getJoomlaConfigValue "${CLONE_CONFIG}" secret)" = "keepme" ] && [ "$(getJoomlaConfigValue "${CLONE_CONFIG}" sitename)" = "JCB Site" ] &&
   pass "full clone: database name, prefix, secret and site name kept" || fail "full clone: a kept value changed"
-[ "$(stat -c '%a' "${CLONE_CONFIG}" 2>/dev/null || stat -f '%Lp' "${CLONE_CONFIG}")" = "444" ] && pass "full clone: configuration.php stays read only" ||
+mode_is "${CLONE_CONFIG}" 444 && pass "full clone: configuration.php stays read only" ||
   fail "full clone: configuration.php mode changed"
 grep -qx 'VDM_TEST_DB="vdm_io"' "${VDM_REPO_PATH}/joomla/.env" && grep -qx 'VDM_TEST_DB_ROOT="rootsecret"' "${VDM_REPO_PATH}/joomla/.env" &&
   grep -qx 'VDM_TEST_JOOMLA_DB_PREFIX="jcb_"' "${VDM_REPO_PATH}/joomla/.env" && pass "full clone: env values copied under TEST" ||

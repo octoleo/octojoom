@@ -30,6 +30,14 @@ pass() {
   echo "ok   - $1"
 }
 
+# file modes are not real on Windows (MSYS/Git Bash), so mode checks are skipped there
+mode_is() {
+  if [[ "${OSTYPE}" == "msys" || "${OSTYPE}" == "cygwin" ]]; then
+    return 0
+  fi
+  [ "$(stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1")" = "$2" ]
+}
+
 fail() {
   FAILED=$((FAILED + 1))
   echo "FAIL - $1"
@@ -369,7 +377,7 @@ fi
 grep -qF "public \$password = 'p@ss\\'word';" "${CONFIG}" && pass "configuration password unchanged" || fail "configuration password changed"
 [ "$(getJoomlaConfigValue "${CONFIG}" dbprefix)" = "jcb_" ] && pass "configuration dbprefix unchanged" || fail "configuration dbprefix changed"
 [ "$(getJoomlaConfigValue "${CONFIG}" secret)" = "abcDEF123" ] && pass "configuration secret unchanged" || fail "configuration secret changed"
-[ "$(stat -c '%a' "${CONFIG}" 2>/dev/null || stat -f '%Lp' "${CONFIG}")" = "644" ] && pass "configuration mode kept" || fail "configuration mode changed"
+mode_is "${CONFIG}" 644 && pass "configuration mode kept" || fail "configuration mode changed"
 
 # without a site name the name stays
 write_config "${CONFIG}"
@@ -435,7 +443,7 @@ if diff -q "${ENV}.orig" "${ENV}" >/dev/null; then
 else
   fail "env remove left differences" "$(diff "${ENV}.orig" "${ENV}")"
 fi
-[ "$(stat -c '%a' "${ENV}" 2>/dev/null || stat -f '%Lp' "${ENV}")" = "600" ] && pass "env remove leaves the file mode 600" || fail "env remove file mode"
+mode_is "${ENV}" 600 && pass "env remove leaves the file mode 600" || fail "env remove file mode"
 ls "${ENV}".?????? >/dev/null 2>&1 && fail "env remove left a temp file" || pass "env remove leaves no temp file"
 
 # a value the clone did not add survives the rollback
@@ -477,7 +485,7 @@ if [ "$(grep -c '^VDM_TEST_' "${WORK}/.env3")" -eq 9 ] && ! grep -q '^VDM_JCB_DB
 else
   fail "env file copy" "$(cat "${WORK}/.env3")"
 fi
-[ "$(stat -c '%a' "${WORK}/.env3" 2>/dev/null || stat -f '%Lp' "${WORK}/.env3")" = "600" ] && pass "env file copy is mode 600" || fail "env file copy mode"
+mode_is "${WORK}/.env3" 600 && pass "env file copy is mode 600" || fail "env file copy mode"
 cloneContainerEnvFile "${ENV}.orig" "${WORK}/.env4" JCB JCB
 diff -q "${ENV}.orig" "${WORK}/.env4" >/dev/null && pass "env file copy with the same key is identical" || fail "env file copy with the same key differs"
 
