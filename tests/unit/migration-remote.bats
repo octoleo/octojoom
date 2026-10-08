@@ -606,6 +606,30 @@ EOF
   refute_file_exists "${SANDBOX}/remote/archive.tar.gz"
 }
 
+@test "migration-remote: extraction creates a private directory without explicit mode options" {
+  local_remote
+  mkdir -p "${SANDBOX}/archive-source"
+  printf 'content\n' >"${SANDBOX}/archive-source/index.php"
+  tar -czf "${SANDBOX}/remote/archive.tar.gz" -C "${SANDBOX}/archive-source" .
+  hook_command ssh <<'EOF'
+mkdir() {
+  # Git Bash may reject mkdir -m even when ordinary directory creation works.
+  case " $* " in *' -m '* | *' --mode'*) return 13 ;; esac
+  command mkdir "$@" || return $?
+  if [[ "${OSTYPE}" != msys* && "${OSTYPE}" != cygwin* ]]; then
+    mode=$(stat -c '%a' "${*: -1}" 2>/dev/null || stat -f '%Lp' "${*: -1}") || return $?
+    [ "$mode" = 700 ] || return 14
+  fi
+}
+export -f mkdir
+HOME="${SANDBOX}/remote" bash -c "${*: -1}"
+EOF
+  run remoteUntarGz "${SANDBOX}/remote/archive.tar.gz" "${SANDBOX}/remote/extracted" web
+  assert_success
+  assert_file_contains "${SANDBOX}/remote/extracted/index.php" content
+  refute_file_exists "${SANDBOX}/remote/archive.tar.gz"
+}
+
 @test "migration-remote: archive checksums reject an invalid or mismatched remote digest" {
   printf 'archive\n' >"${SANDBOX}/archive.tar.gz"
   hook_command ssh <<'EOF'

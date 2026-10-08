@@ -89,7 +89,7 @@ EOF
   if ! is_windows; then assert_equal "$(file_mode "$SANDBOX/project.tar.gz")" 600; fi
   refute_file_exists "$STUB_DIR/source-stopped"
   refute_file_exists "$VDM_REPO_PATH/joomla/.clone.lock"
-  mkdir -m 700 "$SANDBOX/unpacked"
+  createPrivateDirectory "$SANDBOX/unpacked"
   run extractJoomlaMigration "$SANDBOX/project.tar.gz" "$SANDBOX/unpacked"
   assert_success
   assert_file_contains "$SANDBOX/unpacked/project/db/ibdata1" 'cold database bytes'
@@ -123,6 +123,7 @@ EOF
 }
 
 @test "migration package: refuses symlink project content before stopping services" {
+  skip_on_windows 'Git Bash does not create native symbolic links'
   ln -s /etc/passwd "$VDM_PROJECT_PATH/source/joomla/unsafe"
   run exportJoomlaMigration source.example.org "$SANDBOX/project.tar.gz"
   assert_failure
@@ -206,6 +207,7 @@ EOF
 }
 
 @test "migration archive: refuses symbolic links before extracting" {
+  skip_on_windows 'Git Bash does not create native symbolic links'
   mkdir "$SANDBOX/bad"
   ln -s /etc "$SANDBOX/bad/escape"
   tar -czf "$SANDBOX/bad.tar.gz" -C "$SANDBOX/bad" .
@@ -236,15 +238,20 @@ EOF
   run migrationValidateTar "$SANDBOX/newline.tar.gz" folder
   assert_failure
   printf x > "$SANDBOX/bad/executable"
-  chmod 4755 "$SANDBOX/bad/executable"
-  tar -czf "$SANDBOX/setuid.tar.gz" -C "$SANDBOX/bad" executable
+  if is_windows; then
+    # NTFS does not retain Unix setuid bits; write them into the archive itself.
+    tar --mode=4755 -czf "$SANDBOX/setuid.tar.gz" -C "$SANDBOX/bad" executable
+  else
+    chmod 4755 "$SANDBOX/bad/executable"
+    tar -czf "$SANDBOX/setuid.tar.gz" -C "$SANDBOX/bad" executable
+  fi
   run migrationValidateTar "$SANDBOX/setuid.tar.gz" folder
   assert_failure
 }
 
 @test "migration manifest: refuses unknown or duplicate settings without changing globals" {
   exportJoomlaMigration source.example.org "$SANDBOX/project.tar.gz"
-  mkdir -m 700 "$SANDBOX/unpacked"
+  createPrivateDirectory "$SANDBOX/unpacked"
   extractJoomlaMigration "$SANDBOX/project.tar.gz" "$SANDBOX/unpacked"
   printf 'VDM_PROJECT_PATH=/outside\n' >> "$SANDBOX/unpacked/manifest.env"
   original="$VDM_PROJECT_PATH"

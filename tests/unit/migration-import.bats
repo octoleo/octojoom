@@ -82,11 +82,14 @@ EOF
   refute_file_exists should-not-execute
 }
 
-@test "migration collision guard refuses Docker inspection failure and dangling project links" {
+@test "migration collision guard refuses Docker inspection failure" {
   fail_command docker-ps 42
   run migrationDestinationAvailable new new.destination.test
   assert_status 2
-  rm -f "$STUB_DIR/fail/docker-ps"
+}
+
+@test "migration collision guard refuses dangling project links" {
+  skip_on_windows 'Git Bash cannot reliably create dangling directory symlinks'
   ln -s "$SANDBOX/missing" "$VDM_PROJECT_PATH/new"
   run migrationDestinationAvailable new new.destination.test
   assert_status 1
@@ -285,5 +288,20 @@ prepare_activation_fixture() {
   assert_status 129
   [[ "$output" == *'could not be stopped'* ]]
   [ -e "$VDM_REPO_PATH/joomla/enabled/new.destination.test" ]
+  assert_file_exists "$VDM_REPO_PATH/joomla/available/new.destination.test/docker-compose.yml"
+}
+
+@test "migration activation cleans a Git Bash directory marker without removing prepared or neighboring projects" {
+  prepare_activation_fixture
+  mkdir -p "$VDM_REPO_PATH/joomla/enabled/neighbor.destination.test"
+  enableContainer() {
+    mkdir -p "$VDM_REPO_PATH/joomla/enabled/new.destination.test"
+    cp "$PACKAGE/compose/docker-compose.yml" "$VDM_REPO_PATH/joomla/enabled/new.destination.test/docker-compose.yml"
+  }
+  migrationWaitHealthy() { return 1; }
+  run activateJoomlaMigration new new.destination.test false ''
+  assert_failure
+  [ ! -e "$VDM_REPO_PATH/joomla/enabled/new.destination.test" ]
+  [ -d "$VDM_REPO_PATH/joomla/enabled/neighbor.destination.test" ]
   assert_file_exists "$VDM_REPO_PATH/joomla/available/new.destination.test/docker-compose.yml"
 }
