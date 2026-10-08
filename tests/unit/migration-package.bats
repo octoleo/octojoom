@@ -86,7 +86,7 @@ EOF
 @test "migration package: exports scoped secrets, companion files and cold data; restarts source" {
   run exportJoomlaMigration source.example.org "$SANDBOX/project.tar.gz"
   assert_success
-  assert_equal "$(file_mode "$SANDBOX/project.tar.gz")" 600
+  if ! is_windows; then assert_equal "$(file_mode "$SANDBOX/project.tar.gz")" 600; fi
   refute_file_exists "$STUB_DIR/source-stopped"
   refute_file_exists "$VDM_REPO_PATH/joomla/.clone.lock"
   mkdir -m 700 "$SANDBOX/unpacked"
@@ -100,7 +100,7 @@ EOF
   migrationReadEnvValue "$SANDBOX/unpacked/compose/.env" VDM_SOURCE_DB_PASS actual
   migrationReadEnvValue "$VDM_REPO_PATH/joomla/.env" VDM_SOURCE_DB_PASS expected
   assert_equal "$actual" "$expected"
-  assert_equal "$(file_mode "$SANDBOX/unpacked/project/joomla/configuration.php")" 644
+  if ! is_windows; then assert_equal "$(file_mode "$SANDBOX/unpacked/project/joomla/configuration.php")" 644; fi
   assert_command '^docker stop '
   assert_command '^docker start '
 }

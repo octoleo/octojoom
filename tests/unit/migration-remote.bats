@@ -799,9 +799,12 @@ EOF
 source_path="${@: -2:1}"
 destination_path="${*: -1}"
 source_path="${source_path#web:}"
-[ "$(stat -c %a "${source_path%/*}")" = 700 ] || exit 90
-[ "$(stat -c %a "${source_path}")" = 600 ] || exit 91
-[ "$(stat -c %a "${destination_path%/*}")" = 700 ] || exit 92
+if [[ "${OSTYPE}" != msys* && "${OSTYPE}" != cygwin* ]]; then
+  file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+  [ "$(file_mode "${source_path%/*}")" = 700 ] || exit 90
+  [ "$(file_mode "${source_path}")" = 600 ] || exit 91
+  [ "$(file_mode "${destination_path%/*}")" = 700 ] || exit 92
+fi
 exec /usr/bin/rsync -a -- "${source_path}" "${destination_path}"
 HOOK
   run pullRemoteFolder "${VDM_PROJECT_PATH}/site1" "${remote_path}" web
@@ -822,8 +825,11 @@ HOOK
 source_path="${@: -2:1}"
 destination_path="${*: -1}"
 destination_path="${destination_path#web:}"
-[ "$(stat -c %a "${source_path}")" = 600 ] || exit 90
-[ "$(stat -c %a "${destination_path%/*}")" = 700 ] || exit 91
+if [[ "${OSTYPE}" != msys* && "${OSTYPE}" != cygwin* ]]; then
+  file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+  [ "$(file_mode "${source_path}")" = 600 ] || exit 90
+  [ "$(file_mode "${destination_path%/*}")" = 700 ] || exit 91
+fi
 exec /usr/bin/rsync -a -- "${source_path}" "${destination_path}"
 HOOK
   run pushContainerMigration "${LOCAL_PATH}" 'joomla/available/site.vdm.dev' web
@@ -860,7 +866,11 @@ HOOK
   local_remote
   mkdir -p "${SANDBOX}/archive-source"
   printf 'do not extract\n' >"${SANDBOX}/archive-source/payload"
-  tar -czf "${SANDBOX}/remote/archive.tar.gz" --transform='s|payload|../outside|' -C "${SANDBOX}/archive-source" payload
+  if tar --version | grep -q 'GNU tar'; then
+    tar -czf "${SANDBOX}/remote/archive.tar.gz" --transform='s|payload|../outside|' -C "${SANDBOX}/archive-source" payload
+  else
+    tar -s ',payload,../outside,' -czf "${SANDBOX}/remote/archive.tar.gz" -C "${SANDBOX}/archive-source" payload
+  fi
   run remoteUntarGz "${SANDBOX}/remote/archive.tar.gz" "${SANDBOX}/remote/extracted" web
   assert_failure
   assert_file_exists "${SANDBOX}/remote/archive.tar.gz"

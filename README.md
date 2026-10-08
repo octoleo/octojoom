@@ -235,8 +235,8 @@ source packaging and destination configuration process.
   `~/.ssh/config` appear in the selector; manual host entry is also available.
   Destination questions are displayed through an interactive SSH terminal when
   pushing, and locally when pulling. SSH keys are not included in the archive.
-- Both hosts need Bash 4+, Docker access, Docker Compose, GNU `tar` available as
-  `tar`, gzip, rsync with `--protect-args` support, and SHA-256 tooling
+- Both hosts need Bash 4+, Docker access, Docker Compose, GNU tar or macOS
+  bsdtar available as `tar`, gzip, rsync with `--protect-args` support, and SHA-256 tooling
   (`sha256sum` or `shasum`). Destination dialogs require whiptail. The migration
   account needs permission to read/copy container-owned files and preserve
   ownership, using sudo where required.

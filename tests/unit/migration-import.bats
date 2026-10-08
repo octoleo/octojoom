@@ -232,3 +232,58 @@ EOF
   run migrationVerifyApplication new new.destination.test true
   assert_success
 }
+
+prepare_activation_fixture() {
+  local destination="$VDM_REPO_PATH/joomla/available/new.destination.test"
+  mkdir -p "$destination"
+  cp "$PACKAGE/compose/docker-compose.yml" "$destination/docker-compose.yml"
+  cp "$PACKAGE/compose/.env" "$destination/.env"
+  migrationDestinationReady() { return 0; }
+}
+
+@test "migration startup failure shows one visible redacted error without hidden helper dialogs" {
+  prepare_activation_fixture
+  fail_command docker-compose-up 23
+  docker() {
+    if [[ "$*" == *' up -d' ]]; then printf 'raw-sensitive-docker-output\n' >&2; fi
+    command docker "$@"
+  }
+  run activateJoomlaMigration new new.destination.test false ''
+  assert_failure
+  assert_dialog 'The imported site failed activation'
+  assert_equal "$(grep -c '^--msgbox' "$STUB_DIR/dialogs.log")" 1
+  refute_dialog 'Docker Compose failed for'
+  refute_dialog raw-sensitive-docker-output
+  [[ "$output" != *raw-sensitive-docker-output* ]]
+  [ ! -e "$VDM_REPO_PATH/joomla/enabled/new.destination.test" ]
+}
+
+@test "migration preparation cleans its staging and lock after an SSH hangup" {
+  extractJoomlaMigration() { kill -HUP "$BASHPID"; return 1; }
+  run prepareJoomlaMigration "$SANDBOX/archive.tar.gz" new NEW new.destination.test false '' '' ''
+  assert_status 129
+  [ ! -e "$VDM_REPO_PATH/joomla/.clone.lock" ]
+  [ -z "$(find "$VDM_PROJECT_PATH" -maxdepth 1 -name '.migration.*' -print)" ]
+  [ ! -e "$VDM_PROJECT_PATH/new" ]
+}
+
+@test "migration activation hangup stops the new target and removes only its enabled marker" {
+  prepare_activation_fixture
+  migrationWaitHealthy() { kill -HUP "$BASHPID"; return 1; }
+  run activateJoomlaMigration new new.destination.test false ''
+  assert_status 129
+  assert_command 'docker compose .* down'
+  [ ! -e "$VDM_REPO_PATH/joomla/enabled/new.destination.test" ]
+  assert_file_exists "$VDM_REPO_PATH/joomla/available/new.destination.test/docker-compose.yml"
+}
+
+@test "migration activation retains the enabled marker when interruption cleanup cannot stop containers" {
+  prepare_activation_fixture
+  fail_command docker-compose-down 24
+  migrationWaitHealthy() { kill -HUP "$BASHPID"; return 1; }
+  run activateJoomlaMigration new new.destination.test false ''
+  assert_status 129
+  [[ "$output" == *'could not be stopped'* ]]
+  [ -e "$VDM_REPO_PATH/joomla/enabled/new.destination.test" ]
+  assert_file_exists "$VDM_REPO_PATH/joomla/available/new.destination.test/docker-compose.yml"
+}

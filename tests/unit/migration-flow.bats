@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# shellcheck disable=SC2034,SC2317
+# Each Bats test has an isolated shell; globals are consumed by loaded functions.
+# shellcheck disable=SC2030,SC2031,SC2034,SC2317
 
 load ../helpers/common
 
@@ -171,6 +172,9 @@ flow_local_archive() {
   mkdir -p "${SANDBOX}/bin"
   cat >"${SANDBOX}/bin/octojoom" <<'SCRIPT'
 #!/usr/bin/env bash
+function migrationWorker() {
+  return 0
+}
 printf '%s\n' "$@" >"${STUB_DIR}/worker-arguments"
 SCRIPT
   chmod +x "${SANDBOX}/bin/octojoom"
@@ -184,6 +188,24 @@ SCRIPT
   refute_file_exists "${SANDBOX}/injected"
   [ "$(sed -n '1p' "${STUB_DIR}/ssh-arguments")" = -- ]
   [ "$(sed -n '2p' "${STUB_DIR}/ssh-arguments")" = deploy@example.org ]
+}
+
+@test "remote worker refuses an old installed script before executing its startup code" {
+  octojoom_load
+  mkdir -p "${SANDBOX}/bin"
+  cat >"${SANDBOX}/bin/octojoom" <<'SCRIPT'
+#!/usr/bin/env bash
+touch "${STUB_DIR}/old-startup-executed"
+printf '%s\n' 'old script startup'
+SCRIPT
+  chmod +x "${SANDBOX}/bin/octojoom"
+  PATH="${SANDBOX}/bin:${PATH}"
+  ssh() { bash -c "${*: -1}"; }
+  run remoteMigrationWorker deploy@example.org false capabilities
+  assert_status 1
+  assert_output_contains 'Update Octojoom on the remote host before migrating.'
+  refute_output_contains 'old script startup'
+  refute_file_exists "${STUB_DIR}/old-startup-executed"
 }
 
 @test "worker imports only a private archive and does not load its host overrides into the destination" {

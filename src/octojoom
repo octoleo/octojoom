@@ -7886,8 +7886,12 @@ function extractJoomlaMigration() {
   set +x
   local archive="$1" destination="$2" contents mode refs name value
   [ -d "$destination" ] && ! migrationPathHasSymlink "$destination" || return 1
-  mode=$(stat -c '%a' "$destination" 2>/dev/null || stat -f '%Lp' "$destination" 2>/dev/null) || return 1
-  [ "$mode" = 700 ] || { showError 'Migration extraction requires an empty private directory (mode 700).'; return 1; }
+  # MSYS/Git Bash reports synthetic Unix modes; Windows privacy is governed by
+  # the account's NTFS access controls rather than those reported mode bits.
+  if [ "${OS_NUMBER:-0}" != 3 ]; then
+    mode=$(stat -c '%a' "$destination" 2>/dev/null || stat -f '%Lp' "$destination" 2>/dev/null) || return 1
+    [ "$mode" = 700 ] || { showError 'Migration extraction requires an empty private directory (mode 700).'; return 1; }
+  fi
   contents=$(find "$destination" -mindepth 1 -print -quit 2>/dev/null) || return 1
   [ -z "$contents" ] || return 1
   if ! migrationValidateTar "$archive" bundle; then
@@ -8375,6 +8379,7 @@ function prepareJoomlaMigration() {
     fi; if [ -n "$staging" ]; then runPrivileged rm -rf -- "$staging"; fi; rmdir "$lock" 2>/dev/null || status=1; exit "$status"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    trap 'exit 129' HUP
     migrationDestinationAvailable "$key" "$host" || { showError 'Destination identity is already used, or Docker could not verify its availability.'; exit 1; }
     staging=$(mktemp -d "${VDM_PROJECT_PATH}/.migration.XXXXXX") || exit 1
     extractJoomlaMigration "$archive" "$staging" || { showError 'The migration package could not be safely extracted.'; exit 1; }
@@ -8454,9 +8459,31 @@ function migrationVerifyApplication() {
 }
 
 function activateJoomlaMigration() {
-  local key="$1" host="$2" secure="$3" resolver="${4:-}" destination="${VDM_REPO_PATH}/joomla/available/$2" reason status=0
-  reason=$(migrationDestinationReady "$secure" "$resolver") || { showNotice "Project is prepared but remains disabled.\n\n${reason}"; return 1; }
   (
+  local key="$1" host="$2" secure="$3" resolver="${4:-}" destination="${VDM_REPO_PATH}/joomla/available/$2" reason status=0
+  local activation_started=false
+  # shellcheck disable=SC2317 # Called indirectly by the signal traps below.
+  migrationActivationInterrupted() {
+    trap - HUP INT TERM
+    if "$activation_started"; then
+      if migrationRunCompose "$destination/.env" "$destination/docker-compose.yml" down >/dev/null 2>&1; then
+        rm -f "${VDM_REPO_PATH}/joomla/enabled/${host}"
+      else
+        printf '%s\n' 'Migration activation was interrupted and its containers could not be stopped. The enabled marker and prepared files were retained for recovery.' >&2
+      fi
+    fi
+    exit "$1"
+  }
+  trap 'migrationActivationInterrupted 129' HUP
+  trap 'migrationActivationInterrupted 130' INT
+  trap 'migrationActivationInterrupted 143' TERM
+  reason=$(migrationDestinationReady "$secure" "$resolver") || { showNotice "Project is prepared but remains disabled.\n\n${reason}"; return 1; }
+  activation_started=true
+  (
+    # Existing enable helpers can open dialogs on errors. Their output is kept
+    # private here, so suppress their UI and report once after rollback below.
+    showError() { :; }
+    showNotice() { :; }
     migrationUnexportComposeReferences "$destination/docker-compose.yml" || exit 1
     VDM_CONTAINER_TYPE=joomla VDM_CONTAINER="$host" enableContainer joomla
   ) >/dev/null 2>&1 || status=$?
@@ -8473,6 +8500,7 @@ function activateJoomlaMigration() {
     return 1
   fi
   return 0
+  )
 }
 
 # User interaction stays on the destination. Opening a package only discloses
@@ -8489,6 +8517,7 @@ function importJoomlaMigration() {
     trap 'runPrivileged rm -rf -- "$preview"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    trap 'exit 129' HUP
     migrationValidateTar "$archive" bundle || { showError 'The migration package could not be safely validated.'; exit 1; }
     # Read only metadata for the destination questions. Large project data is
     # extracted once, by prepareJoomlaMigration after the user has chosen a plan.
