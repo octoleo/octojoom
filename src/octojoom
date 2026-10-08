@@ -10,6 +10,9 @@ _bash_v=4
 # The program full name
 PROGRAM_NAME="Octojoom"
 
+# Git Bash on Windows sets USERNAME but not USER
+: "${USER:=${USERNAME:-$(id -un 2>/dev/null)}}"
+
 # Set Server Hostname
 SERVER_HOSTNAME="$(hostname)"
 
