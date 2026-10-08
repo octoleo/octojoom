@@ -829,7 +829,9 @@ if [[ "${OSTYPE}" != msys* && "${OSTYPE}" != cygwin* ]]; then
   [ "$(file_mode "${source_path}")" = 600 ] || exit 91
   [ "$(file_mode "${destination_path%/*}")" = 700 ] || exit 92
 fi
-exec /usr/bin/rsync -a -- "${source_path}" "${destination_path}"
+# macOS rsync starts its local peer through PATH. Keep that protocol process
+# outside this client-only hook, including its privacy checks and transfer log.
+PATH="/usr/bin:${PATH}" exec /usr/bin/rsync -a -- "${source_path}" "${destination_path}"
 HOOK
   run pullRemoteFolder "${VDM_PROJECT_PATH}/site1" "${remote_path}" web
   assert_success
@@ -854,7 +856,9 @@ if [[ "${OSTYPE}" != msys* && "${OSTYPE}" != cygwin* ]]; then
   [ "$(file_mode "${source_path}")" = 600 ] || exit 90
   [ "$(file_mode "${destination_path%/*}")" = 700 ] || exit 91
 fi
-exec /usr/bin/rsync -a -- "${source_path}" "${destination_path}"
+# macOS rsync starts its local peer through PATH. Keep that protocol process
+# outside this client-only hook, including its privacy checks and transfer log.
+PATH="/usr/bin:${PATH}" exec /usr/bin/rsync -a -- "${source_path}" "${destination_path}"
 HOOK
   run pushContainerMigration "${LOCAL_PATH}" 'joomla/available/site.vdm.dev' web
   assert_success
