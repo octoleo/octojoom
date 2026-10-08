@@ -17,6 +17,7 @@ setup() {
   VDM_CONTAINER_TYPE='joomla'
   LOCAL_PATH="${VDM_REPO_PATH}/joomla/available/site.vdm.dev"
   REMOTE_PATH="/home/remote/Docker/joomla/available/site.vdm.dev"
+  export TMPDIR="${SANDBOX}"
 }
 
 # an ssh config with the given Host entries
@@ -154,37 +155,37 @@ EOF
 ###############################################################################
 # push and pull of a container folder
 
-@test "migration-remote: pushContainerMigration syncs the container folder to the remote repo path" {
-  remote_octojoom
+@test "migration-remote: pushContainerMigration sends one compressed archive to the remote repo path" {
+  require_local_rsync
+  local_remote
   make_available site.vdm.dev
   run pushContainerMigration "${LOCAL_PATH}" "joomla/available/site.vdm.dev" web
   assert_success
-  assert_command "^ssh -- web mkdir -p -- '${REMOTE_PATH}.migration.[0-9]+.[0-9]+'$"
-  assert_command "^rsync -avz --protect-args --delete -- ${LOCAL_PATH}/ web:${REMOTE_PATH}.migration.[0-9]+.[0-9]+/$"
+  assert_command '^rsync -av --protect-args -- .*octojoom-archive.* web:.*\.migration\.[[:alnum:]]+/archive.tar.gz$'
+  refute_command '^rsync .*--delete'
   refute_command "rm -Irf"
   assert_dialog "success"
   assert_file_exists "${LOCAL_PATH}/docker-compose.yml"
 }
 
 @test "migration-remote: pushContainerMigration backs up an existing remote container when asked" {
-  remote_octojoom
+  require_local_rsync
+  local_remote
   make_available site.vdm.dev
-  touch "${STUB_DIR}/remote_has_folder"
+  local remote_path="${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev"
+  mkdir -p "${remote_path}"
   answers yes
   run pushContainerMigration "${LOCAL_PATH}" "joomla/available/site.vdm.dev" web
   assert_success
-  assert_command "mv -- '${REMOTE_PATH}' '${REMOTE_PATH}_backup_[0-9_]+'.*exit 20"
-  assert_command "^rsync -avz --protect-args --delete -- ${LOCAL_PATH}/ web:${REMOTE_PATH}.migration.[0-9]+.[0-9]+/$"
+  assert_command "mv -- '${remote_path}' '${remote_path}_backup_[0-9_]+'.*exit 20"
+  assert_command '^rsync -av --protect-args -- .*octojoom-archive.* web:.*archive.tar.gz$'
 }
 
 @test "migration-remote: pushContainerMigration reports a failed transfer" {
-  remote_octojoom
+  local_remote
   make_available site.vdm.dev
-  # the check after the sync finds the remote copy incomplete
   hook_command rsync <<'EOF'
-case " $* " in
-*" --dry-run "*) printf 'sending incremental file list\ndeleting partial.tmp\n' ;;
-esac
+exit 23
 EOF
   run pushContainerMigration "${LOCAL_PATH}" "joomla/available/site.vdm.dev" web
   assert_failure
@@ -202,56 +203,61 @@ EOF
 }
 
 @test "migration-remote: pullContainerMigration stages and verifies the remote container" {
-  remote_octojoom
-  touch "${STUB_DIR}/remote_has_folder"
+  require_local_rsync
+  local_remote
+  mkdir -p "${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev"
+  printf 'downloaded\n' >"${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev/docker-compose.yml"
   run pullContainerMigration "${LOCAL_PATH}" "joomla/available/site.vdm.dev" web
   assert_success
   assert_command '^ssh .*VDM_REPO_PATH'
   assert_dialog "PULL"
-  assert_command "^rsync -avz --protect-args -- web:${REMOTE_PATH}/ ${LOCAL_PATH}.migration.*/$"
-  assert_command '^rsync .*--dry-run.*--checksum'
+  assert_command '^rsync -av --protect-args -- web:.*octojoom-pull\.[[:alnum:]]+/archive.tar.gz '
+  assert_command 'sha256sum|shasum'
   assert_file_exists "${LOCAL_PATH}"
 }
 
 ###############################################################################
 # migrate tasks
 
-@test "migration-remote: joomla__TRuST__migrate pushes the selected container to the selected remote" {
-  remote_octojoom
+@test "migration-remote: joomla__TRuST__migratefiles pushes the selected container to the selected remote" {
+  require_local_rsync
+  local_remote
   ssh_config alpha web
   make_available other.vdm.dev
   make_available site.vdm.dev
   answers site.vdm.dev push web yes
-  run joomla__TRuST__migrate
+  run joomla__TRuST__migratefiles
   assert_success
   assert_answers_used
-  assert_command "^rsync -avz --protect-args --delete -- ${LOCAL_PATH}/ web:${REMOTE_PATH}.migration.[0-9]+.[0-9]+/$"
+  assert_command '^rsync -av --protect-args -- .*octojoom-archive.* web:.*site.vdm.dev.*archive.tar.gz$'
   refute_command "other.vdm.dev"
 }
 
-@test "migration-remote: joomla__TRuST__migrate does nothing when the confirmation is declined" {
+@test "migration-remote: joomla__TRuST__migratefiles does nothing when the confirmation is declined" {
   remote_octojoom
   ssh_config web
   make_available site.vdm.dev
   answers site.vdm.dev push web no
-  run joomla__TRuST__migrate
+  run joomla__TRuST__migratefiles
   assert_success
   refute_command '^(ssh|rsync|scp)'
 }
 
-@test "migration-remote: joomla__TRuST__migrate is cancelled when no remote is selected" {
+@test "migration-remote: joomla__TRuST__migratefiles is cancelled when no remote is selected" {
   ssh_config web
   make_available site.vdm.dev
   answers site.vdm.dev push "<cancel>"
-  run joomla__TRuST__migrate
+  run joomla__TRuST__migratefiles
   assert_success
   assert_dialog "cancelled"
   refute_command '^(ssh|rsync|scp)'
 }
 
 @test "migration-remote: directory__TRuST__migrate runs the pull for the selected project directory" {
-  remote_octojoom
-  touch "${STUB_DIR}/remote_has_folder"
+  require_local_rsync
+  local_remote
+  mkdir -p "${SANDBOX}/remote/Projects/site1"
+  printf 'downloaded\n' >"${SANDBOX}/remote/Projects/site1/index.php"
   ssh_config web
   mkdir -p "${VDM_PROJECT_PATH}/site1" "${VDM_PROJECT_PATH}/site2"
   answers site1 pull web yes no
@@ -260,8 +266,8 @@ EOF
   assert_answers_used
   assert_command '^ssh .*VDM_PROJECT_PATH'
   assert_dialog "PULL"
-  assert_command '^rsync -avz --protect-args -- web:/home/remote/Projects/site1/'
-  assert_command '^rsync .*--dry-run.*--checksum'
+  assert_command '^rsync -av --protect-args -- web:.*octojoom-pull.*archive.tar.gz '
+  assert_command 'sha256sum|shasum'
 }
 
 @test "migration-remote: directory__TRuST__migrate does nothing when the confirmation is declined" {
@@ -375,10 +381,13 @@ EOF
 }
 
 @test "migration-remote: failed pull preserves existing local files and removes its staging directory" {
-  remote_octojoom
-  touch "${STUB_DIR}/remote_has_folder"
+  local_remote
+  mkdir -p "${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev"
+  printf 'new\n' >"${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev/new.php"
   make_available site.vdm.dev
-  fail_command rsync 23
+  hook_command rsync <<'EOF'
+exit 23
+EOF
   run pullContainerMigration "${LOCAL_PATH}" "joomla/available/site.vdm.dev" web
   assert_failure
   assert_file_exists "${LOCAL_PATH}/docker-compose.yml"
@@ -388,13 +397,12 @@ EOF
 }
 
 @test "migration-remote: incomplete pull verification preserves the original directory" {
-  remote_octojoom
-  touch "${STUB_DIR}/remote_has_folder"
+  local_remote
   make_available site.vdm.dev
+  mkdir -p "${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev"
+  printf 'new\n' >"${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev/new.php"
   hook_command rsync <<'EOF'
-case " $* " in
-*' --dry-run '*) printf '%s\n' '>f+++++++++ missing.php' ;;
-esac
+printf 'corrupt archive\n' >"${*: -1}"
 EOF
   run pullContainerMigration "${LOCAL_PATH}" "joomla/available/site.vdm.dev" web
   assert_failure
@@ -516,13 +524,13 @@ EOF
   assert_answers_used
   assert_file_contains "${SANDBOX}/remote/Projects/site1/index.php" 'project contents'
   assert_command 'sha256sum|shasum'
-  assert_command 'tar -xzf'
+  assert_command 'tar --no-same-owner -xzf'
   run find "${SANDBOX}" -maxdepth 1 -name 'octojoom-archive.*'
   assert_equal "${output}" ''
 }
 
 @test "migration-remote: directory push keeps its recovery archive and original remote on extraction error" {
-  remote_octojoom
+  local_remote
   mkdir -p "${VDM_PROJECT_PATH}/site1"
   printf 'project contents\n' >"${VDM_PROJECT_PATH}/site1/index.php"
   TMPDIR="${SANDBOX}"
@@ -630,7 +638,7 @@ EOF
   make_available site.vdm.dev
   fail_command rsync 23
   answers site.vdm.dev push web yes
-  run joomla__TRuST__migrate
+  run joomla__TRuST__migratefiles
   assert_failure
   assert_dialog 'failed'
 }
@@ -779,4 +787,83 @@ EOF
   assert_file_exists "${remote_path}/docker-compose.yml"
   run find "$(dirname "${remote_path}")" -path '*_backup_*/old.txt'
   assert_output_contains '_backup_'
+}
+
+@test "migration-remote: pull packages privately on the source and transfers one archive" {
+  require_local_rsync
+  local_remote
+  local remote_path="${SANDBOX}/remote/Projects/site1"
+  mkdir -p "${remote_path}"
+  printf 'private project contents\n' >"${remote_path}/index.php"
+  hook_command rsync <<'HOOK'
+source_path="${@: -2:1}"
+destination_path="${*: -1}"
+source_path="${source_path#web:}"
+[ "$(stat -c %a "${source_path%/*}")" = 700 ] || exit 90
+[ "$(stat -c %a "${source_path}")" = 600 ] || exit 91
+[ "$(stat -c %a "${destination_path%/*}")" = 700 ] || exit 92
+exec /usr/bin/rsync -a -- "${source_path}" "${destination_path}"
+HOOK
+  run pullRemoteFolder "${VDM_PROJECT_PATH}/site1" "${remote_path}" web
+  assert_success
+  assert_file_contains "${VDM_PROJECT_PATH}/site1/index.php" 'private project contents'
+  assert_command '^rsync -av --protect-args -- web:.*archive.tar.gz .*archive.tar.gz$'
+  run awk '$1 == "rsync" { count++ } END { print count }' "${STUB_DIR}/commands.log"
+  assert_equal "${output}" 1
+  run find "${SANDBOX}" -type d -name 'octojoom-pull.*'
+  assert_equal "${output}" ''
+}
+
+@test "migration-remote: push archive and remote workspace are private during transfer" {
+  require_local_rsync
+  local_remote
+  make_available site.vdm.dev
+  hook_command rsync <<'HOOK'
+source_path="${@: -2:1}"
+destination_path="${*: -1}"
+destination_path="${destination_path#web:}"
+[ "$(stat -c %a "${source_path}")" = 600 ] || exit 90
+[ "$(stat -c %a "${destination_path%/*}")" = 700 ] || exit 91
+exec /usr/bin/rsync -a -- "${source_path}" "${destination_path}"
+HOOK
+  run pushContainerMigration "${LOCAL_PATH}" 'joomla/available/site.vdm.dev' web
+  assert_success
+  run awk '$1 == "rsync" { count++ } END { print count }' "${STUB_DIR}/commands.log"
+  assert_equal "${output}" 1
+}
+
+@test "migration-remote: pull rejects links before replacing the existing local directory" {
+  require_local_rsync
+  local_remote
+  make_available site.vdm.dev
+  local remote_path="${SANDBOX}/remote/Projects/unsafe"
+  mkdir -p "${remote_path}"
+  ln -s "${SANDBOX}/outside" "${remote_path}/escape"
+  run pullRemoteFolder "${LOCAL_PATH}" "${remote_path}" web
+  assert_failure
+  assert_file_exists "${LOCAL_PATH}/docker-compose.yml"
+  refute_file_exists "${LOCAL_PATH}/escape"
+  refute_file_exists "${SANDBOX}/outside"
+}
+
+@test "migration-remote: push rejects hard links before transferring an archive" {
+  local_remote
+  make_available site.vdm.dev
+  ln "${LOCAL_PATH}/docker-compose.yml" "${LOCAL_PATH}/duplicate.yml"
+  run pushContainerMigration "${LOCAL_PATH}" 'joomla/available/site.vdm.dev' web
+  assert_failure
+  assert_dialog 'unsafe entry'
+  refute_command '^rsync'
+}
+
+@test "migration-remote: remote extraction refuses an archive with traversal entries" {
+  local_remote
+  mkdir -p "${SANDBOX}/archive-source"
+  printf 'do not extract\n' >"${SANDBOX}/archive-source/payload"
+  tar -czf "${SANDBOX}/remote/archive.tar.gz" --transform='s|payload|../outside|' -C "${SANDBOX}/archive-source" payload
+  run remoteUntarGz "${SANDBOX}/remote/archive.tar.gz" "${SANDBOX}/remote/extracted" web
+  assert_failure
+  assert_file_exists "${SANDBOX}/remote/archive.tar.gz"
+  refute_file_exists "${SANDBOX}/remote/outside"
+  refute_file_exists "${SANDBOX}/remote/extracted"
 }

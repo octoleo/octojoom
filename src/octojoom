@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+# Migration workers intentionally isolate invocation state in subshells.
+# ShellCheck otherwise links identically named function-local variables across
+# those independent scopes and reports their isolation as lost assignments.
+# shellcheck disable=SC2030,SC2031
+
 # The most recent program version.
 _VERSION="3.9.1"
 _V="3.9"
@@ -18,6 +23,22 @@ SERVER_HOSTNAME="$(hostname)"
 
 # Set the back title
 BACK_TITLE="    Octoleo | ${USER}@${SERVER_HOSTNAME}"
+
+# The SSH migration protocol must not run installers, initialize host settings,
+# or emit interactive startup output. Load this installed script's own function
+# definitions, then dispatch only the fixed worker operations below.
+if [ "${1:-}" = --migration-worker ]; then
+  set +x
+  if (( BASH_VERSINFO[0] < 4 )); then
+    printf '%s\n' 'Migration requires Bash 4 or newer.' >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  source <(awk '/^(function )?[A-Za-z_][A-Za-z0-9_]*\(\) \{$/ {p=1} p {print} p && /^}$/ {p=0}' "${BASH_SOURCE[0]}")
+  shift
+  migrationWorker "$@"
+  exit $?
+fi
 
 #####################################################################################################################VDM
 ######################################## The environment preparation
@@ -2632,10 +2653,17 @@ Would you like to continue without changing the database host?" "Database Host M
     setUniqueKey "Enter a new key for the clone of (${container}).\nIt is used for the container names and the project folder name." || return $?
     if [ "${VDM_KEY}" = "${old_key}" ]; then
       showError "The key (${VDM_KEY}) is the key of the container being cloned, select another."
-    elif isJoomlaKeyInUse "${VDM_KEY}"; then
-      showError "The key (${VDM_KEY}) is already used by another container or project folder, select another."
     else
-      break
+      rc=0
+      isJoomlaKeyInUse "${VDM_KEY}" || rc=$?
+      case "${rc}" in
+      0) showError "The key (${VDM_KEY}) is already used by another container or project folder, select another." ;;
+      1) break ;;
+      *)
+        showError "The existing containers could not be inspected safely. The clone was cancelled without changing any files."
+        return 1
+        ;;
+      esac
     fi
     unset VDM_KEY
   done
@@ -3126,7 +3154,7 @@ function joomla__TRuST__reset() {
 
 #####################################################################################################################VDM
 ######################################## Migrate Joomla
-function joomla__TRuST__migrate() {
+function joomla__TRuST__migratefiles() {
   # check if this type have available containers
   if ! hasDirectories "${VDM_CONTAINER_TYPE}/available/"; then
     showError "The path ${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/ does not exist or is empty, first run a ${VDM_CONTAINER_TYPE^} setup."
@@ -3706,17 +3734,24 @@ function rewriteJoomlaComposeIdentity() {
   fi
   sed_args+=(-e 'b' -e '}')
   # service names, container names, database host, SMTP host and Traefik router/service names
-  sed_args+=(-e 's/(mariadb|joomla|phpmyadmin|mailcatcher)'"${old_key}"'([^A-Za-z]|$)/\1'"${new_key}"'\2/g')
-  leftovers+=('(mariadb|joomla|phpmyadmin|mailcatcher)'"${old_key}"'([^A-Za-z]|$)')
+  # A migration may retain its key on another host; only renamed identities
+  # are leftovers. The destination host and mount checks still apply below.
+  if [ "${old_key}" != "${new_key}" ]; then
+    sed_args+=(-e 's/(mariadb|joomla|phpmyadmin|mailcatcher)'"${old_key}"'([^A-Za-z]|$)/\1'"${new_key}"'\2/g')
+    leftovers+=('(mariadb|joomla|phpmyadmin|mailcatcher)'"${old_key}"'([^A-Za-z]|$)')
+  fi
   # bind mounts under the project path (joomla, db, php.ini, entrypoint.sh)
   for folder in "${src_folder}" "${old_key}"; do
+    [ "${folder}" != "${new_key}" ] || continue
     folder_re=$(getEscapedRegex "${folder}")
     sed_args+=(-e 's#PROJECT_PATH[}]/'"${folder_re}"'/#PROJECT_PATH}/'"${new_key}"'/#g')
     leftovers+=('PROJECT_PATH[}]/'"${folder_re}"'/')
   done
   # named volumes (expert mode without persistence)
-  sed_args+=(-e 's/(^|[^A-Za-z_])'"${old_key,,}"'_(web|db)([^A-Za-z_]|$)/\1'"${new_key,,}"'_\2\3/g')
-  leftovers+=('(^|[^A-Za-z_])'"${old_key,,}"'_(web|db)([^A-Za-z_]|$)')
+  if [ "${old_key,,}" != "${new_key,,}" ]; then
+    sed_args+=(-e 's/(^|[^A-Za-z_])'"${old_key,,}"'_(web|db)([^A-Za-z_]|$)/\1'"${new_key,,}"'_\2\3/g')
+    leftovers+=('(^|[^A-Za-z_])'"${old_key,,}"'_(web|db)([^A-Za-z_]|$)')
+  fi
   # environment variable references (only the names a Joomla container reads)
   if [ "${old_env}" != "${new_env}" ]; then
     # shellcheck disable=SC2016
@@ -3987,16 +4022,47 @@ function getDialogHeight() {
 
 # check if a key is already used by a Joomla project folder, a compose file or a docker container
 # $1: key
+# returns 0 when in use, 1 when available, 2 when the inventory cannot be inspected safely
 function isJoomlaKeyInUse() {
   local key="${1:-}"
-  [ -n "${key}" ] || return 0
-  [ -d "${VDM_PROJECT_PATH}/${key}" ] && return 0
-  grep -qsE "^[[:space:]]*container_name:[[:space:]]*(mariadb|joomla|phpmyadmin|mailcatcher)${key}[[:space:]]*$" \
-    "${VDM_REPO_PATH}/joomla/available/"*/docker-compose.yml && return 0
-  if command -v docker >/dev/null 2>&1 &&
-    docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qxE "(mariadb|joomla|phpmyadmin|mailcatcher)${key}"; then
+  local yml names scan_status inventory_dir
+  [[ "${key}" =~ ^[A-Za-z]+$ ]] || return 2
+  for inventory_dir in "${VDM_PROJECT_PATH}" "${VDM_REPO_PATH}"; do
+    if [ ! -d "${inventory_dir}" ] || [ ! -r "${inventory_dir}" ] || [ ! -x "${inventory_dir}" ]; then
+      printf '%s\n' 'Could not inspect the project or repository directory for key collisions.' >&2
+      return 2
+    fi
+  done
+  for inventory_dir in "${VDM_REPO_PATH}/joomla" "${VDM_REPO_PATH}/joomla/available"; do
+    if { [ -e "${inventory_dir}" ] || [ -L "${inventory_dir}" ]; } &&
+      { [ ! -d "${inventory_dir}" ] || [ ! -r "${inventory_dir}" ] || [ ! -x "${inventory_dir}" ]; }; then
+      printf '%s\n' 'Could not inspect the Joomla Compose directory for key collisions.' >&2
+      return 2
+    fi
+  done
+  if [ -e "${VDM_PROJECT_PATH}/${key}" ] || [ -L "${VDM_PROJECT_PATH}/${key}" ]; then
     return 0
   fi
+  for yml in "${VDM_REPO_PATH}/joomla/available/"*/docker-compose.yml; do
+    [ -e "${yml}" ] || [ -L "${yml}" ] || continue
+    scan_status=0
+    grep -qE "^[[:space:]]*container_name:[[:space:]]*(mariadb|joomla|phpmyadmin|mailcatcher)${key}[[:space:]]*$" \
+      "${yml}" 2>/dev/null || scan_status=$?
+    case "${scan_status}" in
+    0) return 0 ;;
+    1) ;;
+    *)
+      printf '%s\n' 'Could not inspect an existing Joomla Compose file for key collisions.' >&2
+      return 2
+      ;;
+    esac
+  done
+  if ! command -v docker >/dev/null 2>&1 ||
+    ! names=$(docker ps -a --format '{{.Names}}' 2>/dev/null); then
+    printf '%s\n' 'Could not inspect Docker containers for key collisions.' >&2
+    return 2
+  fi
+  printf '%s\n' "${names}" | grep -qxE "(mariadb|joomla|phpmyadmin|mailcatcher)${key}" && return 0
   return 1
 }
 
@@ -4810,7 +4876,8 @@ function migrateMenu() {
     # load the back menu
     menu_options+=("back" "<-- Return to the main menu.")
     # Select a joomla container to migrate
-    menu_options+=("joomla" "Migrate Joomla Container")
+    menu_options+=("joomla" "Migrate Complete Joomla Project")
+    isExpert && menu_options+=("joomlafiles" "Transfer Joomla Compose Folder Only") && i=$((i + 1))
     # Select a openssh container to migrate
     menu_options+=("openssh" "Migrate Openssh Container")
     # Select project directories to migrate
@@ -4833,6 +4900,10 @@ function migrateMenu() {
     "joomla")
       migrateContainer 'joomla'
       ;;
+    "joomlafiles")
+      VDM_CONTAINER_TYPE=joomla
+      joomla__TRuST__migratefiles
+      ;;
     "openssh")
       migrateContainer 'openssh'
       ;;
@@ -4848,7 +4919,7 @@ function migrateMenu() {
 
     # menu loop
     case $CHOICE in
-    "joomla" | "openssh" | "directory" | "remote")
+    "joomla" | "joomlafiles" | "openssh" | "directory" | "remote")
       continue
       ;;
     *) return 0 ;;
@@ -7103,19 +7174,16 @@ function pushContainerMigration() {
     showError "Remote system does not appear to have ${PROGRAM_NAME} installed, or your access was denied. Therefore the migration has been cancelled!"
     return 1
   fi
-  local remote_path="${remote_repo_path%/}/${container_path}"
-  local staging_path="${remote_path}.migration.${BASHPID}.${RANDOM}"
+  local remote_path="${remote_repo_path%/}/${container_path}" tar_path
   if ! [ -d "${local_path}" ] || ! isSafeMigrationPath "${remote_path}"; then
     showError "Migration failed: the source directory or remote destination is invalid."
     return 1
   fi
-  if ! syncWithRemote "${local_path}" "${staging_path}" "${remote}" ||
-    ! transferWasSuccessful "${local_path}" "${staging_path}" "${remote}" ||
-    ! publishRemoteMigration "${staging_path}" "${remote_path}" "${remote}"; then
-    removeRemoteFolder "${staging_path}" "${remote}" || true
-    showError "The PUSH of ${local_path} to ${remote}:${remote_path} failed."
+  if ! tar_path=$(tarAndMoveTempBackup "${local_path}" "${local_path}"); then
+    showError "The PUSH failed while creating the container archive."
     return 1
   fi
+  pushArchivedMigration "${tar_path}" "${remote_path}" "${remote}" || return 1
   showNotice "The PUSH of ${local_path} to ${remote}:${remote_path} was a success." 13
   return 0
 }
@@ -7136,25 +7204,51 @@ function pullDirectoryMigration() {
   pullRemoteFolder "${local_path}" "${remote_project_path%/}/${directory_name}" "${remote}"
 }
 
-# Verify a downloaded staging directory before replacing any existing local data.
+# Package on the source host and verify the single downloaded archive before
+# extracting or replacing any existing local data.
 function pullRemoteFolder() {
   local local_path="$1" remote_path="$2" remote="$3"
-  local staging_path backup_path rsync_output keep_backup=false
+  local staging_path workspace remote_workspace remote_tar backup_path keep_backup=false
   if ! isSafeMigrationPath "${local_path}" || ! isSafeMigrationPath "${remote_path}" ||
     [ -L "${local_path}" ] || ! remoteFolderExists "${remote_path}" "${remote}"; then
     showError "The PULL failed: the source directory is unavailable or a migration path is invalid."
     return 1
   fi
   if ! mkdir -p -- "$(dirname "${local_path}")" ||
-    ! staging_path=$(mktemp -d "${local_path}.migration.XXXXXX"); then
+    ! workspace=$(mktemp -d "${local_path}.migration.XXXXXX"); then
     showError "The PULL failed: could not create a local staging directory."
     return 1
   fi
-  if ! rsync -avz --protect-args -- "${remote}:${remote_path}/" "${staging_path}/" ||
-    ! rsync_output=$(rsync -az --protect-args --dry-run --checksum --delete --itemize-changes \
-      --out-format='%i %n%L' -- "${remote}:${remote_path}/" "${staging_path}/") || [ -n "${rsync_output}" ]; then
-    rm -rf -- "${staging_path}" || sudo rm -rf -- "${staging_path}"
+  staging_path="${workspace}/payload"
+  # The archive is created privately on the source, including when root access
+  # is needed to read project files. Nothing is rsynced as a loose directory.
+  if ! remote_workspace=$(ssh -- "${remote}" "umask 077;
+    [ ! -L $(quoteRemoteArgument "${remote_path}") ] || exit 1;
+    workspace=\$(mktemp -d \"\${TMPDIR:-/tmp}/octojoom-pull.XXXXXX\") || exit 1;
+    trap 'rm -rf -- \"\$workspace\"' 0;
+    if tar -czf \"\$workspace/archive.tar.gz\" -C $(quoteRemoteArgument "${remote_path}") . ||
+      sudo -n tar -czf \"\$workspace/archive.tar.gz\" -C $(quoteRemoteArgument "${remote_path}") .; then
+      printf '%s\\n' \"\$workspace\"; trap - 0;
+    else exit 1; fi") || ! isSafeMigrationPath "${remote_workspace}" ||
+    [[ ! "${remote_workspace##*/}" =~ ^octojoom-pull\.[[:alnum:]]{6}$ ]]; then
+    rm -rf -- "${workspace}"
+    showError "The PULL failed while packaging the remote source; the local directory was preserved."
+    return 1
+  fi
+  remote_tar="${remote_workspace}/archive.tar.gz"
+  if ! rsync -av --protect-args -- "${remote}:${remote_tar}" "${workspace}/archive.tar.gz" ||
+    ! transferTarWasSuccessful "${workspace}/archive.tar.gz" "${remote_tar}" "${remote}" ||
+    ! migrationValidateTar "${workspace}/archive.tar.gz" folder ||
+    ! mkdir -- "${staging_path}" ||
+    ! tar --no-same-owner -xzf "${workspace}/archive.tar.gz" -C "${staging_path}"; then
+    removeRemoteFolder "${remote_workspace}" "${remote}" || true
+    rm -rf -- "${workspace}" || sudo rm -rf -- "${workspace}"
     showError "The PULL of ${remote}:${remote_path} failed; the local directory was preserved."
+    return 1
+  fi
+  if ! removeRemoteFolder "${remote_workspace}" "${remote}"; then
+    rm -rf -- "${workspace}" || sudo rm -rf -- "${workspace}"
+    showError "The PULL stopped because the remote temporary archive could not be removed: ${remote}:${remote_workspace}"
     return 1
   fi
   backup_path="${local_path}_backup_$(date +%Y%m%d%H%M%S)_${BASHPID}_${RANDOM}"
@@ -7164,7 +7258,7 @@ function pullRemoteFolder() {
       keep_backup=true
     fi
     if [ -e "${backup_path}" ] || ! mv -- "${local_path}" "${backup_path}"; then
-      rm -rf -- "${staging_path}" || sudo rm -rf -- "${staging_path}"
+      rm -rf -- "${workspace}" || sudo rm -rf -- "${workspace}"
       showError "The PULL failed: could not preserve the local directory."
       return 1
     fi
@@ -7175,9 +7269,10 @@ function pullRemoteFolder() {
     else
       showError "The PULL failed while publishing the verified directory."
     fi
-    rm -rf -- "${staging_path}" || sudo rm -rf -- "${staging_path}"
+    rm -rf -- "${workspace}" || sudo rm -rf -- "${workspace}"
     return 1
   fi
+  rm -rf -- "${workspace}" || sudo rm -rf -- "${workspace}" || return 1
   if [ "${keep_backup}" = false ] && [ -e "${backup_path}" ] &&
     ! (rm -rf -- "${backup_path}" || sudo rm -rf -- "${backup_path}"); then
     showError "The PULL completed, but the previous directory could not be removed: ${backup_path}"
@@ -7185,6 +7280,37 @@ function pullRemoteFolder() {
   fi
   showNotice "The PULL of ${remote}:${remote_path} to ${local_path} was a success." 13
   return 0
+}
+
+# Transfer exactly one compressed archive into a private destination workspace.
+# The source archive remains available for recovery until publication succeeds.
+function pushArchivedMigration() {
+  local tar_path="$1" remote_path="$2" remote="$3" workspace remote_tar staging_path
+  if ! [ -f "${tar_path}" ] || ! isSafeMigrationPath "${remote_path}" ||
+    ! migrationValidateTar "${tar_path}" folder; then
+    showError "The PUSH failed: the archive contains an unsupported or unsafe entry. The local archive was retained at ${tar_path}."
+    return 1
+  fi
+  if ! workspace=$(ssh -- "${remote}" "umask 077; mkdir -p -- $(quoteRemoteArgument "$(dirname "${remote_path}")") &&
+    mktemp -d $(quoteRemoteArgument "${remote_path}.migration.XXXXXX")") ||
+    ! isSafeMigrationPath "${workspace}" || [[ "${workspace}" != "${remote_path}.migration."* ]]; then
+    showError "The PUSH failed while creating a private remote workspace. The local archive was retained at ${tar_path}."
+    return 1
+  fi
+  remote_tar="${workspace}/archive.tar.gz"
+  staging_path="${workspace}/payload"
+  if ! moveTarToRemote "${tar_path}" "${remote_tar}" "${remote}" ||
+    ! transferTarWasSuccessful "${tar_path}" "${remote_tar}" "${remote}" ||
+    ! remoteUntarGz "${remote_tar}" "${staging_path}" "${remote}" ||
+    ! publishRemoteMigration "${staging_path}" "${remote_path}" "${remote}"; then
+    removeRemoteFolder "${workspace}" "${remote}" || true
+    showError "The PUSH to ${remote}:${remote_path} failed. The local archive was retained at ${tar_path}."
+    return 1
+  fi
+  if ! removeRemoteFolder "${workspace}" "${remote}" || ! rm -f -- "${tar_path}"; then
+    showError "The PUSH completed, but temporary archive cleanup failed. Check ${remote}:${workspace} and ${tar_path}."
+    return 1
+  fi
 }
 
 # Publish a verified staging directory, retaining the original if the rename fails.
@@ -7236,10 +7362,8 @@ function pushDirectoryMigration() {
     showError "Remote system does not appear to have ${PROGRAM_NAME} installed, or your access was denied. Therefore the migration has been cancelled!"
     return 1
   fi
-  local backup_dir tar_path remote_path staging_path remote_tar
+  local backup_dir tar_path remote_path
   remote_path="${remote_project_path%/}/${directory_name}"
-  staging_path="${remote_path}.migration.${BASHPID}.${RANDOM}"
-  remote_tar="${staging_path}.tar.gz"
   if ! [ -d "${local_path}" ] || ! isSafeMigrationPath "${remote_path}"; then
     showError "Migration failed: the source directory or remote destination is invalid."
     return 1
@@ -7253,20 +7377,11 @@ function pushDirectoryMigration() {
     showError "The PUSH failed while preparing the archive."
     return 1
   fi
-  if ! (rm -rf -- "${backup_dir}" || sudo rm -rf -- "${backup_dir}") ||
-    ! prepRemoteFolder "$(dirname "${remote_path}")" "${remote}" ||
-    ! moveTarToRemote "${tar_path}" "${remote_tar}" "${remote}" ||
-    ! transferTarWasSuccessful "${tar_path}" "${remote_tar}" "${remote}" ||
-    ! remoteUntarGz "${remote_tar}" "${staging_path}" "${remote}" ||
-    ! publishRemoteMigration "${staging_path}" "${remote_path}" "${remote}"; then
-    removeRemoteFolder "${staging_path}" "${remote}" || true
-    showError "The PUSH of ${local_path} to ${remote}:${remote_path} failed. The local archive was retained at ${tar_path}."
+  if ! (rm -rf -- "${backup_dir}" || sudo rm -rf -- "${backup_dir}"); then
+    showError "The PUSH failed while removing the temporary copy. The local archive was retained at ${tar_path}."
     return 1
   fi
-  if ! rm -f -- "${tar_path}"; then
-    showError "The PUSH completed, but the temporary archive could not be removed: ${tar_path}"
-    return 1
-  fi
+  pushArchivedMigration "${tar_path}" "${remote_path}" "${remote}" || return 1
   if whiptail --yesno "${USER^}, would you like to fix the permissions of this remote directory?\nWe will start ${PROGRAM_NAME} on the remote server; navigate to the fix, and exit when done." \
     --title "Permissions Fix" --backtitle "${BACK_TITLE}" 15 112; then
     connectToRemoteSystem "${remote}" || return 1
@@ -7397,10 +7512,16 @@ function remoteUntarGz() {
   local remote="$3"
 
   isSafeMigrationPath "${remote_file_path}" && isSafeMigrationPath "${remote_extract_path}" || return 1
-  # Delete the remote archive only after extraction succeeds.
-  ssh -- "${remote}" "mkdir -p -- $(quoteRemoteArgument "${remote_extract_path}") && \
-    tar -xzf $(quoteRemoteArgument "${remote_file_path}") -C $(quoteRemoteArgument "${remote_extract_path}") && \
+  local remote_script
+  # Send the validator with the operation so legacy remote installations also
+  # reject traversal, links and special entries before writing archive contents.
+  remote_script="$(declare -f migrationValidateTar)
+    migrationValidateTar $(quoteRemoteArgument "${remote_file_path}") folder &&
+    [ ! -e $(quoteRemoteArgument "${remote_extract_path}") ] &&
+    mkdir -m 700 -- $(quoteRemoteArgument "${remote_extract_path}") &&
+    tar --no-same-owner -xzf $(quoteRemoteArgument "${remote_file_path}") -C $(quoteRemoteArgument "${remote_extract_path}") &&
     rm -f -- $(quoteRemoteArgument "${remote_file_path}")"
+  ssh -- "${remote}" "bash -c $(quoteRemoteArgument "${remote_script}")"
 }
 
 # Transfer the folder to the remote server using rsync
@@ -7419,7 +7540,7 @@ function moveTarToRemote() {
 
   # rsync protects remote paths with spaces and quotes on all supported SSH versions.
   [ -f "${local_path}" ] || return 1
-  rsync -avz --protect-args -- "${local_path}" "${remote}:${remote_path}"
+  rsync -av --protect-args -- "${local_path}" "${remote}:${remote_path}"
 }
 
 # Sync the local folder to the remote server and remove the local backup
@@ -7593,6 +7714,1090 @@ EOF
 
 #####################################################################################################################VDM
 ######################################## CLI INPUT ¯\_(ツ)_/¯
+
+# Read one scoped dotenv assignment without evaluating or exporting its value.
+# The last assignment wins, matching OctoJoom's existing dotenv loader.
+function migrationReadEnvValue() {
+  local migration_file="$1" migration_name="$2" migration_target="$3"
+  local migration_line migration_value='' migration_found=false
+  [[ "$migration_name" =~ ^VDM_[A-Za-z0-9_]+$ && "$migration_target" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
+  [ -f "$migration_file" ] && [ ! -L "$migration_file" ] || return 1
+  while IFS= read -r migration_line || [ -n "$migration_line" ]; do
+    migration_line="${migration_line%$'\r'}"
+    [[ "$migration_line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+    [[ "$migration_line" =~ ^[[:space:]]*(export[[:space:]]+)?(VDM_[A-Za-z0-9_]+)[[:space:]]*=[[:space:]]*(.*)$ ]] || return 1
+    if [ "${BASH_REMATCH[2]}" = "$migration_name" ]; then
+      decodeEnvValue "${BASH_REMATCH[3]}" migration_value || return 1
+      [[ "$migration_value" != *$'\n'* && "$migration_value" != *$'\r'* ]] || return 1
+      migration_found=true
+    fi
+  done < "$migration_file"
+  "$migration_found" || return 1
+  printf -v "$migration_target" '%s' "$migration_value"
+}
+
+# Generated Compose supports simple VDM placeholders and escaped dollar signs.
+# Fail closed for shell variables, defaults, nesting, and hand-written forms.
+function migrationComposeReferences() {
+  local compose_file="$1" line rest name seen=' '
+  [ -f "$compose_file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    rest="$line"
+    while [[ "$rest" == *'$'* ]]; do
+      rest="${rest#*\$}"
+      if [[ "$rest" == '$'* ]]; then
+        rest="${rest:1}"
+        continue
+      elif [[ "$rest" =~ ^\{(VDM_[A-Za-z0-9_]+)\} ]]; then
+        name="${BASH_REMATCH[1]}"
+        rest="${rest:${#BASH_REMATCH[0]}}"
+      else
+        return 1
+      fi
+      if [[ "$seen" != *" $name "* ]]; then
+        printf '%s\n' "$name"
+        seen+="$name "
+      fi
+    done
+  done < "$compose_file"
+}
+
+function migrationValidateScopedEnv() {
+  local compose_file="$1" env_file="$2" refs line name value seen=' '
+  refs=$(migrationComposeReferences "$compose_file") || return 1
+  refs=" ${refs//$'\n'/ } "
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^(VDM_[A-Za-z0-9_]+)=(.*)$ ]] || return 1
+    name="${BASH_REMATCH[1]}"
+    [[ "$refs" == *" $name "* && "$seen" != *" $name "* ]] || return 1
+    decodeEnvValue "${BASH_REMATCH[2]}" value || return 1
+    seen+="$name "
+  done < "$env_file"
+  for name in $refs; do
+    [[ "$seen" == *" $name "* ]] || return 1
+  done
+}
+
+# Validate a tar before extraction. Escaped listings prevent embedded newlines
+# and control characters from masquerading as separate, harmless member names.
+# GNU tar and bsdtar both escape control characters in these listings.
+function migrationValidateTar() {
+  local archive="$1" layout="${2:-bundle}" names types member normalized type version
+  local -A tar_seen=()
+  local listing_options=()
+  [ -f "$archive" ] && [ ! -L "$archive" ] || return 1
+  version=$(tar --version 2>/dev/null) || return 1
+  case "$version" in
+    *'GNU tar'*) listing_options+=(--quoting-style=escape) ;;
+    *bsdtar*|*libarchive*) ;; # bsdtar uses safe, escaped names by default.
+    *) return 1 ;;
+  esac
+  names=$(LC_ALL=C TAR_OPTIONS='' tar "${listing_options[@]}" -tzf "$archive" 2>/dev/null) || return 1
+  types=$(LC_ALL=C TAR_OPTIONS='' tar "${listing_options[@]}" -tvzf "$archive" 2>/dev/null) || return 1
+  [ -n "$names" ] && [ -n "$types" ] || return 1
+  while IFS= read -r type; do
+    [[ "$type" == -* || "$type" == d* ]] || return 1
+    [[ "${type:0:10}" != *[sS]* ]] || return 1
+    [[ "$type" != *' link to '* && "$type" != *' -> '* ]] || return 1
+  done <<< "$types"
+  while IFS= read -r member; do
+    [[ -n "$member" && "$member" != /* && "$member" != *\\* && "$member" != *$'\r'* && "$member" != *$'\t'* ]] || return 1
+    normalized="${member#./}"
+    normalized="${normalized%/}"
+    if [ -z "$normalized" ]; then
+      [ "$member" = ./ ] && [ "$layout" = folder ] && continue
+      return 1
+    fi
+    case "/${normalized}/" in
+      *'/../'*|*'/./'*|*'//'*) return 1 ;;
+    esac
+    [[ "$normalized" != *[![:print:]]* ]] || return 1
+    [ -z "${tar_seen[$normalized]+set}" ] || return 1
+    tar_seen["$normalized"]=1
+    if [ "$layout" = bundle ]; then
+      case "$normalized" in manifest.env|compose|compose/*|project|project/*) ;; *) return 1 ;; esac
+    elif [ "$layout" != folder ]; then
+      return 1
+    fi
+  done <<< "$names"
+}
+
+function migrationValidateManifest() {
+  local manifest="$1" line name value seen=' ' count=0
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^(VDM_MIGRATION_[A-Z_]+)=(.*)$ ]] || return 1
+    name="${BASH_REMATCH[1]}"
+    decodeEnvValue "${BASH_REMATCH[2]}" value || return 1
+    [[ "$seen" != *" $name "* && -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
+    seen+="$name "
+    count=$((count + 1))
+    case "$name" in
+      VDM_MIGRATION_FORMAT) [ "$value" = 1 ] || return 1 ;;
+      VDM_MIGRATION_CONTAINER) isValidDomain "$value" || return 1 ;;
+      VDM_MIGRATION_KEY|VDM_MIGRATION_ENV_KEY) [[ "$value" =~ ^[A-Za-z]+$ ]] || return 1 ;;
+      VDM_MIGRATION_PROJECT_FOLDER) isSafeProjectName "$value" || return 1 ;;
+      VDM_MIGRATION_SOURCE_PROJECT_PATH) isSafeMigrationPath "$value" || return 1 ;;
+      VDM_MIGRATION_DB_IMAGE) [[ "$value" =~ ^[a-zA-Z0-9._:/-]+@sha256:[a-f0-9]{64}$ ]] || return 1 ;;
+      VDM_MIGRATION_ARCH) [[ "$value" =~ ^[a-zA-Z0-9_/-]+$ ]] || return 1 ;;
+      VDM_MIGRATION_SECURE) [[ "$value" == true || "$value" == false ]] || return 1 ;;
+      *) return 1 ;;
+    esac
+  done < "$manifest"
+  [ "$count" -eq 9 ]
+}
+
+# Verify regular files/directories only, including dotfiles, before privileged
+# copies. A cold v1 package deliberately refuses symlinks and special files.
+function migrationValidateTree() {
+  local tree="$1" invalid
+  [ -d "$tree" ] && [ ! -L "$tree" ] || return 1
+  invalid=$(runPrivileged find "$tree" \( ! -type d ! -type f \) -o \( -type f -links +1 \) 2>/dev/null) || return 1
+  [ -z "$invalid" ]
+}
+
+# Reject linked ancestors as well as a linked final component.
+function migrationPathHasSymlink() {
+  local path="$1" prefix='' component link
+  [[ "$path" == /* ]] || return 0
+  path="${path#/}"
+  while [ -n "$path" ]; do
+    component="${path%%/*}"
+    prefix+="/$component"
+    if [ -L "$prefix" ]; then
+      case "${OSTYPE:-}:$prefix" in
+        darwin*:/tmp|darwin*:/var|darwin*:/etc)
+          link=$(readlink "$prefix") || return 0
+          [[ "$link" == "private/${prefix#/}" || "$link" == "/private/${prefix#/}" ]] || return 0 ;;
+        *) return 0 ;;
+      esac
+    fi
+    [[ "$path" == */* ]] || break
+    path="${path#*/}"
+  done
+  return 1
+}
+
+# Extraction never loads the manifest into the caller's environment. The caller
+# owns the empty private staging directory and is responsible for its cleanup.
+function extractJoomlaMigration() {
+  (
+  set +x
+  local archive="$1" destination="$2" contents mode refs name value
+  [ -d "$destination" ] && ! migrationPathHasSymlink "$destination" || return 1
+  mode=$(stat -c '%a' "$destination" 2>/dev/null || stat -f '%Lp' "$destination" 2>/dev/null) || return 1
+  [ "$mode" = 700 ] || { showError 'Migration extraction requires an empty private directory (mode 700).'; return 1; }
+  contents=$(find "$destination" -mindepth 1 -print -quit 2>/dev/null) || return 1
+  [ -z "$contents" ] || return 1
+  if ! migrationValidateTar "$archive" bundle; then
+    showError 'The migration archive is invalid or contains unsupported paths, links, or file types.'
+    return 1
+  fi
+  if ! runPrivileged tar --numeric-owner --same-permissions --same-owner -xzf "$archive" -C "$destination" >/dev/null 2>&1; then
+    showError 'The migration archive could not be extracted.'
+    return 1
+  fi
+  # Do not let archived directory modes expose private Compose/env metadata.
+  runPrivileged chmod 700 "$destination" "$destination/compose" || return 1
+  runPrivileged chown "$(id -u):$(id -g)" "$destination/manifest.env" "$destination/compose" "$destination/compose/docker-compose.yml" "$destination/compose/.env" || return 1
+  chmod 600 "$destination/manifest.env" "$destination/compose/docker-compose.yml" "$destination/compose/.env" || return 1
+  if ! migrationValidateManifest "$destination/manifest.env" ||
+    [ ! -f "$destination/compose/docker-compose.yml" ] || [ ! -f "$destination/compose/.env" ] ||
+    ! runPrivileged test -d "$destination/project/db" || ! runPrivileged test -f "$destination/project/joomla/configuration.php"; then
+    showError 'The migration archive is missing required Joomla metadata or project files.'
+    return 1
+  fi
+  refs=$(migrationComposeReferences "$destination/compose/docker-compose.yml") || return 1
+  while IFS= read -r name; do
+    [ -z "$name" ] || migrationReadEnvValue "$destination/compose/.env" "$name" value || return 1
+  done <<< "$refs"
+  migrationValidateScopedEnv "$destination/compose/docker-compose.yml" "$destination/compose/.env"
+  )
+}
+
+# Validate generated short-form bind mounts. Return only compose-relative paths
+# to copy; all project binds must remain under the one selected project folder.
+# shellcheck disable=SC2016
+function migrationComposeLocalFiles() {
+  local yml="$1" project="$2" line trimmed volume source target block=false db=false web=false
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+    if [[ "$line" =~ ^[[:space:]]*(env_file|include|extends|build|configs|secrets): ]] || [[ "$line" =~ ^volumes: ]]; then
+      return 1
+    fi
+    if [[ "$line" =~ ^[[:space:]]{4}volumes:[[:space:]]*$ ]]; then
+      block=true
+      continue
+    fi
+    if "$block" && [[ ! "$line" =~ ^[[:space:]]{6} ]]; then block=false; fi
+    "$block" || continue
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    [[ "$trimmed" == '- '* ]] || return 1
+    volume="${trimmed#- }"
+    if [[ "$volume" == \"*\" || "$volume" == \'*\' ]]; then volume="${volume:1:${#volume}-2}"; fi
+    [[ "$volume" == *:* ]] || return 1
+    source="${volume%%:*}"
+    target="${volume#*:}"
+    [[ "$target" =~ ^/[^:]+(:[a-zA-Z,]+)?$ ]] || return 1
+    if [[ "$source" == '${VDM_PROJECT_PATH}/'"$project/"* ]]; then
+      source="${source#'${VDM_PROJECT_PATH}/'}"
+      case "/$source/" in *'/../'*|*'/./'*|*'//'*) return 1 ;; esac
+      [ "$source" != "$project/db" ] || [[ "$target" == /var/lib/mysql || "$target" == /var/lib/mysql:* ]] || return 1
+      [ "$source" != "$project/joomla" ] || [[ "$target" == /var/www/html || "$target" == /var/www/html:* ]] || return 1
+      if [[ "$target" == /var/lib/mysql || "$target" == /var/lib/mysql:* ]]; then
+        [ "$source" = "$project/db" ] && ! "$db" || return 1
+        db=true
+      elif [[ "$target" == /var/www/html || "$target" == /var/www/html:* ]]; then
+        [ "$source" = "$project/joomla" ] && ! "$web" || return 1
+        web=true
+      fi
+    elif [[ "$source" == ./* ]]; then
+      source="${source#./}"
+      case "/$source/" in *'/../'*|*'/./'*|*'//'*) return 1 ;; esac
+      [[ -n "$source" && "$source" != .env && "$source" != docker-compose.yml && "$source" != *'$'* ]] || return 1
+      [[ "$target" != /var/lib/mysql* && "$target" != /var/www/html ]] || return 1
+      printf '%s\n' "$source"
+    else
+      return 1
+    fi
+  done < "$yml"
+  "$db" && "$web"
+}
+
+function migrationRestartSource() {
+  local id state
+  [ "$#" -gt 0 ] || return 0
+  docker start "$@" >/dev/null 2>&1 || return 1
+  for id in "$@"; do
+    state=$(docker inspect --type container --format '{{.State.Running}}' "$id" 2>/dev/null) || return 1
+    [ "$state" = true ] || return 1
+  done
+}
+
+# Export is a subshell so EXIT/signal cleanup cannot replace the caller's traps.
+# It shares the clone lock, retains exact running container IDs, and restarts
+# only those services, even when stopping, copying, or archiving fails.
+function exportJoomlaMigration() {
+  (
+    set +x
+    umask 077
+    local container="$1" archive="$2" source_dir source_yml source_env references name value project_root project key env_key secure
+    local package='' temporary_archive='' clone_lock="${VDM_REPO_PATH}/joomla/.clone.lock" locked=false restart=false result=1
+    local locals path actual_image digests db_image='' architecture all_names state id actual_mounts declared_names config_copy=''
+    local running_ids=() source_ids=()
+    local VDM_SRC_KEY VDM_SRC_ENV_KEY VDM_SRC_PROJECT_FOLDER VDM_SRC_SECURE VDM_SRC_NAMED_VOLUMES VDM_SRC_MAILCATCHER
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    trap '
+      result=$?
+      if "$restart" && [ "${#running_ids[@]}" -gt 0 ]; then
+        if ! migrationRestartSource "${running_ids[@]}"; then
+          showError "The source containers could not be restarted after migration packaging. Restart the source project before continuing."
+          result=1
+        fi
+      fi
+      [ -z "$package" ] || runPrivileged rm -rf -- "$package"
+      [ -z "$temporary_archive" ] || rm -f -- "$temporary_archive"
+      [ -z "$config_copy" ] || rm -f -- "$config_copy"
+      if "$locked"; then rmdir "$clone_lock" || result=1; fi
+      exit "$result"
+    ' EXIT
+    if ! isValidDomain "$container" || [ -e "$archive" ] || [ -L "$archive" ]; then
+      showError 'Select a valid source container and a new archive filename.'
+      exit 1
+    fi
+    source_dir="${VDM_REPO_PATH}/joomla/available/${container}"
+    source_yml="$source_dir/docker-compose.yml"
+    ! migrationPathHasSymlink "$source_yml" && [ -f "$source_yml" ] || exit 1
+    getJoomlaComposeIdentity "$source_yml" || { showError 'Migration requires a generated Joomla Compose layout.'; exit 1; }
+    "$VDM_SRC_NAMED_VOLUMES" && { showError 'Migration v1 supports project bind mounts; named Docker volumes require a separate migration.'; exit 1; }
+    key="$VDM_SRC_KEY" env_key="$VDM_SRC_ENV_KEY" project="$VDM_SRC_PROJECT_FOLDER" secure="$VDM_SRC_SECURE"
+    isSafeProjectName "$project" || exit 1
+    source_env=$(getContainerEnvFile joomla "$container" available)
+    migrationReadEnvValue "$source_env" VDM_PROJECT_PATH project_root || { showError 'The source environment has no valid project path.'; exit 1; }
+    isSafeMigrationPath "$project_root" && ! migrationPathHasSymlink "$project_root/$project" || exit 1
+    references=$(migrationComposeReferences "$source_yml") || { showError 'The Compose file contains unsupported environment interpolation.'; exit 1; }
+    locals=$(migrationComposeLocalFiles "$source_yml" "$project") || { showError 'The Compose file uses unsupported volumes, external paths, or configuration dependencies.'; exit 1; }
+    while IFS= read -r name; do
+      [ -z "$name" ] || migrationReadEnvValue "$source_env" "$name" value || { showError 'A required Compose environment value is missing or invalid.'; exit 1; }
+    done <<< "$references"
+    runPrivileged test -d "$project_root/$project/db" && runPrivileged test -f "$project_root/$project/joomla/configuration.php" || exit 1
+    config_copy=$(mktemp "${TMPDIR:-/tmp}/octojoom-migration-config.XXXXXX") || exit 1
+    runPrivileged cat "$project_root/$project/joomla/configuration.php" > "$config_copy" || exit 1
+    value=$(getJoomlaConfigValue "$config_copy" host)
+    rm -f -- "$config_copy" || exit 1
+    config_copy=''
+    [[ "$value" =~ ^mariadb${key}(:[0-9]+)?$ ]] || { showError 'The Joomla configuration uses an external or unexpected database host.'; exit 1; }
+    migrationValidateTree "$project_root/$project" || { showError 'Migration v1 cannot package project symlinks, hard links, or special files.'; exit 1; }
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      ! migrationPathHasSymlink "$source_dir/$path" && [ -e "$source_dir/$path" ] || exit 1
+      if [ -d "$source_dir/$path" ]; then migrationValidateTree "$source_dir/$path" || exit 1; else [ -f "$source_dir/$path" ] || exit 1; fi
+    done <<< "$locals"
+    actual_image=$(docker inspect --type container --format '{{.Image}}' "mariadb$key" 2>/dev/null) || {
+      showError 'The source database container must exist so its exact image and mounts can be verified. Start the source project once before packaging; its mutable image tag will not be guessed.'
+      exit 1
+    }
+    [[ "$actual_image" =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
+    digests=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$actual_image" 2>/dev/null) || exit 1
+    while IFS= read -r value; do
+      if [[ "$value" =~ ^[a-zA-Z0-9._:/-]+@sha256:[a-f0-9]{64}$ ]]; then db_image="$value"; break; fi
+    done <<< "$digests"
+    [ -n "$db_image" ] || { showError 'The source database image has no immutable repository digest. Pin or publish its image before migrating database files.'; exit 1; }
+    architecture=$(docker image inspect --format '{{.Architecture}}' "$actual_image" 2>/dev/null) || exit 1
+    [[ "$architecture" =~ ^[a-zA-Z0-9_/-]+$ ]] || exit 1
+    actual_mounts=$(docker inspect --type container --format '{{range .Mounts}}{{printf "%s\t%s\t%s\n" .Type .Source .Destination}}{{end}}' "mariadb$key" 2>/dev/null) || exit 1
+    [ "$actual_mounts" = $'bind\t'"$project_root/$project/db"$'\t/var/lib/mysql' ] || { showError 'The database container mounts differ from its Compose project. Reconcile the source configuration before migration.'; exit 1; }
+    if ! mkdir "$clone_lock" 2>/dev/null; then showError 'A clone or migration is already using the source project lock.'; exit 1; fi
+    locked=true
+    package=$(mktemp -d "${TMPDIR:-/tmp}/octojoom-migration-export.XXXXXX") || exit 1
+    temporary_archive=$(mktemp "${archive}.partial.XXXXXX") || exit 1
+    mkdir "$package/compose" "$package/project" || exit 1
+    cp "$source_yml" "$package/compose/docker-compose.yml" || exit 1
+    : > "$package/compose/.env"
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      migrationReadEnvValue "$source_env" "$name" value || exit 1
+      formatEnvAssignment "$name=\"$value\"" >> "$package/compose/.env" || exit 1
+    done <<< "$references"
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      mkdir -p "$package/compose/$(dirname "$path")" || exit 1
+      runPrivileged cp -a "$source_dir/$path" "$package/compose/$path" || exit 1
+    done <<< "$locals"
+    for name in FORMAT CONTAINER KEY ENV_KEY PROJECT_FOLDER SOURCE_PROJECT_PATH DB_IMAGE ARCH SECURE; do
+      case "$name" in
+        FORMAT) value=1 ;; CONTAINER) value="$container" ;; KEY) value="$key" ;; ENV_KEY) value="$env_key" ;;
+        PROJECT_FOLDER) value="$project" ;; SOURCE_PROJECT_PATH) value="$project_root" ;; DB_IMAGE) value="$db_image" ;;
+        ARCH) value="$architecture" ;; SECURE) value="$secure" ;;
+      esac
+      formatEnvAssignment "VDM_MIGRATION_$name=\"$value\"" >> "$package/manifest.env" || exit 1
+    done
+    migrationValidateManifest "$package/manifest.env" || exit 1
+    declared_names=$(sed -nE 's/^[[:space:]]*container_name:[[:space:]]*([A-Za-z][A-Za-z0-9_-]*)[[:space:]]*$/\1/p' "$source_yml")
+    printf '%s\n' "$declared_names" | grep -qxF "mariadb$key" || exit 1
+    printf '%s\n' "$declared_names" | grep -qxF "joomla$key" || exit 1
+    all_names=$(docker ps -a --format '{{.Names}}' 2>/dev/null) || exit 1
+    while IFS= read -r name; do
+      [[ "$name" =~ ^(mariadb|joomla|phpmyadmin|mailcatcher)${key}$ ]] || exit 1
+      if ! printf '%s\n' "$all_names" | grep -qxF "$name"; then
+        [ "$name" != "mariadb$key" ] || exit 1
+        continue
+      fi
+      if [ "$name" = "joomla$key" ]; then
+        actual_mounts=$(docker inspect --type container --format '{{range .Mounts}}{{printf "%s\t%s\t%s\n" .Type .Source .Destination}}{{end}}' "$name" 2>/dev/null) || exit 1
+        printf '%s\n' "$actual_mounts" | grep -qxF $'bind\t'"$project_root/$project/joomla"$'\t/var/www/html' || {
+          showError 'The Joomla container mounts differ from its Compose project. Reconcile the source configuration before migration.'
+          exit 1
+        }
+      fi
+      state=$(docker inspect --type container --format '{{.Id}} {{.State.Running}}' "$name" 2>/dev/null) || exit 1
+      [[ "$state" =~ ^([a-f0-9]{64})\ (true|false)$ ]] || exit 1
+      id="${BASH_REMATCH[1]}"
+      source_ids+=("$id")
+      if [ "${BASH_REMATCH[2]}" = true ]; then running_ids+=("$id"); fi
+    done <<< "$declared_names"
+    [ "${#source_ids[@]}" -ge 1 ] || exit 1
+    if [ "${#running_ids[@]}" -gt 0 ]; then
+      restart=true
+      docker stop "${running_ids[@]}" >/dev/null 2>&1 || { showError 'The source services could not be stopped cleanly.'; exit 1; }
+    fi
+    for id in "${source_ids[@]}"; do
+      state=$(docker inspect --type container --format '{{.State.Running}}' "$id" 2>/dev/null) || exit 1
+      [ "$state" = false ] || { showError 'Source services are still running; database files were not copied.'; exit 1; }
+    done
+    if ! runPrivileged cp -a "$project_root/$project/." "$package/project/" >/dev/null 2>&1; then
+      showError 'The stopped source project could not be copied.'
+      exit 1
+    fi
+    if "$restart"; then
+      migrationRestartSource "${running_ids[@]}" || { showError 'The source services could not be restarted.'; exit 1; }
+      restart=false
+    fi
+    migrationValidateTree "$package/project" || exit 1
+    if ! runPrivileged tar --numeric-owner -czf - -C "$package" manifest.env compose project > "$temporary_archive" 2>/dev/null; then
+      showError 'The migration archive could not be created.'
+      exit 1
+    fi
+    chmod 600 "$temporary_archive" || exit 1
+    migrationValidateTar "$temporary_archive" bundle || { showError 'The generated archive contains unsupported filenames or file types.'; exit 1; }
+    # Noclobber publication: another process cannot replace an existing archive.
+    ln "$temporary_archive" "$archive" || exit 1
+    exit 0
+  )
+}
+
+
+# Destination migration preparation deliberately keeps host configuration and
+# shared environment files unchanged. Only newly reserved project paths publish.
+function migrationDestinationAvailable() {
+  local key="${1:-}" host="${2:-}" suffix candidate key_status=0
+  [[ "$key" =~ ^[A-Za-z]+$ ]] && isValidDomain "$host" || return 1
+  [[ "${host%%.*}" =~ ^[A-Za-z]+$ ]] || return 1
+  for candidate in "${VDM_PROJECT_PATH}/${key}" "${VDM_REPO_PATH}/joomla/available/${host}" "${VDM_REPO_PATH}/joomla/enabled/${host}"; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  done
+  isJoomlaKeyInUse "$key" || key_status=$?
+  case "$key_status" in 1) ;; 0) return 1 ;; *) return 2 ;; esac
+  for suffix in '' db mail; do
+    isJoomlaHostInUse "${host%%.*}${suffix}.${host#*.}" && return 1
+  done
+  return 0
+}
+
+# Compose environment interpolation prefers exported shell variables over its
+# env file. Keep the importer variables for path handling, but remove their
+# export attribute in the calling subshell so package values are authoritative.
+function migrationUnexportComposeReferences() {
+  local file="$1" refs name
+  refs=$(migrationComposeReferences "$file") || return 1
+  while IFS= read -r name; do
+    [ -z "$name" ] || export -n "${name?}" || return 1
+  done <<< "$refs"
+}
+
+function migrationRunCompose() {
+  (
+    local env_file="$1" compose_file="$2"
+    shift 2
+    migrationUnexportComposeReferences "$compose_file" || exit 1
+    docker compose --env-file "$env_file" --file "$compose_file" "$@"
+  )
+}
+
+function migrationNormalizeArchitecture() {
+  case "${1:-}" in
+    x86_64|amd64) printf 'amd64\n' ;;
+    aarch64|arm64) printf 'arm64\n' ;;
+    armv7l|armv7) printf 'armv7\n' ;;
+    *) printf '%s\n' "${1:-}" ;;
+  esac
+}
+
+# Rewrite generated routing values, preserving unrelated service options and
+# user middleware. A source middleware chain retains its non-Octojoom entries.
+function migrationRewriteComposeSettings() {
+  local file="$1" key="$2" secure="$3" resolver="$4" image="$5" network="$6" temporary
+  [[ "$key" =~ ^[A-Za-z]+$ && "$network" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || return 1
+  [[ "$secure" == true || "$secure" == false ]] || return 1
+  [[ "$secure" == false || "$resolver" == vdmresolver || "$resolver" == cfresolver ]] || return 1
+  temporary=$(mktemp "${file}.settings.XXXXXX") || return 1
+  if ! awk -v key="$key" -v secure="$secure" -v resolver="$resolver" -v image="$image" -v network="$network" '
+    function router(line, v) {
+      v=line; sub(/^.*traefik.http.routers\./,"",v); sub(/\..*$/,"",v); return v
+    }
+    function known(v) {return v == "joomla" key || v == "phpmyadmin" key || v == "mailcatcher" key}
+    function label(v, property, value) {print "      - \"traefik.http.routers." v "." property "=" value "\""}
+    NR==FNR {
+      if ($0 ~ /traefik.http.routers\..*\.middlewares=/ && known(router($0))) {
+        v=router($0); value=$0; sub(/^.*\.middlewares=/,"",value); sub(/"[[:space:]]*$/,"",value)
+        n=split(value,parts,","); extra[v]=""
+        for(i=1;i<=n;i++) if(parts[i]!="cloudflare" && parts[i]!="joomla-security" && parts[i]!="") extra[v]=extra[v] (extra[v]!=""?",":"") parts[i]
+      }
+      next
+    }
+    /^services:[[:space:]]*$/ {services=1; networks=0}
+    /^networks:[[:space:]]*$/ {services=0; networks=1; traefik=0}
+    /^[A-Za-z_]/ && !/^services:/ && !/^networks:/ {services=0; networks=0}
+    services && /^  [A-Za-z][A-Za-z0-9_-]*:[[:space:]]*$/ {service=$0; sub(/^  /,"",service); sub(/:[[:space:]]*$/,"",service)}
+    services && service == "mariadb" key && /^    image:/ {print "    image: " image; images++; next}
+    networks && /^  traefik:[[:space:]]*$/ {traefik=1}
+    networks && /^  [^ ]/ && !/^  traefik:/ {traefik=0}
+    networks && traefik && /^    name:/ {print "    name: " network; names++; next}
+    /^[[:space:]]*#/ {print; next}
+    /traefik.http.services\..*\.loadbalancer.server.port=/ {
+      v=$0; sub(/^.*traefik.http.services\./,"",v); sub(/\..*$/,"",v)
+      if(known(v)) next
+    }
+    /traefik.http.routers\./ {
+      v=router($0)
+      if(known(v) && $0 ~ /\.(entrypoints|tls|tls.certresolver|service|middlewares)=/) next
+      if(known(v) && $0 ~ /\.rule=Host\(/) {
+        print
+        label(v,"entrypoints",secure=="true"?"websecure":"web")
+        label(v,"service",v)
+        print "      - \"traefik.http.services." v ".loadbalancer.server.port=" (v=="mailcatcher" key?1080:80) "\""
+        middle=extra[v]
+        if(secure=="true") {
+          label(v,"tls.certresolver",resolver)
+          middle=(resolver=="cfresolver"?"cloudflare,":"") "joomla-security" (middle!=""?"," middle:"")
+        }
+        if(middle!="") label(v,"middlewares",middle)
+        next
+      }
+    }
+    {print}
+    END {if(images!=1 || names!=1) exit 1}
+  ' "$file" "$file" > "$temporary" || ! chmod 600 "$temporary" || ! mv -f "$temporary" "$file"; then
+    rm -f "$temporary"
+    return 1
+  fi
+}
+
+# Only the standard literal properties emitted by Joomla are changed. A custom
+# expression or duplicate property is rejected instead of executing PHP.
+function migrationPatchJoomlaSettings() {
+  local file="$1" old_key="$2" new_key="$3" host="$4" secure="$5" temporary working old_live old_cookie scheme force
+  working=$(mktemp) || return 1
+  if ! runPrivileged cat "$file" > "$working" || ! cloneJoomlaConfiguration "$working" "$old_key" "$new_key"; then
+    rm -f "$working"
+    return 1
+  fi
+  old_live=$(getJoomlaConfigValue "$working" live_site) || { rm -f "$working"; return 1; }
+  old_cookie=$(getJoomlaConfigValue "$working" cookie_domain) || { rm -f "$working"; return 1; }
+  scheme=http; force=0
+  # HTTPS routing belongs to destination Traefik. Preserve existing application
+  # SSL/proxy behavior; enabling force_ssl on a development site could loop.
+  if [ "$secure" = true ]; then scheme=https; force=preserve; fi
+  temporary=$(mktemp) || { rm -f "$working"; return 1; }
+  if ! awk -v host="$host" -v scheme="$scheme" -v force="$force" -v live="$old_live" -v cookie="$old_cookie" '
+    /^[[:space:]]*public[[:space:]]+\$force_ssl[[:space:]]*=/ {
+      if($0 !~ /^[[:space:]]*public[[:space:]]+\$force_ssl[[:space:]]*=[[:space:]]*[0-2];[[:space:]]*$/ || ++seenforce>1) exit 1
+      if(force=="preserve") print; else print "\tpublic $force_ssl = " force ";"; next
+    }
+    /^[[:space:]]*public[[:space:]]+\$(live_site|cookie_domain)[[:space:]]*=/ {
+      name=$0; sub(/^.*\$/,"",name); sub(/[[:space:]]*=.*$/,"",name)
+      if($0 !~ /^[[:space:]]*public[[:space:]]+\$(live_site|cookie_domain)[[:space:]]*=[[:space:]]*\047[^\047]*\047;[[:space:]]*$/ || ++seen[name]>1) exit 1
+      value=(name=="live_site"?(live!=""?scheme "://" host:""):(cookie!=""?host:""))
+      print "\tpublic $" name " = \047" value "\047;"; next
+    }
+    {print}
+    END {if(seenforce!=1) exit 1}
+  ' "$working" > "$temporary" || ! runPrivileged tee "$file" < "$temporary" >/dev/null; then
+    rm -f "$temporary" "$working"
+    return 1
+  fi
+  rm -f "$temporary" "$working"
+}
+
+# Operate on an extracted private package, never on a live destination. The
+# environment file remains project-scoped and database credentials are unchanged.
+function realignJoomlaMigration() {
+  set +x
+  local package="$1" key="$2" env_key="$3" host="$4" secure="$5" resolver="${6:-}" puid="${7:-}" pgid="${8:-}"
+  local old_key old_env old_container old_folder db_image source_arch manifest="$1/manifest.env" env="$1/compose/.env" compose="$1/compose/docker-compose.yml"
+  local temporary variable value suffix network="${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}"
+  [[ "$key" =~ ^[A-Za-z]+$ && "$env_key" =~ ^[A-Z]+$ && "${host%%.*}" =~ ^[A-Za-z]+$ ]] && isValidDomain "$host" || return 1
+  [[ "$secure" == true || "$secure" == false ]] || return 1
+  [[ "$secure" == false || "$resolver" == vdmresolver || "$resolver" == cfresolver ]] || return 1
+  if [ -n "$puid$pgid" ]; then [[ "$puid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ ]] || return 1; fi
+  migrationValidateManifest "$manifest" || return 1
+  migrationReadEnvValue "$manifest" VDM_MIGRATION_KEY old_key || return 1
+  migrationReadEnvValue "$manifest" VDM_MIGRATION_ENV_KEY old_env || return 1
+  migrationReadEnvValue "$manifest" VDM_MIGRATION_CONTAINER old_container || return 1
+  migrationReadEnvValue "$manifest" VDM_MIGRATION_PROJECT_FOLDER old_folder || return 1
+  migrationReadEnvValue "$manifest" VDM_MIGRATION_DB_IMAGE db_image || return 1
+  temporary=$(mktemp "${compose}.identity.XXXXXX") || return 1
+  if ! rewriteJoomlaComposeIdentity "$compose" "$temporary" "$old_key" "$key" "$old_env" "$env_key" \
+      "${old_container%%.*}" "${host%%.*}" "${old_container#*.}" "${host#*.}" "$old_folder" ||
+      ! chmod 600 "$temporary" || ! mv -f "$temporary" "$compose"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  migrationRewriteComposeSettings "$compose" "$key" "$secure" "$resolver" "$db_image" "$network" || return 1
+  temporary=$(mktemp "${env}.identity.XXXXXX") || return 1
+  if ! cloneContainerEnvFile "$env" "$temporary" "$old_env" "$env_key" || ! mv -f "$temporary" "$env"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  writeEnvVariable "$env" "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\"" true || return 1
+  for suffix in DB DB_USER DB_PASS DB_ROOT; do
+    migrationReadEnvValue "$env" "VDM_${env_key}_${suffix}" value || return 1
+    [ -n "$value" ] || return 1
+  done
+  # UID/GID changes apply only when the source image already used these settings.
+  if [ -n "$puid" ]; then
+    for suffix in PUID PGID; do
+      variable="VDM_${env_key}_${suffix}"
+      if grep -qF "\${${variable}}" "$compose"; then
+        if [ "$suffix" = PUID ]; then value="$puid"; else value="$pgid"; fi
+        writeEnvVariable "$env" "${variable}=\"#${value}\"" true || return 1
+      fi
+    done
+    runPrivileged chown -R "${puid}:${pgid}" "${package}/project/joomla" || return 1
+    for variable in php.ini entrypoint.sh; do
+      [ ! -f "${package}/project/${variable}" ] || runPrivileged chown "${puid}:${pgid}" "${package}/project/${variable}" || return 1
+    done
+  fi
+  migrationPatchJoomlaSettings "${package}/project/joomla/configuration.php" "$old_key" "$key" "$host" "$secure" || return 1
+  migrationValidateScopedEnv "$compose" "$env" || return 1
+  # Quiet validation prevents resolved credentials from reaching progress/logs.
+  migrationRunCompose "$env" "$compose" config -q >/dev/null 2>&1 || return 1
+}
+
+# Validate destination capabilities without changing the host proxy. A nonzero
+# result prevents activation but does not discard a successfully prepared site.
+function migrationDestinationReady() {
+  local secure="$1" resolver="${2:-}" command labels
+  docker network inspect "${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}" >/dev/null 2>&1 || {
+    printf 'The destination Traefik network is not available.\n'; return 1;
+  }
+  [ "$(docker inspect --format '{{.State.Running}}' traefik 2>/dev/null)" = true ] || {
+    printf 'The destination Traefik container is not running.\n'; return 1;
+  }
+  command=$(docker inspect --format '{{range .Config.Cmd}}{{println .}}{{end}}' traefik 2>/dev/null) || return 1
+  labels=$(docker inspect --format '{{json .Config.Labels}}' traefik 2>/dev/null) || return 1
+  if [ "$secure" = true ]; then
+    printf '%s\n' "$command" | grep -qF -- "--certificatesresolvers.${resolver}.acme." || {
+      printf 'The selected ACME resolver is not configured on destination Traefik.\n'; return 1;
+    }
+    printf '%s\n' "$labels" | grep -qF 'traefik.http.middlewares.joomla-security.' || {
+      printf 'The Joomla security middleware is not configured on destination Traefik.\n'; return 1;
+    }
+    if [ "$resolver" = cfresolver ]; then
+      printf '%s\n' "$labels" | grep -qF 'traefik.http.middlewares.cloudflare.' || {
+        printf 'The Cloudflare middleware is not configured on destination Traefik.\n'; return 1;
+      }
+    fi
+  elif printf '%s\n%s\n' "$command" "$labels" | grep -qE '(redirectscheme.scheme[^a-z]+https|entrypoints.web.http.redirections.entrypoint)'; then
+    printf 'Destination Traefik redirects HTTP globally; configure an HTTP-compatible host before enabling this development site.\n'
+    return 1
+  fi
+  return 0
+}
+
+# Deterministic, non-interactive archive import. The lock also serializes against
+# cloning. mkdir reserves each final path, and only those reservations roll back.
+function prepareJoomlaMigration() {
+  (
+    set +x
+    umask 077
+    local archive="$1" key="$2" env_key="$3" host="$4" secure="$5" resolver="${6:-}" puid="${7:-}" pgid="${8:-}"
+    local staging='' source_arch target_arch status=0 published=false project_reserved=false compose_reserved=false
+    local VDM_CONTAINER_TYPE=joomla
+    local lock="${VDM_REPO_PATH}/joomla/.clone.lock" project="${VDM_PROJECT_PATH}/${key}" destination="${VDM_REPO_PATH}/joomla/available/${host}"
+    createPrivateDirectory -p "${VDM_REPO_PATH}/joomla/available" || exit 1
+    mkdir "$lock" 2>/dev/null || { showError 'A clone or migration is already running on this destination.'; exit 1; }
+    trap 'status=$?; trap - EXIT; if [ "$published" != true ]; then
+      if [ "$compose_reserved" = true ]; then runPrivileged rm -rf -- "$destination"; fi
+      if [ "$project_reserved" = true ]; then runPrivileged rm -rf -- "$project"; fi
+    fi; if [ -n "$staging" ]; then runPrivileged rm -rf -- "$staging"; fi; rmdir "$lock" 2>/dev/null || status=1; exit "$status"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    migrationDestinationAvailable "$key" "$host" || { showError 'Destination identity is already used, or Docker could not verify its availability.'; exit 1; }
+    staging=$(mktemp -d "${VDM_PROJECT_PATH}/.migration.XXXXXX") || exit 1
+    extractJoomlaMigration "$archive" "$staging" || { showError 'The migration package could not be safely extracted.'; exit 1; }
+    migrationValidateManifest "${staging}/manifest.env" || exit 1
+    migrationReadEnvValue "${staging}/manifest.env" VDM_MIGRATION_ARCH source_arch || exit 1
+    target_arch=$(docker info --format '{{.Architecture}}' 2>/dev/null) || exit 1
+    if [ -z "$target_arch" ] || [ "$(migrationNormalizeArchitecture "$source_arch")" != "$(migrationNormalizeArchitecture "$target_arch")" ]; then
+      showError 'The destination architecture differs from the cold database package. Use a logical database migration across architectures.'; exit 1
+    fi
+    realignJoomlaMigration "$staging" "$key" "$env_key" "$host" "$secure" "$resolver" "$puid" "$pgid" || {
+      showError 'The migration configuration could not be validated. No destination project was published.'; exit 1;
+    }
+    migrationDestinationAvailable "$key" "$host" || exit 1
+    mkdir "$project" || exit 1
+    project_reserved=true
+    mkdir "$destination" || exit 1
+    compose_reserved=true
+    # The staging tree is on the projects filesystem. Rename the data tree over
+    # our empty reservation instead of copying an entire database a second time.
+    mkdir "${staging}/publish" || exit 1
+    runPrivileged mv "${staging}/project" "${staging}/publish/${key}" || exit 1
+    runPrivileged mv "${staging}/publish/${key}" "${VDM_PROJECT_PATH}/" || exit 1
+    runPrivileged cp -a "${staging}/compose/." "$destination/" || exit 1
+    runPrivileged chown "$(id -u):$(id -g)" "$destination" "$destination/.env" "$destination/docker-compose.yml" || exit 1
+    chmod 700 "$destination" || exit 1
+    chmod 600 "$destination/.env" "$destination/docker-compose.yml" || exit 1
+    published=true
+  )
+}
+
+function migrationWaitHealthy() {
+  local key="$1" timeout="${2:-120}" started=$SECONDS state service complete
+  [[ "$timeout" =~ ^[0-9]+$ ]] || return 1
+  while [ "$((SECONDS-started))" -lt "$timeout" ]; do
+    complete=true
+    for service in mariadb joomla; do
+      state=$(docker inspect --format '{{if .State.Running}}{{if .State.Health}}{{.State.Health.Status}}{{else}}missing-healthcheck{{end}}{{else}}stopped{{end}}' "${service}${key}" 2>/dev/null) || return 1
+      case "$state" in
+        healthy) ;;
+        starting) complete=false ;;
+        *) return 1 ;;
+      esac
+    done
+    "$complete" && return 0
+    sleep 2
+  done
+  return 1
+}
+
+# Test the installed application's real database credentials inside its own
+# container, then its destination route. The host never receives the password.
+function migrationVerifyApplication() {
+  local key="$1" host="$2" secure="$3" scheme=http port=80 started=$SECONDS response code redirect current visited hop retry
+  docker exec "joomla${key}" php -r 'require "/var/www/html/configuration.php"; $c = new JConfig; $host = explode(":", $c->host, 2); mysqli_report(MYSQLI_REPORT_OFF); $db = @new mysqli($host[0], $c->user, $c->password, $c->db, isset($host[1]) ? (int) $host[1] : 3306); exit($db->connect_errno ? 1 : 0);' >/dev/null 2>&1 || return 1
+  if [ "$secure" = true ]; then scheme=https; port=443; fi
+  # --resolve checks the destination proxy and certificate even before clients
+  # switch DNS. ACME issuance itself still requires valid public DNS/challenges.
+  while [ "$((SECONDS-started))" -lt 120 ]; do
+    current="${scheme}://${host}/"; visited=$'\n'; retry=false
+    for ((hop=0; hop<6; hop++)); do
+      [[ "$visited" != *$'\n'"$current"$'\n'* ]] || return 1
+      visited+="$current"$'\n'
+      if ! response=$(curl --fail --silent --output /dev/null --connect-timeout 5 --max-time 15 \
+          --write-out '%{http_code} %{redirect_url}' --resolve "${host}:${port}:127.0.0.1" "$current"); then
+        retry=true
+        break
+      fi
+      code="${response%% *}"; redirect="${response#* }"
+      [[ "$code" =~ ^2[0-9][0-9]$ ]] && return 0
+      [[ "$code" =~ ^3[0-9][0-9]$ && "$redirect" == "${scheme}://${host}/"* ]] || return 1
+      current="$redirect"
+    done
+    "$retry" || return 1
+    sleep 2
+  done
+  return 1
+}
+
+function activateJoomlaMigration() {
+  local key="$1" host="$2" secure="$3" resolver="${4:-}" destination="${VDM_REPO_PATH}/joomla/available/$2" reason status=0
+  reason=$(migrationDestinationReady "$secure" "$resolver") || { showNotice "Project is prepared but remains disabled.\n\n${reason}"; return 1; }
+  (
+    migrationUnexportComposeReferences "$destination/docker-compose.yml" || exit 1
+    VDM_CONTAINER_TYPE=joomla VDM_CONTAINER="$host" enableContainer joomla
+  ) >/dev/null 2>&1 || status=$?
+  if [ "$status" -eq 0 ]; then migrationWaitHealthy "$key" || status=$?; fi
+  if [ "$status" -eq 0 ]; then migrationVerifyApplication "$key" "$host" "$secure" || status=$?; fi
+  if [ "$status" -ne 0 ]; then
+    # Keep recoverable files, but do not leave an unhealthy migration enabled.
+    if migrationRunCompose "$destination/.env" "$destination/docker-compose.yml" down >/dev/null 2>&1; then
+      rm -f "${VDM_REPO_PATH}/joomla/enabled/${host}"
+      showError 'The imported site failed activation, database connectivity, or its HTTP/HTTPS route and certificate check. Its containers were stopped; the prepared files remain available for correction. HTTPS issuance requires the destination DNS and ACME challenge to be ready.'
+    else
+      showError 'The imported site failed health checks and could not be stopped. Its prepared files remain available; stop the destination containers before retrying.'
+    fi
+    return 1
+  fi
+  return 0
+}
+
+# User interaction stays on the destination. Opening a package only discloses
+# identity metadata; passwords are neither prompted for nor displayed.
+function importJoomlaMigration() {
+  (
+    set +x
+    umask 077
+    local archive="${1:-}" preview key env_key host secure=false resolver='' puid='' pgid='' reason status=0 member
+    # shellcheck disable=SC2034 # Read by the existing container workflow helpers.
+    local VDM_CONTAINER_TYPE=joomla
+    if [ ! -f "$archive" ] || [ -L "$archive" ]; then showError 'Select a regular migration archive.'; exit 1; fi
+    preview=$(mktemp -d "${VDM_PROJECT_PATH}/.migration-preview.XXXXXX") || exit 1
+    trap 'runPrivileged rm -rf -- "$preview"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    migrationValidateTar "$archive" bundle || { showError 'The migration package could not be safely validated.'; exit 1; }
+    # Read only metadata for the destination questions. Large project data is
+    # extracted once, by prepareJoomlaMigration after the user has chosen a plan.
+    for member in manifest.env compose/docker-compose.yml; do
+      if [[ "$member" == */* ]]; then mkdir -p "$preview/${member%/*}" || exit 1; fi
+      if ! tar -xOzf "$archive" "$member" > "$preview/$member" 2>/dev/null; then
+        tar -xOzf "$archive" "./$member" > "$preview/$member" 2>/dev/null || exit 1
+      fi
+    done
+    migrationValidateManifest "$preview/manifest.env" || exit 1
+    migrationReadEnvValue "$preview/manifest.env" VDM_MIGRATION_KEY key || exit 1
+    migrationReadEnvValue "$preview/manifest.env" VDM_MIGRATION_CONTAINER host || exit 1
+    while true; do
+      key=$(getInput 'Destination project key (letters only). The source key can be retained when unused.' "$key" 'Migration Project Key') || exit 3
+      [[ "$key" =~ ^[A-Za-z]+$ ]] || { showError 'Use letters only for the project key.'; continue; }
+      host=$(getInput 'Destination hostname, including subdomain and domain.' "$host" 'Migration Hostname') || exit 3
+      if [[ ! "${host%%.*}" =~ ^[A-Za-z]+$ ]] || ! isValidDomain "$host"; then showError 'Enter a valid hostname with an alphabetical subdomain.'; continue; fi
+      status=0
+      migrationDestinationAvailable "$key" "$host" || status=$?
+      [ "$status" -ne 0 ] || break
+      [ "$status" -ne 2 ] || { showError 'Docker could not inspect destination containers. Restore Docker access before retrying.'; exit 1; }
+      showError 'That key or hostname is already in use.'
+    done
+    env_key="${key^^}"
+    if getInputYesNo 'Enable HTTPS for this destination? A working destination Traefik ACME resolver is required.' 'Migration HTTPS' 10 112 'defaultno'; then
+      secure=true
+      resolver=vdmresolver
+      if getInputYesNo 'Use the destination Cloudflare DNS resolver for this site?' 'Migration Cloudflare' 8 112 'defaultno'; then resolver=cfresolver; fi
+    fi
+    if grep -qE 'APACHE_RUN_(USER|GROUP)=' "$preview/compose/docker-compose.yml" &&
+        getInputYesNo 'Change the Apache user/group IDs and website ownership for this destination?' 'Migration Ownership' 10 112 'defaultno'; then
+      puid=$(getInput 'Destination Apache user ID.' "$(id -u)" 'Migration User ID') || exit 1
+      pgid=$(getInput 'Destination Apache group ID.' "$(id -g)" 'Migration Group ID') || exit 1
+      [[ "$puid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ ]] || { showError 'User and group IDs must be numeric.'; exit 1; }
+    fi
+    if ! getInputYesNo "Prepare ${host} using project key ${key}?\nDatabase name, users, passwords and table prefix will be retained.\nDestination paths, routing and Joomla host settings will be realigned.\nHTTPS: ${secure}. The source is unaffected by destination import." 'Prepare Migration' 14 112 'defaultno'; then exit 3; fi
+    # Release the preview before extracting the publication copy; large projects
+    # need only one extracted copy plus the final project during publication.
+    runPrivileged rm -rf -- "$preview" || exit 1
+    preview=''
+    trap - EXIT
+    prepareJoomlaMigration "$archive" "$key" "$env_key" "$host" "$secure" "$resolver" "$puid" "$pgid" || exit 1
+    if reason=$(migrationDestinationReady "$secure" "$resolver"); then
+      if getInputYesNo 'The project is prepared. Enable it now and wait for database and Joomla health checks?' 'Enable Migrated Site' 10 112 'defaultno'; then
+        activateJoomlaMigration "$key" "$host" "$secure" "$resolver" || exit 1
+        showNotice "Migration complete. ${host} is enabled; database connectivity, container health and the destination HTTP/HTTPS route passed."
+      else
+        showNotice "Migration prepared. ${host} remains disabled in available containers."
+      fi
+    else
+      showNotice "Migration prepared. ${host} remains disabled.\n\n${reason}"
+    fi
+  )
+}
+
+
+# Migration control messages contain paths and identifiers only. All deployment
+# contents travel in one gzip-compressed archive in either direction.
+function createMigrationWorkspace() {
+  local base="${VDM_SRC_PATH}/migrations"
+  [ ! -L "$base" ] || return 1
+  createPrivateDirectory -p "$base" || return 1
+  chmod 700 "$base" || return 1
+  (umask 077; mktemp -d "${base}/migration.XXXXXXXX")
+}
+
+function isMigrationWorkspace() {
+  local path="${1:-}" base="${VDM_SRC_PATH}/migrations" suffix
+  [[ "$path" == "$base"/migration.* ]] || return 1
+  suffix="${path#"$base"/migration.}"
+  [[ "$suffix" =~ ^[A-Za-z0-9]+$ ]] && [ -d "$path" ] && [ ! -L "$path" ] && [ ! -L "$base" ]
+}
+
+function migrationArchiveDigest() {
+  local file="$1" digest
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(sha256sum < "$file") || return 1
+  else
+    digest=$(shasum -a 256 < "$file") || return 1
+  fi
+  digest="${digest%% *}"
+  [[ "$digest" =~ ^[a-fA-F0-9]{64}$ ]] || return 1
+  printf '%s\n' "$digest"
+}
+
+# Fixed worker API used by a peer's installed Octojoom. Never eval incoming
+# arguments or load an archive's environment into the host configuration.
+function migrationWorker() {
+  (
+    set +x
+    umask 077
+    local action="${1:-}" workspace container path tool
+    local VDM_CONTAINER_TYPE=joomla VDM_FORCE=false OS_NUMBER=0
+    [ "$#" -gt 0 ] || return 1
+    shift
+    VDM_HOME_PATH="${OCTOJOOM_HOME:-$HOME}"
+    VDM_SRC_PATH="${VDM_HOME_PATH}/.config/octojoom"
+    local worker_home="$VDM_HOME_PATH" worker_src="$VDM_SRC_PATH"
+    if ! loadEnvFile "${VDM_SRC_PATH}/.env"; then
+      printf '%s\n' 'The remote Octojoom configuration is unavailable.' >&2
+      return 1
+    fi
+    VDM_HOME_PATH="$worker_home"
+    VDM_SRC_PATH="$worker_src"
+    case "$OSTYPE" in linux-gnu*) OS_NUMBER=1 ;; darwin*) OS_NUMBER=2 ;; msys*|cygwin*) OS_NUMBER=3 ;; esac
+    export LC_ALL=C
+    if [ ! -d "${VDM_REPO_PATH:-}" ] || [ ! -d "${VDM_PROJECT_PATH:-}" ]; then
+      printf '%s\n' 'Initialize Octojoom repository and project paths before migration.' >&2
+      return 1
+    fi
+    # Noninteractive protocol operations must not invoke whiptail on failure.
+    if [ "$action" != import ]; then
+      # shellcheck disable=SC2317
+      showError() { printf '%s\n' "$1" >&2; }
+      # shellcheck disable=SC2317
+      showNotice() { printf '%s\n' "$1" >&2; }
+    fi
+    case "$action" in
+      capabilities)
+        [ "$#" -eq 0 ] || return 1
+        for tool in tar gzip rsync docker; do
+          command -v "$tool" >/dev/null 2>&1 || {
+            printf 'Migration requires %s on this host.\n' "$tool" >&2
+            return 1
+          }
+        done
+        command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || return 1
+        printf '%s\n' octojoom-migration-v1
+        ;;
+      list)
+        [ "$#" -eq 0 ] || return 1
+        for path in "${VDM_REPO_PATH}/joomla/available/"*/docker-compose.yml; do
+          [ -f "$path" ] || continue
+          container="${path%/docker-compose.yml}"
+          container="${container##*/}"
+          isValidDomain "$container" && printf '%s\n' "$container"
+        done
+        return 0
+        ;;
+      receive)
+        [ "$#" -eq 0 ] || return 1
+        createMigrationWorkspace
+        ;;
+      export)
+        [ "$#" -eq 1 ] && isValidDomain "$1" || return 1
+        workspace=$(createMigrationWorkspace) || return 1
+        if ! exportJoomlaMigration "$1" "${workspace}/package.tar.gz" >&2; then
+          rm -rf -- "$workspace"
+          return 1
+        fi
+        printf '%s\n' "$workspace"
+        ;;
+      export-to)
+        [ "$#" -eq 2 ] && isValidDomain "$1" && isMigrationWorkspace "$2" || return 1
+        exportJoomlaMigration "$1" "${2}/package.tar.gz"
+        ;;
+      digest|import)
+        [ "$#" -eq 1 ] || return 1
+        workspace="${1%/package.tar.gz}"
+        [ "$1" = "${workspace}/package.tar.gz" ] && isMigrationWorkspace "$workspace" || return 1
+        [ -f "$1" ] && [ ! -L "$1" ] || return 1
+        if [ "$action" = digest ]; then
+          migrationArchiveDigest "$1"
+        else
+          command -v whiptail >/dev/null 2>&1 || {
+            printf '%s\n' 'Destination realignment requires whiptail.' >&2
+            return 1
+          }
+          importJoomlaMigration "$1"
+        fi
+        ;;
+      cleanup)
+        [ "$#" -eq 1 ] && isMigrationWorkspace "$1" || return 1
+        rm -rf -- "$1"
+        ;;
+      *) printf '%s\n' 'Unsupported migration worker operation.' >&2; return 1 ;;
+    esac
+  )
+}
+
+# Quote each argument once for the remote POSIX shell. The program is the
+# destination's installed copy; archives never carry executable migration code.
+function remoteMigrationWorker() {
+  local remote="$1" tty="$2" command argument
+  shift 2
+  # shellcheck disable=SC2016
+  command='if command -v octojoom >/dev/null 2>&1; then octojoom_program=$(command -v octojoom); elif [ -f "$HOME/octojoom" ]; then octojoom_program="$HOME/octojoom"; else printf "%s\n" "Octojoom is not installed on this host." >&2; exit 1; fi; if ! grep -q "^function migrationWorker() {" "$octojoom_program"; then printf "%s\n" "Update Octojoom on the remote host before migrating." >&2; exit 1; fi; exec bash "$octojoom_program" --migration-worker'
+  for argument in "$@"; do
+    command+=" $(quoteRemoteArgument "$argument")"
+  done
+  if [ "$tty" = true ]; then
+    ssh -t -- "$remote" "$command"
+  else
+    ssh -- "$remote" "$command"
+  fi
+}
+
+function isRemoteMigrationWorkspace() {
+  local path="${1:-}"
+  isSafeMigrationPath "$path" && [[ "$path" =~ /migrations/migration\.[A-Za-z0-9]+$ ]]
+}
+
+function selectRemoteMigrationProject() {
+  local remote="$1" projects project selected
+  local -a choices=()
+  projects=$(remoteMigrationWorker "$remote" false list) || return 1
+  while IFS= read -r project; do
+    [ -n "$project" ] || continue
+    isValidDomain "$project" || return 1
+    choices+=("$project" "$project")
+  done <<< "$projects"
+  [ "${#choices[@]}" -gt 0 ] || {
+    showError 'No available Joomla projects were found on the source host.'
+    return 1
+  }
+  selected=$(whiptail --title 'Source Joomla project' --menu \
+    'Select the remote project to package and pull.' 20 112 10 "${choices[@]}" \
+    --backtitle "$BACK_TITLE" --notags 3>&1 1>&2 2>&3) || return 1
+  printf '%s\n' "$selected"
+}
+
+function joomla__TRuST__migrate() {
+  (
+    set +x
+    local direction remote container capabilities local_workspace='' remote_workspace=''
+    local local_archive remote_archive local_digest remote_digest migration_status=0
+    direction=$(getMigrationType) || return 1
+    [[ "$direction" == push || "$direction" == pull ]] || return 1
+    remote=$(getRemoteSystem) || return 1
+    if [ -z "$remote" ] || [ "$remote" = none_selected ]; then
+      showNotice 'Migration cancelled: no remote host was selected.'
+      return 0
+    fi
+    capabilities=$(remoteMigrationWorker "$remote" false capabilities) || {
+      showError 'The remote host is not ready for complete project migration. Update Octojoom on both hosts and verify SSH, Docker, tar and rsync access.'
+      return 1
+    }
+    if [ "$capabilities" != octojoom-migration-v1 ]; then
+      showError 'The remote Octojoom migration protocol is incompatible. Update both installations before migrating.'
+      return 1
+    fi
+    if [ "$direction" = push ]; then
+      container=$(getSelectedDirectory 'Select the complete Joomla project to package and push.' \
+        "${VDM_REPO_PATH}/joomla/available/" '' 'Migrate Joomla project') || return 0
+    else
+      container=$(selectRemoteMigrationProject "$remote") || return 1
+    fi
+    [ -n "$container" ] || return 0
+    isValidDomain "$container" || return 1
+    getInputYesNo "Package (${container}) and ${direction} it through (${remote})?\n\nThe source services will be stopped briefly to take a consistent copy, then restarted. Compose, project-specific environment values and project files travel together in one compressed archive. Destination choices are made on the destination host. The source is retained." \
+      'Migrate complete Joomla project' 17 112 || return 0
+    local_workspace=$(createMigrationWorkspace) || return 1
+    local_archive="${local_workspace}/package.tar.gz"
+    if [ "$direction" = push ]; then
+      exportJoomlaMigration "$container" "$local_archive" || {
+        rm -rf -- "$local_workspace"
+        return 1
+      }
+      remote_workspace=$(remoteMigrationWorker "$remote" false receive) || migration_status=1
+    else
+      remote_workspace=$(remoteMigrationWorker "$remote" false receive) || migration_status=1
+    fi
+    if [ "$migration_status" -ne 0 ] || ! isRemoteMigrationWorkspace "$remote_workspace"; then
+      showError "Could not prepare the migration archive workspace. Any completed local archive is retained at ${local_archive}."
+      return 1
+    fi
+    remote_archive="${remote_workspace}/package.tar.gz"
+    if [ "$direction" = pull ]; then
+      # Keep source packaging interactive for ordinary sudo authentication, but
+      # keep protocol path discovery separate from terminal output.
+      remoteMigrationWorker "$remote" true export-to "$container" "$remote_workspace" || {
+        showError "Source packaging failed. The remote recovery workspace is ${remote}:${remote_workspace}."
+        return 1
+      }
+    fi
+    if [ "$direction" = push ]; then
+      rsync -az --protect-args -- "$local_archive" "${remote}:${remote_archive}" || migration_status=1
+    else
+      rsync -az --protect-args -- "${remote}:${remote_archive}" "$local_archive" || migration_status=1
+    fi
+    if [ "$migration_status" -eq 0 ]; then
+      local_digest=$(migrationArchiveDigest "$local_archive") || migration_status=1
+      remote_digest=$(remoteMigrationWorker "$remote" false digest "$remote_archive") || migration_status=1
+      [[ "$remote_digest" =~ ^[a-fA-F0-9]{64}$ ]] && [ "$local_digest" = "$remote_digest" ] || migration_status=1
+    fi
+    if [ "$migration_status" -eq 0 ]; then
+      if [ "$direction" = push ]; then
+        remoteMigrationWorker "$remote" true import "$remote_archive" || migration_status=$?
+      else
+        importJoomlaMigration "$local_archive" || migration_status=$?
+      fi
+    fi
+    if [ "$migration_status" -eq 3 ]; then
+      showNotice "Destination setup was cancelled. The packaged project is retained for a later import:\n${local_archive}\n${remote}:${remote_archive}"
+      return 3
+    fi
+    if [ "$migration_status" -ne 0 ]; then
+      showError "Migration did not complete. Recovery archives are retained where available:\nLocal: ${local_archive}\nRemote: ${remote}:${remote_archive}\n\nCheck the destination result before retrying. No source project was removed."
+      return 1
+    fi
+    if ! remoteMigrationWorker "$remote" false cleanup "$remote_workspace" || ! rm -rf -- "$local_workspace"; then
+      showError "Destination preparation completed, but archive cleanup failed. Remove the private recovery workspaces after checking the destination:\n${local_workspace}\n${remote}:${remote_workspace}"
+      return 1
+    fi
+    showNotice 'The complete project was transferred and prepared on the destination. The source project is retained.'
+  )
+}
+
 
 # Parse all options before performing an action. Values passed explicitly on the
 # command line override the saved global config loaded later.

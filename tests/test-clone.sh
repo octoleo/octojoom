@@ -189,6 +189,10 @@ rewrite_case bulk-php-ini         abcde  ABCDE  site   vdm.dev    true  true   t
 rewrite_case key-in-domain        site   SITE   www    joomlasite.com true true false false false false  shop    SHOP    shop    joomlasite.com
 rewrite_case key-in-subdomain     jcb    JCB    joomlajcb vdm.dev true  true   false false false false  test    TEST    test    vdm.dev
 rewrite_case key-in-new-domain    jcb    JCB    jcb    vdm.dev    true  true   false false false false  test    TEST    shop    joomlajcb.dev
+rewrite_case same-identity        jcb    JCB    jcb    vdm.dev    true  true   true  true  true  false  jcb     JCB     jcb     vdm.dev
+rewrite_case same-key-new-host    jcb    JCB    jcb    vdm.dev    true  true   true  true  true  false  jcb     PROD    site    example.org
+rewrite_case same-named-volumes   jcb    JCB    jcb    vdm.dev    true  true   true  false false true   jcb     JCB     site    example.org
+rewrite_case key-case-only        Jcb    JCB    jcb    vdm.dev    true  true   true  false false true   jcb     JCB     site    example.org
 
 # a source that mounts a project folder other than its key (hand edited, or a renamed folder)
 mkdir -p "${WORK}/mount-folder"
@@ -207,6 +211,19 @@ rewriteJoomlaComposeIdentity "${WORK}/mount-folder/old.yml" "${WORK}/mount-folde
 rc=$?
 [ "${rc}" -eq 2 ] && pass "rewrite refuses when the source mounts stay unknown" || fail "rewrite unknown mount folder returned ${rc}"
 
+# Retaining the container key must still normalize a differently named project folder.
+gen_compose jcb JCB jcb vdm.dev true true true true true false >"${WORK}/mount-folder/same-expected.yml"
+rewriteJoomlaComposeIdentity "${WORK}/mount-folder/old.yml" "${WORK}/mount-folder/same-got.yml" jcb jcb JCB JCB jcb jcb vdm.dev vdm.dev legacy
+rc=$?
+if [ "${rc}" -eq 0 ] && diff -q "${WORK}/mount-folder/same-expected.yml" "${WORK}/mount-folder/same-got.yml" >/dev/null; then
+  pass "same-key rewrite normalizes a differently named project folder"
+else
+  fail "same-key rewrite of mount-folder returned ${rc}"
+fi
+rewriteJoomlaComposeIdentity "${WORK}/mount-folder/old.yml" "${WORK}/mount-folder/same-unsafe.yml" jcb jcb JCB JCB jcb jcb vdm.dev vdm.dev
+rc=$?
+[ "${rc}" -eq 2 ] && pass "same-key rewrite still refuses unknown source mounts" || fail "same-key unknown mount folder returned ${rc}"
+
 # a host that is not one of the source's hosts (hand added) must not be copied silently
 mkdir -p "${WORK}/extra-host"
 gen_compose jcb JCB jcb vdm.dev false true false false false false |
@@ -214,6 +231,9 @@ gen_compose jcb JCB jcb vdm.dev false true false false false false |
 rewriteJoomlaComposeIdentity "${WORK}/extra-host/old.yml" "${WORK}/extra-host/got.yml" jcb test JCB TEST jcb test vdm.dev vdm.dev
 rc=$?
 [ "${rc}" -eq 2 ] && pass "rewrite refuses a hand added host it cannot rename" || fail "rewrite extra host returned ${rc}"
+rewriteJoomlaComposeIdentity "${WORK}/extra-host/old.yml" "${WORK}/extra-host/same-got.yml" jcb jcb JCB JCB jcb jcb vdm.dev vdm.dev
+rc=$?
+[ "${rc}" -eq 2 ] && pass "same-key rewrite still refuses an unrelated host" || fail "same-key extra host returned ${rc}"
 
 # mounts written in a way the rewrite cannot rename must stop it, never be copied as they are
 for variant in unbraced absolute long-syntax; do
