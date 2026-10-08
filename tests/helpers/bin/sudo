@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+#
+# Test stand-in for sudo.
+#
+# Safety first: a command only runs when every absolute path in its arguments
+# is inside the test sandbox (${STUB_SANDBOX}). Anything else (the hosts file,
+# /usr/local/bin, system services, package managers, chown to other users) is
+# logged to ${STUB_DIR}/commands.log as "sudo-skipped ..." and succeeds without
+# running. What a skipped "tee" would have written is kept in ${STUB_DIR}/sudo-tee.log.
+
+# shellcheck source=tests/helpers/stub-lib.bash
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-lib.bash"
+stub_log "sudo $*"
+stub_hook sudo "$@"
+
+# options of sudo itself
+while [ "${1:-}" != "" ] && [[ "${1}" == -* ]]; do
+  case "$1" in
+  -v | -k | -K) exit "$(stub_status sudo-v)" ;;
+  -u | -g) shift 2 ;;
+  *) shift ;;
+  esac
+done
+[ $# -ge 1 ] || exit 0
+
+skip() {
+  stub_log "sudo-skipped $*"
+  if [ "${1:-}" = "tee" ]; then
+    cat >>"${STUB_DIR:-/dev/null}/sudo-tee.log"
+  fi
+  exit 0
+}
+
+case "$1" in
+# changing owners needs root, package managers and services touch the system
+chown | chgrp | systemctl | service | apt-get | apt | dnf | yum | zypper | pacman | usermod | groupadd | \
+  launchctl | softwareupdate | lsof | setfacl | gpg | install | sh | bash | env)
+  skip "$@"
+  ;;
+esac
+
+# run only when every absolute path is inside the sandbox
+if [ -z "${STUB_SANDBOX:-}" ]; then
+  skip "$@"
+fi
+for arg in "$@"; do
+  case "${arg}" in
+  /*)
+    [[ "${arg}" == "${STUB_SANDBOX}"/* || "${arg}" == "${STUB_SANDBOX}" ]] || skip "$@"
+    ;;
+  --*=/*)
+    [[ "${arg#*=}" == "${STUB_SANDBOX}"/* ]] || skip "$@"
+    ;;
+  esac
+done
+exec "$@"

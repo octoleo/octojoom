@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+#
+# Test stand-in for curl: never touches the network. With -o <file> it writes
+# ${STUB_DIR}/curl-body (or a placeholder) to that file when the file is inside
+# the sandbox; otherwise it prints the body. The status comes from ${STUB_DIR}/fail/curl.
+
+# shellcheck source=tests/helpers/stub-lib.bash
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-lib.bash"
+stub_log "curl $*"
+stub_hook curl "$@"
+
+rc=$(stub_status curl)
+[ "${rc}" -ne 0 ] && exit "${rc}"
+out=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+  -o | --output)
+    out="$2"
+    shift
+    ;;
+  esac
+  shift
+done
+body() {
+  if [ -f "${STUB_DIR:-}/curl-body" ]; then
+    cat "${STUB_DIR}/curl-body"
+  else
+    echo "stub download"
+  fi
+}
+if [ -n "${out}" ]; then
+  if [ -n "${STUB_SANDBOX:-}" ] && [[ "${out}" == "${STUB_SANDBOX}"/* ]]; then
+    body >"${out}"
+  else
+    stub_log "curl-skipped writing ${out}"
+  fi
+else
+  body
+fi
+exit 0

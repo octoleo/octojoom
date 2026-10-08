@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#
+# Test stand-in for ${EDITOR}: logs which file was opened and leaves it as it is.
+# A hook at ${STUB_DIR}/hooks/fake-editor can change the file like a user would.
+
+# shellcheck source=tests/helpers/stub-lib.bash
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-lib.bash"
+stub_log "editor $*"
+stub_hook fake-editor "$@"
+exit 0

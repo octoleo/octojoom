@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#
+# Test stand-in for systemctl: logs the call, changes nothing, and returns the
+# status in ${STUB_DIR}/fail/systemctl (default 0).
+
+# shellcheck source=tests/helpers/stub-lib.bash
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-lib.bash"
+stub_log "systemctl $*"
+stub_hook systemctl "$@"
+exit "$(stub_status systemctl)"

@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+#
+# Test stand-in for docker.
+#
+# State lives in ${STUB_DIR}/docker:
+#   running    names of running containers (docker ps)
+#   all        names of all containers (docker ps -a), defaults to running
+#   networks   names of existing networks
+# "docker compose up/start" add the container_name values of the compose file
+# to running, "down/stop" remove them. A test makes a call fail by writing an
+# exit status to ${STUB_DIR}/fail/docker-<sub> or ${STUB_DIR}/fail/docker-compose-<action>.
+# "docker compose config" runs the real docker when ${REAL_DOCKER} is set.
+
+# shellcheck source=tests/helpers/stub-lib.bash
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-lib.bash"
+stub_log "docker $*"
+stub_hook docker "$@"
+
+state="${STUB_DIR:-/tmp}/docker"
+mkdir -p "${state}" 2>/dev/null
+touch "${state}/running" "${state}/networks" 2>/dev/null
+
+# the container names of a compose file
+compose_names() {
+  [ -f "$1" ] && sed -nE 's/^[[:space:]]*container_name:[[:space:]]*"?([^"[:space:]]+)"?[[:space:]]*$/\1/p' "$1"
+}
+
+case "${1:-}" in
+ps)
+  rc=$(stub_status docker-ps)
+  [ "${rc}" -ne 0 ] && exit "${rc}"
+  if [[ " $* " == *" -a "* ]] && [ -f "${state}/all" ]; then
+    cat "${state}/all"
+  else
+    cat "${state}/running"
+  fi
+  exit 0
+  ;;
+info)
+  rc=$(stub_status docker-info)
+  [ "${rc}" -ne 0 ] && exit "${rc}"
+  echo " Server Version: stub"
+  echo " IPv6: ${STUB_DOCKER_IPV6:-false}"
+  exit 0
+  ;;
+network)
+  case "${2:-}" in
+  inspect)
+    grep -qxF "${3:-}" "${state}/networks" && exit 0
+    exit 1
+    ;;
+  create)
+    rc=$(stub_status docker-network-create)
+    [ "${rc}" -ne 0 ] && exit "${rc}"
+    # the network name is the last argument
+    echo "${*: -1}" >>"${state}/networks"
+    exit 0
+    ;;
+  esac
+  exit 0
+  ;;
+compose)
+  shift
+  file=''
+  action=''
+  args=("$@")
+  i=0
+  while [ "${i}" -lt "${#args[@]}" ]; do
+    case "${args[${i}]}" in
+    --file | -f)
+      i=$((i + 1))
+      file="${args[${i}]}"
+      ;;
+    --env-file | -p | --project-name)
+      i=$((i + 1))
+      ;;
+    -*) ;;
+    *)
+      [ -z "${action}" ] && action="${args[${i}]}"
+      ;;
+    esac
+    i=$((i + 1))
+  done
+  rc=$(stub_status "docker-compose-${action}")
+  [ "${rc}" -ne 0 ] && exit "${rc}"
+  case "${action}" in
+  version)
+    echo "Docker Compose version v2.0.0-stub"
+    ;;
+  config)
+    if [ -n "${REAL_DOCKER:-}" ] && [ -x "${REAL_DOCKER}" ]; then
+      exec "${REAL_DOCKER}" compose "$@"
+    fi
+    ;;
+  up | start | restart)
+    while IFS= read -r name; do
+      [ -n "${name}" ] && ! grep -qxF "${name}" "${state}/running" && echo "${name}" >>"${state}/running"
+    done < <(compose_names "${file}")
+    ;;
+  down | stop)
+    while IFS= read -r name; do
+      [ -n "${name}" ] && grep -vxF "${name}" "${state}/running" >"${state}/running.next"
+      [ -n "${name}" ] && mv -f "${state}/running.next" "${state}/running"
+    done < <(compose_names "${file}")
+    ;;
+  esac
+  exit 0
+  ;;
+*)
+  rc=$(stub_status "docker-${1:-none}")
+  exit "${rc}"
+  ;;
+esac

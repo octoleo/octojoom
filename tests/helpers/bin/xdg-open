@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#
+# Test stand-in for xdg-open: logs the call, changes nothing, and returns the
+# status in ${STUB_DIR}/fail/xdg-open (default 0).
+
+# shellcheck source=tests/helpers/stub-lib.bash
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-lib.bash"
+stub_log "xdg-open $*"
+stub_hook xdg-open "$@"
+exit "$(stub_status xdg-open)"

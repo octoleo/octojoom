@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#
+# Test stand-in for apt-get: logs the call, changes nothing, and returns the
+# status in ${STUB_DIR}/fail/apt-get (default 0).
+
+# shellcheck source=tests/helpers/stub-lib.bash
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-lib.bash"
+stub_log "apt-get $*"
+stub_hook apt-get "$@"
+exit "$(stub_status apt-get)"

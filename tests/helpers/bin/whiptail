@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+#
+# Test stand-in for whiptail.
+#
+# Answers are taken in order from ${STUB_DIR}/answers, one per line:
+#   --yesno            yes | no | <esc>
+#   input, menu, list  the text or tag to return | <cancel> | <esc>
+# Message, info and gauge boxes take no answer. Every dialog is logged to
+# ${STUB_DIR}/dialogs.log (kind and first line) and ${STUB_DIR}/dialogs.full.
+# When the answers run out the test is stopped, so a prompt loop can never hang.
+
+# shellcheck source=tests/helpers/stub-lib.bash
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-lib.bash"
+stub_hook whiptail "$@"
+
+kind=''
+text=''
+take=false
+for arg in "$@"; do
+  if ${take}; then
+    text="${arg}"
+    break
+  fi
+  case "${arg}" in
+  --yesno | --inputbox | --passwordbox | --radiolist | --checklist | --menu | --msgbox | --infobox | --gauge | --textbox)
+    kind="${arg}"
+    take=true
+    ;;
+  esac
+done
+
+if [ -n "${STUB_DIR:-}" ]; then
+  printf '%s | %s\n' "${kind}" "$(printf '%b' "${text}" | head -n 1)" >>"${STUB_DIR}/dialogs.log"
+  printf '%s\n%b\n-----\n' "${kind}" "${text}" >>"${STUB_DIR}/dialogs.full"
+fi
+
+next_answer() {
+  local file="${STUB_DIR:-}/answers"
+  local answer
+  if [ -z "${STUB_DIR:-}" ] || [ ! -s "${file}" ]; then
+    printf 'OUT OF ANSWERS at: %s | %s\n' "${kind}" "$(printf '%b' "${text}" | head -n 1)" >>"${STUB_DIR:-/dev/null}/out_of_answers"
+    # stop the test: a prompt loop would otherwise ask forever
+    [ -n "${STUB_KILL_PID:-}" ] && kill -TERM "${STUB_KILL_PID}" 2>/dev/null
+    exit 255
+  fi
+  answer=$(head -n 1 "${file}")
+  tail -n +2 "${file}" >"${file}.next" && mv -f "${file}.next" "${file}"
+  printf '%s' "${answer}"
+}
+
+case "${kind}" in
+--gauge)
+  cat >/dev/null
+  exit 0
+  ;;
+--msgbox | --infobox | --textbox | '')
+  exit 0
+  ;;
+--yesno)
+  answer=$(next_answer) || exit 255
+  case "${answer}" in
+  yes) exit 0 ;;
+  no) exit 1 ;;
+  '<esc>') exit 255 ;;
+  *)
+    printf 'BAD ANSWER for --yesno: %s\n' "${answer}" >>"${STUB_DIR}/out_of_answers"
+    exit 1
+    ;;
+  esac
+  ;;
+*)
+  answer=$(next_answer) || exit 255
+  case "${answer}" in
+  '<cancel>') exit 1 ;;
+  '<esc>') exit 255 ;;
+  esac
+  # whiptail writes the answer to stderr
+  printf '%s' "${answer}" >&2
+  exit 0
+  ;;
+esac

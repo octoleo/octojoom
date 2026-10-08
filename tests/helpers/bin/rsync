@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#
+# Test stand-in for rsync: logs the call and returns the status in
+# ${STUB_DIR}/fail/rsync (default 0). Write a hook to ${STUB_DIR}/hooks/rsync
+# to simulate a remote system.
+
+# shellcheck source=tests/helpers/stub-lib.bash
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-lib.bash"
+stub_log "rsync $*"
+stub_hook rsync "$@"
+exit "$(stub_status rsync)"

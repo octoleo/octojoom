@@ -3,3 +3,6 @@ joomla
 openssh
 traefik
 portainer
+
+# test suite downloads (bats-core)
+tests/.cache/

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#
+# Test stand-in for pacman: logs the call, changes nothing, and returns the
+# status in ${STUB_DIR}/fail/pacman (default 0).
+
+# shellcheck source=tests/helpers/stub-lib.bash
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-lib.bash"
+stub_log "pacman $*"
+stub_hook pacman "$@"
+exit "$(stub_status pacman)"
