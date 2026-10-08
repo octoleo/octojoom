@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+# SC2317: test doubles are called indirectly by application functions.
+# shellcheck disable=SC2317
 #
 # Domains and host names: the domain list (${VDM_SRC_PATH}/.domains), the single
 # and multiple domain setups, the sub-domain, key and environment key questions,
@@ -57,6 +59,29 @@ refute_dialogs() {
   refute_file_exists "$(DOMAINS)"
 }
 
+@test "saveMultiDomain: similar and parent domains are separate exact entries" {
+  domains_file child.vdm.dev vdmXdev
+  run saveMultiDomain vdm.dev
+  assert_success
+  assert_equal "$(cat "$(DOMAINS)")" $'child.vdm.dev\nvdmXdev\nvdm.dev'
+}
+
+@test "saveMultiDomain: a new domain list has private permissions" {
+  skip_on_windows "Unix file modes are not available"
+  run saveMultiDomain vdm.dev
+  assert_success
+  assert_equal "$(file_mode "$(DOMAINS)")" 600
+}
+
+@test "saveMultiDomain: malformed domains cannot enter the domain list" {
+  local domain
+  for domain in 'bad domain.dev' '-bad.dev' 'bad..dev' $'valid.dev\nother.dev'; do
+    run saveMultiDomain "${domain}"
+    assert_failure
+  done
+  refute_file_exists "$(DOMAINS)"
+}
+
 @test "deleteMultiDomains: removes the selected domains and keeps the others" {
   domains_file a.dev b.dev c.dev
   answers '"a.dev" "c.dev"'
@@ -71,6 +96,26 @@ refute_dialogs() {
   run deleteMultiDomains
   assert_success
   assert_equal "$(cat "$(DOMAINS)")" $'a.dev\nb.dev'
+}
+
+@test "deleteMultiDomains: deleting the final domain leaves an empty private list" {
+  domains_file vdm.dev
+  chmod 600 "$(DOMAINS)"
+  answers '"vdm.dev"'
+  run deleteMultiDomains
+  assert_success
+  [ ! -s "$(DOMAINS)" ]
+  if ! is_windows; then
+    assert_equal "$(file_mode "$(DOMAINS)")" 600
+  fi
+}
+
+@test "deleteMultiDomains: punctuation is matched literally and parent domains survive" {
+  domains_file vdm.dev vdmXdev child.vdm.dev
+  answers '"vdm.dev"'
+  run deleteMultiDomains
+  assert_success
+  assert_equal "$(cat "$(DOMAINS)")" $'vdmXdev\nchild.vdm.dev'
 }
 
 ###############################################################################
@@ -192,6 +237,71 @@ refute_dialogs() {
 ###############################################################################
 # hosts file
 
+@test "allow switches: disabled features return 1 and setter failures propagate" {
+  setMultiDomainSwitch() { return 23; }
+  setUpdateHostFile() { return 24; }
+  run allowMultiDomains
+  assert_status 23
+  run allowEditHostFile
+  assert_status 24
+  setMultiDomainSwitch() { return 0; }
+  setUpdateHostFile() { return 0; }
+  VDM_MULTI_DOMAIN=false
+  VDM_UPDATE_HOST=false
+  run allowMultiDomains
+  assert_status 1
+  run allowEditHostFile
+  assert_status 1
+}
+
+@test "allow switches: inherited flag text is never executed" {
+  setMultiDomainSwitch() { return 0; }
+  setUpdateHostFile() { return 0; }
+  inherited_command() { touch "${SANDBOX}/executed-flag"; }
+  VDM_MULTI_DOMAIN=inherited_command
+  VDM_UPDATE_HOST=inherited_command
+  run allowMultiDomains
+  assert_status 1
+  run allowEditHostFile
+  assert_status 1
+  refute_file_exists "${SANDBOX}/executed-flag"
+}
+
+@test "updateHostFile: config setter failures propagate on Unix and Windows" {
+  setUpdateHostFile() { return 24; }
+  VDM_UPDATE_HOST=true
+  local system
+  for system in 1 3; do
+    OS_NUMBER="${system}"
+    run updateHostFile octojoomtest invalid
+    assert_status 24
+  done
+  refute_command '^sudo'
+}
+
+@test "hostFileHasHost: matches exact aliases and ignores comments" {
+  local host_file="${SANDBOX}/hosts"
+  printf '%s\n' \
+    '127.0.0.1 other.dev OCTOJOOMTEST.INVALID # comment' \
+    '127.0.0.2 prefixedoctojoomtest.invalid' \
+    '# 127.0.0.3 commented.invalid' >"${host_file}"
+  run hostFileHasHost octojoomtest.invalid "${host_file}"
+  assert_success
+  run hostFileHasHost commented.invalid "${host_file}"
+  assert_failure
+  run hostFileHasHost octojoomtestXinvalid "${host_file}"
+  assert_failure
+  run hostFileHasHost test.invalid "${host_file}"
+  assert_failure
+}
+
+@test "hostFileHasHost: matches the final alias in Windows CRLF files" {
+  local host_file="${SANDBOX}/hosts"
+  printf '127.0.0.1 other.dev octojoomtest.invalid\r\n' >"${host_file}"
+  run hostFileHasHost octojoomtest.invalid "${host_file}"
+  assert_success
+}
+
 @test "setUpdateHostFile: asks and saves the answer in the config" {
   : >"$(ENV_FILE)"
   answers yes
@@ -217,6 +327,27 @@ refute_dialogs() {
   answers no
   run updateHostFile octojoomtest invalid
   assert_success
+  refute_command '^sudo'
+}
+
+@test "updateHostFile: a failed privileged write returns failure without success notice" {
+  octojoom_config 'VDM_UPDATE_HOST=true'
+  OS_NUMBER=1
+  hook_command sudo <<'EOF'
+if [ "${1:-}" = tee ]; then exit 42; fi
+EOF
+  answers yes
+  run updateHostFile octojoomtest invalid
+  assert_failure
+  assert_dialog "Failed to add"
+  refute_dialog "was added to"
+}
+
+@test "updateHostFile: malformed host names are refused before privileged writes" {
+  octojoom_config 'VDM_UPDATE_HOST=true'
+  OS_NUMBER=1
+  run updateHostFile $'valid\n127.0.0.1 injected' dev
+  assert_failure
   refute_command '^sudo'
 }
 

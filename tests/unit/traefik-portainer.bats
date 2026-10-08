@@ -175,7 +175,7 @@ EOF
   answers yes
   run traefik__TRuST__delete
   assert_success
-  assert_command "^docker compose --file ${TRAEFIK_YML} down"
+  assert_command "^docker compose --env-file ${TRAEFIK_ENV} --file ${TRAEFIK_YML} down"
   refute_file_exists "${TRAEFIK_YML}"
   # the settings are kept for a later setup
   assert_file_exists "${TRAEFIK_ENV}"
@@ -268,7 +268,7 @@ EOF
   answers yes
   run portainer__TRuST__delete
   assert_success
-  assert_command "^docker compose --file ${PORTAINER_YML} down"
+  assert_command "^docker compose --env-file ${GLOBAL_ENV} --file ${PORTAINER_YML} down"
   refute_file_exists "${PORTAINER_YML}"
 }
 
@@ -279,4 +279,44 @@ EOF
   run portainer__TRuST__delete
   assert_success
   assert_file_exists "${PORTAINER_YML}"
+}
+
+@test "traefik setup: existing ACME certificates and account keys survive repeated setup" {
+  octojoom_config "VDM_SECURE=true"
+  VDM_CONTAINER_TYPE='traefik'
+  mkdir -p "${VDM_REPO_PATH}/traefik" "${ACME_DIR}"
+  echo 'VDM_SECURE_EMAIL="admin@vdm.dev"' >"${TRAEFIK_ENV}"
+  printf '{"Account":"existing-private-key"}\n' >"${ACME_DIR}/acme.json"
+  printf '{"Account":"existing-cloudflare-key"}\n' >"${ACME_DIR}/acme-cloudflare.json"
+  answers no no
+  run traefik__TRuST__setup
+  assert_success
+  assert_answers_used
+  assert_equal "$(cat "${ACME_DIR}/acme.json")" '{"Account":"existing-private-key"}'
+  assert_equal "$(cat "${ACME_DIR}/acme-cloudflare.json")" '{"Account":"existing-cloudflare-key"}'
+}
+
+@test "traefik setup: HTTP redirect uses the Traefik v3 regexp syntax" {
+  octojoom_config "VDM_SECURE=true"
+  VDM_CONTAINER_TYPE='traefik'
+  VDM_SECURE_EMAIL='admin@vdm.dev'
+  answers no yes no
+  run traefik__TRuST__setup
+  assert_success
+  assert_file_contains "${TRAEFIK_YML}" 'rule=HostRegexp(`.+`)'
+  refute_file_contains "${TRAEFIK_YML}" '{host:.+}'
+  run grep -qE '^[[:space:]]+- --certificatesresolvers\.cfresolver\.' "${TRAEFIK_YML}"
+  assert_failure
+}
+
+@test "traefik setup: Cloudflare resolver uses DNS challenge without an HTTP challenge" {
+  octojoom_config "VDM_SECURE=true"
+  VDM_CONTAINER_TYPE='traefik'
+  VDM_SECURE_EMAIL='admin@vdm.dev'
+  VDM_CLOUDFLARE_DNS_API_TOKEN='test-token'
+  answers yes yes no
+  run traefik__TRuST__setup
+  assert_success
+  assert_file_contains "${TRAEFIK_YML}" '--certificatesresolvers.cfresolver.acme.dnschallenge.provider=cloudflare'
+  refute_file_contains "${TRAEFIK_YML}" '--certificatesresolvers.cfresolver.acme.httpchallenge=true'
 }

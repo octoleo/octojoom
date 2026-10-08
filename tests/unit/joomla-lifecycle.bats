@@ -93,7 +93,7 @@ refute_running() {
   make_joomla_container abc ABC abc
   VDM_CONTAINER=nope.vdm.dev
   run joomla__TRuST__enable
-  assert_success
+  assert_failure
   [ ! -e "$(enabled nope.vdm.dev)" ]
   refute_command '^docker '
 }
@@ -154,7 +154,7 @@ refute_running() {
   running_containers joomlaabc
   answers no
   run joomla__TRuST__down
-  assert_success
+  assert_failure
   assert_running joomlaabc
   refute_command '^docker '
 }
@@ -311,10 +311,10 @@ make_fix_project() {
 @test "joomla clone: without containers or project folders the clone is not started" {
   cloneJoomlaContainer() { echo called >>"${STUB_DIR}/clone.log"; }
   run joomla__TRuST__clone
-  assert_success
+  assert_failure
   mkdir -p "${VDM_REPO_PATH}/joomla/available/abc.vdm.dev"
   run joomla__TRuST__clone
-  assert_success
+  assert_failure
   refute_file_exists "${STUB_DIR}/clone.log"
 }
 

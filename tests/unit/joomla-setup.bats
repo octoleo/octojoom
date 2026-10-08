@@ -8,7 +8,7 @@
 #
 # SC2034: the VDM_* globals are read by the loaded script functions.
 # SC2016: the expected compose lines hold a literal ${...}.
-# shellcheck disable=SC2016,SC2034
+# shellcheck disable=SC2016,SC2034,SC2317
 
 load ../helpers/common
 
@@ -247,6 +247,27 @@ shared_env() {
   assert_failure
   run joomlaValidateCliCommand 'site:down $(id)'
   assert_failure
+  run joomlaValidateCliCommand 'cache:clean;site:down'
+  assert_failure
+}
+
+@test "setJoomlaWebsiteDetails: input cancellation stops the setup questions" {
+  VDM_JV=5.3
+  VDM_J_REPO=joomla
+  answers yes '<esc>'
+  run setJoomlaWebsiteDetails
+  assert_status 255
+  assert_answers_used
+}
+
+@test "setJoomlaExtensionUrls and setJoomlaCommands: empty input clears old optional values" {
+  VDM_J_EXTENSIONS_URLS='https://example.org/old.zip'
+  VDM_J_CLI_COMMANDS='site:down'
+  answers '' ''
+  setJoomlaExtensionUrls
+  setJoomlaCommands
+  [ -z "${VDM_J_EXTENSIONS_URLS:-}" ]
+  [ -z "${VDM_J_CLI_COMMANDS:-}" ]
 }
 
 ###############################################################################
@@ -274,6 +295,29 @@ shared_env() {
   assert_command "^sudo chmod 600 ${ini}$"
 }
 
+@test "setPHPSettings: failed config persistence stops before generating php.ini" {
+  octojoom_config
+  VDM_PHP_PROJECT_PATH=abc
+  setUniqueEnvVariable() { return 12; }
+  answers yes 300
+  run setPHPSettings
+  assert_status 12
+  refute_file_exists "${VDM_PROJECT_PATH}/abc/php.ini"
+}
+
+@test "setPHPSettings: ownership failure is not reported as usable overrides" {
+  octojoom_config
+  VDM_PHP_PROJECT_PATH=abc
+  hook_command sudo <<'EOF'
+[ "$1" != chown ] || exit 7
+exit 0
+EOF
+  answers yes 300 2000 5000 E_ALL 128M 64M 1G
+  run setPHPSettings
+  assert_status 7
+  refute_command '^sudo chmod'
+}
+
 ###############################################################################
 # setDockerEntrypoint
 
@@ -296,8 +340,9 @@ shared_env() {
   assert_success
   local file="${VDM_PROJECT_PATH}/abc/entrypoint.sh"
   assert_file_contains "${file}" 'custom entrypoint'
-  assert_command "curl --fail -L https://example.org/docker-entrypoint.sh -o ${file}"
-  assert_command "^sudo chmod \+x ${file}$"
+  assert_command "curl --fail -L https://example.org/docker-entrypoint.sh -o ${file}\.tmp\."
+  assert_command "^sudo chmod 700 ${file}\.tmp\."
+  [ -x "$file" ]
 }
 
 @test "setDockerEntrypoint: a failed download is not used" {
@@ -309,4 +354,44 @@ shared_env() {
   assert_failure
   refute_command '^sudo chmod'
   refute_file_exists "${VDM_PROJECT_PATH}/abc/entrypoint.sh"
+}
+
+@test "setDockerEntrypoint: partial download failure preserves an existing script" {
+  VDM_ENTRY_REPO='https://example.org/docker-entrypoint.sh'
+  VDM_ENTRY_PROJECT_PATH=abc
+  mkdir -p "${VDM_PROJECT_PATH}/abc"
+  printf '%s\n' 'original entrypoint' > "${VDM_PROJECT_PATH}/abc/entrypoint.sh"
+  hook_command curl <<'EOF'
+while [ $# -gt 0 ]; do
+  if [ "$1" = -o ]; then
+    printf '%s' 'partial download' > "$2"
+    exit 22
+  fi
+  shift
+done
+exit 22
+EOF
+  answers yes
+  run setDockerEntrypoint
+  assert_failure
+  assert_equal "$(cat "${VDM_PROJECT_PATH}/abc/entrypoint.sh")" 'original entrypoint'
+  [ -z "$(find "${VDM_PROJECT_PATH}/abc" -name 'entrypoint.sh.tmp.*' -print)" ]
+}
+
+@test "setDockerEntrypoint: failed executable permissions preserve an existing script" {
+  VDM_ENTRY_REPO='https://example.org/docker-entrypoint.sh'
+  VDM_ENTRY_PROJECT_PATH=abc
+  mkdir -p "${VDM_PROJECT_PATH}/abc"
+  printf '%s\n' 'original entrypoint' > "${VDM_PROJECT_PATH}/abc/entrypoint.sh"
+  hook_command sudo <<'EOF'
+case "$1" in
+  chmod) exit 7 ;;
+  chown) exit 0 ;;
+esac
+exec "$@"
+EOF
+  answers yes
+  run setDockerEntrypoint
+  assert_failure
+  assert_equal "$(cat "${VDM_PROJECT_PATH}/abc/entrypoint.sh")" 'original entrypoint'
 }

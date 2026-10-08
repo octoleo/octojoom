@@ -11,6 +11,27 @@ setup() {
   octojoom_setup
 }
 
+@test "check_bash_version: accepts the current and lower required major version" {
+  run check_bash_version "${BASH_VERSINFO[0]}"
+  assert_success
+  run check_bash_version 4
+  assert_success
+}
+
+@test "check_bash_version: fails when the required major version is newer" {
+  run check_bash_version "$((BASH_VERSINFO[0] + 1))"
+  assert_failure
+  assert_output_contains 'requires Bash version'
+}
+
+@test "check_bash_version: rejects an empty or nonnumeric requirement" {
+  local value
+  for value in '' invalid '4+1' '4.0'; do
+    run check_bash_version "$value"
+    assert_failure
+  done
+}
+
 # a configuration.php as Joomla leaves it: read only
 write_readonly_config() {
   mkdir -p "$(dirname "$1")"

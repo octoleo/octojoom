@@ -6,8 +6,8 @@
 </h2>
 
 <p align="center">
-  <a href="https://github.com/koalaman/shellcheck">
-    <img src="https://img.shields.io/badge/ShellCheck-passing-brightgreen?logo=gnu-bash&logoColor=white" alt="ShellCheck passing">
+  <a href="https://github.com/octoleo/octojoom/actions/workflows/tests.yml">
+    <img src="https://github.com/octoleo/octojoom/actions/workflows/tests.yml/badge.svg" alt="Octojoom tests">
   </a>
   <img src="https://img.shields.io/badge/Ubuntu-tested-brightgreen?logo=ubuntu&logoColor=white" alt="Ubuntu Tested">
   <img src="https://img.shields.io/badge/macOS-tested-blue?logo=apple&logoColor=white" alt="macOS Tested">
@@ -380,6 +380,8 @@ We welcome contributions of all levels — from documentation to new distro supp
    stand-ins for whiptail, docker and sudo, so they never touch your containers
    or your Octojoom config. Every push and pull request to `master` or `staging`
    runs the same checks on Linux, macOS and Windows (`.github/workflows/tests.yml`).
+   Ubuntu also runs the real Docker clone regression. See [the test guide](tests/README.md)
+   for coverage, local commands, infrastructure requirements, and validation limits.
 5. **Submit** a pull request with a clear explanation
 
 > 💬 Found a bug or want to suggest improvements?

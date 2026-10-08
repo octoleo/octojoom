@@ -160,6 +160,22 @@ make_openssh_container() {
   assert_command "--file ${ENABLED}/llewellyn.vdm.dev/docker-compose.yml up -d$"
 }
 
+@test "openssh setup: invalid ports and escaping usernames are refused before writing Compose" {
+  mkdir -p "${SSH_DIR}/team" "${VDM_PROJECT_PATH}/alpha"
+  mkdir -p "${VDM_REPO_PATH}/openssh"
+  {
+    echo "VDM_TEAM_PROJECT_DIR=\"${VDM_PROJECT_PATH}\""
+    echo "VDM_PUBLIC_KEY_GLOBAL_DIR=\"${SSH_DIR}\""
+    echo "VDM_TEAM_PUBLIC_KEY_DIR=\"${SSH_DIR}/team\""
+  } >"${OPENSSH_ENV}"
+  answers invalid 22 65536 2239 ../escape dev 33 33 devkey TEAM '"alpha"' no
+  run openssh__TRuST__setup
+  assert_success
+  assert_answers_used
+  assert_file_contains "$(compose_of dev.vdm.dev)" '- 2239:2222'
+  refute_file_exists "${VDM_REPO_PATH}/openssh/escape.vdm.dev"
+}
+
 ###############################################################################
 # openssh__TRuST__edit
 
@@ -284,7 +300,7 @@ make_openssh_container() {
   running_containers openssh-server-team
   answers no
   run openssh__TRuST__down
-  assert_success
+  assert_failure
   refute_command '^docker compose'
   run isContainerRunning openssh-server-team
   assert_success

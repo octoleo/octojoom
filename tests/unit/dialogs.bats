@@ -4,7 +4,7 @@
 # message boxes, the progress switch, and the small "set" questions built on them.
 #
 # SC2034: the VDM_* globals are read by the loaded script functions.
-# shellcheck disable=SC2034
+# shellcheck disable=SC2034,SC2317
 
 load ../helpers/common
 
@@ -24,6 +24,64 @@ OCTOLEO_IMAGE="llewellyn/joomla|https://hub.docker.com/r/llewellyn/joomla/tags;h
   run getInput "Your name?" '' 'Name'
   assert_success
   assert_equal "${output}" "my answer"
+}
+
+@test "getInput: preserves echo-like input and propagates cancellation" {
+  answers '-n' '<cancel>'
+  run getInput "A value?"
+  assert_success
+  assert_equal "$output" '-n'
+  run getInput "A value?"
+  assert_status 1
+  assert_equal "$output" ''
+}
+
+@test "getInputNow: a failed dialog stops instead of prompting forever" {
+  answers '<esc>'
+  run getInputNow "A value?"
+  assert_status 255
+  assert_answers_used
+}
+
+@test "getRandomPass and getRandomName: exact lengths and successful pipefail completion" {
+  set -o pipefail
+  local length
+  for length in 1 20 128 2048; do
+    run getRandomPass "$length"
+    assert_success
+    assert_equal "${#output}" "$length"
+    [[ "$output" =~ ^[A-HJ-NP-Za-km-z2-9]+$ ]]
+    run getRandomName "$length"
+    assert_success
+    assert_equal "${#output}" "$length"
+    [[ "$output" =~ ^[a-zA-Z]+$ ]]
+  done
+  run getRandomPass
+  assert_success
+  assert_equal "${#output}" 128
+}
+
+@test "getRandomString: forces byte locale and reports generator failures" {
+  LC_ALL=''
+  tr() {
+    [ "${LC_ALL:-}" = C ] || return 65
+    command tr "$@"
+  }
+  run getRandomName 10
+  assert_success
+  assert_equal "${#output}" 10
+  tr() { return 69; }
+  run getRandomPass 10
+  assert_failure
+}
+
+@test "getRandomString: rejects invalid or excessive lengths before reading entropy" {
+  local length
+  for length in -1 abc 0 999999999999999999 65537; do
+    run getRandomName "$length"
+    assert_failure
+    assert_output_contains 'between 1 and 65536'
+  done
 }
 
 @test "getInputYesNo: returns 0 for yes and 1 for no" {
@@ -57,6 +115,24 @@ OCTOLEO_IMAGE="llewellyn/joomla|https://hub.docker.com/r/llewellyn/joomla/tags;h
   run getPassword "Password?"
   assert_success
   assert_equal "${output}" "s3cret!"
+}
+
+@test "getPassword: passes nocancel separately and propagates dialog errors" {
+  hook_command whiptail <<'EOF'
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = --backtitle ]; then
+    [ "$argument" = "$BACK_TITLE" ] || exit 2
+  fi
+  [ "$argument" != --nocancel ] || found=true
+  previous="$argument"
+done
+[ "${found:-false}" = true ] || exit 3
+exit 255
+EOF
+  export BACK_TITLE
+  run getPassword "Password?"
+  assert_status 255
 }
 
 ###############################################################################
@@ -94,6 +170,34 @@ OCTOLEO_IMAGE="llewellyn/joomla|https://hub.docker.com/r/llewellyn/joomla/tags;h
   run getSelectedDirectories "Pick folders" "${SANDBOX}/empty"
   assert_success
   assert_equal "${output}" ""
+  [ ! -s "${STUB_DIR}/dialogs.log" ]
+}
+
+@test "folder selection: regular files are excluded and hidden directories are offered" {
+  mkdir -p "${SANDBOX}/sites/alpha" "${SANDBOX}/sites/.hidden"
+  touch "${SANDBOX}/sites/config.txt"
+  hook_command whiptail <<'EOF'
+for argument in "$@"; do
+  [ "$argument" != config.txt ] || exit 2
+  [ "$argument" != .hidden ] || found=true
+done
+[ "${found:-false}" = true ] || exit 3
+printf '%s' '.hidden' >&2
+EOF
+  run getSelectedDirectory "Pick a folder" "${SANDBOX}/sites"
+  assert_success
+  assert_equal "$output" '.hidden'
+  run getSelectedDirectories "Pick folders" "${SANDBOX}/sites"
+  assert_success
+  assert_equal "$output" '.hidden'
+}
+
+@test "folder selection: files alone do not trigger a selection dialog" {
+  mkdir -p "${SANDBOX}/sites"
+  touch "${SANDBOX}/sites/config.txt"
+  run getSelectedDirectory "Pick a folder" "${SANDBOX}/sites" current
+  assert_success
+  assert_equal "$output" current
   [ ! -s "${STUB_DIR}/dialogs.log" ]
 }
 
@@ -223,4 +327,31 @@ OCTOLEO_IMAGE="llewellyn/joomla|https://hub.docker.com/r/llewellyn/joomla/tags;h
   setNumberContainers
   assert_equal "${VDM_NUMBER_CONTAINERS}" "7"
   assert_answers_used
+}
+
+@test "setNumberContainers: leading zeroes are decimal and huge integers are rejected" {
+  answers 18446744073709551618 08
+  setNumberContainers
+  assert_equal "$VDM_NUMBER_CONTAINERS" 8
+  assert_answers_used
+}
+
+@test "setEnvironmentKey: normalizes the stored key to uppercase" {
+  VDM_KEY=abc
+  VDM_ENV_KEY=''
+  answers abc
+  setEnvironmentKey
+  assert_equal "$VDM_ENV_KEY" ABC
+}
+
+@test "isValidDomain: rejects malformed labels and newline injection" {
+  run isValidDomain app.example-test.dev
+  assert_success
+  local domain
+  for domain in .example.dev example.dev. a..dev '-a.dev' 'a-.dev' 'a b.dev' $'valid.dev\n127.0.0.1 evil'; do
+    run isValidDomain "$domain"
+    assert_failure
+  done
+  run isValidDomain "$(printf '%064d' 0).dev"
+  assert_failure
 }

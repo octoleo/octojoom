@@ -35,7 +35,7 @@ remote_octojoom() {
 case "${*: -1}" in
 'grep "^VDM_REPO_PATH='*) echo 'VDM_REPO_PATH="/home/remote/Docker"' ;;
 'grep "^VDM_PROJECT_PATH='*) echo 'VDM_PROJECT_PATH="/home/remote/Projects"' ;;
-'[ -d '*) [ -f "${STUB_DIR}/remote_has_folder" ] ;;
+'[ -d '*']') [ -f "${STUB_DIR}/remote_has_folder" ] ;;
 esac
 EOF
 }
@@ -44,6 +44,33 @@ EOF
 make_available() {
   mkdir -p "${VDM_REPO_PATH}/joomla/available/$1"
   echo "services: {}" >"${VDM_REPO_PATH}/joomla/available/$1/docker-compose.yml"
+}
+
+# Execute remote shell commands against a second home inside the sandbox.
+# rsync still uses its real file-copy and checksum engine, with both endpoints
+# mapped to sandbox paths so these tests cannot initiate a network connection.
+local_remote() {
+  mkdir -p "${SANDBOX}/remote/.config/octojoom" "${SANDBOX}/remote/Projects" "${SANDBOX}/remote/Docker"
+  {
+    printf 'VDM_REPO_PATH="%s"\n' "${SANDBOX}/remote/Docker"
+    printf 'VDM_PROJECT_PATH="%s"\n' "${SANDBOX}/remote/Projects"
+  } >"${SANDBOX}/remote/.config/octojoom/.env"
+  hook_command ssh <<'EOF'
+HOME="${SANDBOX}/remote" bash -c "${*: -1}"
+EOF
+  hook_command rsync <<'EOF'
+arguments=()
+for argument in "${@:1:$#-2}"; do
+  [ "${argument}" = --protect-args ] || arguments+=("${argument}")
+done
+source_path="${@: -2:1}"
+destination_path="${*: -1}"
+exec /usr/bin/rsync "${arguments[@]}" "${source_path#web:}" "${destination_path#web:}"
+EOF
+}
+
+require_local_rsync() {
+  [ -x /usr/bin/rsync ] || skip "a local rsync executable is required for sandbox transfer integration"
 }
 
 ###############################################################################
@@ -132,8 +159,8 @@ EOF
   make_available site.vdm.dev
   run pushContainerMigration "${LOCAL_PATH}" "joomla/available/site.vdm.dev" web
   assert_success
-  assert_command "^ssh web mkdir -p ${REMOTE_PATH}$"
-  assert_command "^rsync -avz --delete ${LOCAL_PATH}/ web:${REMOTE_PATH}$"
+  assert_command "^ssh -- web mkdir -p -- '${REMOTE_PATH}.migration.[0-9]+.[0-9]+'$"
+  assert_command "^rsync -avz --protect-args --delete -- ${LOCAL_PATH}/ web:${REMOTE_PATH}.migration.[0-9]+.[0-9]+/$"
   refute_command "rm -Irf"
   assert_dialog "success"
   assert_file_exists "${LOCAL_PATH}/docker-compose.yml"
@@ -146,8 +173,8 @@ EOF
   answers yes
   run pushContainerMigration "${LOCAL_PATH}" "joomla/available/site.vdm.dev" web
   assert_success
-  assert_command "mv '${REMOTE_PATH}' '${REMOTE_PATH}_backup_[0-9]+'"
-  assert_command "^rsync -avz --delete ${LOCAL_PATH}/ web:${REMOTE_PATH}$"
+  assert_command "mv -- '${REMOTE_PATH}' '${REMOTE_PATH}_backup_[0-9_]+'.*exit 20"
+  assert_command "^rsync -avz --protect-args --delete -- ${LOCAL_PATH}/ web:${REMOTE_PATH}.migration.[0-9]+.[0-9]+/$"
 }
 
 @test "migration-remote: pushContainerMigration reports a failed transfer" {
@@ -174,13 +201,16 @@ EOF
   refute_command '^rsync'
 }
 
-@test "migration-remote: pullContainerMigration reads the remote repo path and copies nothing yet" {
+@test "migration-remote: pullContainerMigration stages and verifies the remote container" {
   remote_octojoom
+  touch "${STUB_DIR}/remote_has_folder"
   run pullContainerMigration "${LOCAL_PATH}" "joomla/available/site.vdm.dev" web
   assert_success
   assert_command '^ssh .*VDM_REPO_PATH'
   assert_dialog "PULL"
-  refute_command '^(rsync|scp)'
+  assert_command "^rsync -avz --protect-args -- web:${REMOTE_PATH}/ ${LOCAL_PATH}.migration.*/$"
+  assert_command '^rsync .*--dry-run.*--checksum'
+  assert_file_exists "${LOCAL_PATH}"
 }
 
 ###############################################################################
@@ -195,7 +225,7 @@ EOF
   run joomla__TRuST__migrate
   assert_success
   assert_answers_used
-  assert_command "^rsync -avz --delete ${LOCAL_PATH}/ web:${REMOTE_PATH}$"
+  assert_command "^rsync -avz --protect-args --delete -- ${LOCAL_PATH}/ web:${REMOTE_PATH}.migration.[0-9]+.[0-9]+/$"
   refute_command "other.vdm.dev"
 }
 
@@ -221,15 +251,17 @@ EOF
 
 @test "migration-remote: directory__TRuST__migrate runs the pull for the selected project directory" {
   remote_octojoom
+  touch "${STUB_DIR}/remote_has_folder"
   ssh_config web
   mkdir -p "${VDM_PROJECT_PATH}/site1" "${VDM_PROJECT_PATH}/site2"
-  answers site1 pull web yes
+  answers site1 pull web yes no
   run directory__TRuST__migrate
   assert_success
   assert_answers_used
   assert_command '^ssh .*VDM_PROJECT_PATH'
   assert_dialog "PULL"
-  refute_command '^(rsync|scp)'
+  assert_command '^rsync -avz --protect-args -- web:/home/remote/Projects/site1/'
+  assert_command '^rsync .*--dry-run.*--checksum'
 }
 
 @test "migration-remote: directory__TRuST__migrate does nothing when the confirmation is declined" {
@@ -239,4 +271,512 @@ EOF
   run directory__TRuST__migrate
   assert_success
   refute_command '^(ssh|rsync|scp|sudo)'
+}
+
+###############################################################################
+# failure propagation and preservation of existing data
+
+@test "migration-remote: HostName alone is not a configured host" {
+  mkdir -p "${VDM_HOME_PATH}/.ssh"
+  printf 'HostName web.example.org\n' >"${VDM_HOME_PATH}/.ssh/config"
+  run hasRemoteSystemSet
+  assert_failure
+}
+
+@test "migration-remote: remote environment lookup rejects an injected key" {
+  run getRemoteEnvValue web 'VDM_REPO_PATH; touch injected'
+  assert_failure
+  assert_equal "${output}" none_found
+  refute_command '^ssh'
+}
+
+@test "migration-remote: remote environment lookup preserves embedded quotes and equals" {
+  hook_command ssh <<'EOF'
+case "${*: -1}" in
+grep*) printf '%s\n' 'VDM_REPO_PATH="/home/remote/a\"b=c"' ;;
+esac
+EOF
+  run getRemoteEnvValue web VDM_REPO_PATH
+  assert_success
+  assert_equal "${output}" '/home/remote/a"b=c'
+}
+
+@test "migration-remote: remote environment lookup decodes escaped dollar signs as literal data" {
+  hook_command ssh <<'EOF'
+case "${*: -1}" in
+grep*) printf 'VDM_REPO_PATH="/home/remote/\\$(touch %s/injected)"\n' "${SANDBOX}" ;;
+esac
+EOF
+  run getRemoteEnvValue web VDM_REPO_PATH
+  assert_success
+  assert_equal "${output}" "/home/remote/\$(touch ${SANDBOX}/injected)"
+  refute_file_exists "${SANDBOX}/injected"
+}
+
+@test "migration-remote: remote environment lookup rejects malformed quoted values" {
+  hook_command ssh <<'EOF'
+case "${*: -1}" in
+grep*) printf '%s\n' 'VDM_REPO_PATH="unterminated' ;;
+esac
+EOF
+  run getRemoteEnvValue web VDM_REPO_PATH
+  assert_failure
+  assert_equal "${output}" none_found
+}
+
+@test "migration-remote: SSH failure cannot masquerade as a matching transfer" {
+  fail_command rsync 23
+  run transferWasSuccessful "${LOCAL_PATH}" "${REMOTE_PATH}" web
+  assert_failure
+}
+
+@test "migration-remote: verification detects ordinary itemized rsync file changes" {
+  hook_command rsync <<'EOF'
+printf '%s\n' '>f.st...... docker-compose.yml'
+EOF
+  run transferWasSuccessful "${LOCAL_PATH}" "${REMOTE_PATH}" web
+  assert_failure
+}
+
+@test "migration-remote: a failed remote mkdir prevents copying" {
+  fail_command ssh 255
+  run syncWithRemote "${LOCAL_PATH}" "${REMOTE_PATH}" web
+  assert_failure
+  refute_command '^rsync'
+}
+
+@test "migration-remote: a failed push never publishes or removes the existing remote directory" {
+  remote_octojoom
+  make_available site.vdm.dev
+  fail_command rsync 23
+  run pushContainerMigration "${LOCAL_PATH}" "joomla/available/site.vdm.dev" web
+  assert_failure
+  refute_command "mv -- '${REMOTE_PATH}'"
+  refute_command "rm -rf -- '${REMOTE_PATH}'"
+  refute_dialog 'success'
+}
+
+@test "migration-remote: push refuses traversal in the destination" {
+  remote_octojoom
+  make_available site.vdm.dev
+  run pushContainerMigration "${LOCAL_PATH}" '../outside' web
+  assert_failure
+  refute_command '^rsync'
+  refute_command 'mkdir -p'
+}
+
+@test "migration-remote: pull refuses a missing remote source before modifying local files" {
+  remote_octojoom
+  make_available site.vdm.dev
+  run pullContainerMigration "${LOCAL_PATH}" "joomla/available/site.vdm.dev" web
+  assert_failure
+  assert_file_exists "${LOCAL_PATH}/docker-compose.yml"
+  refute_command '^rsync'
+}
+
+@test "migration-remote: failed pull preserves existing local files and removes its staging directory" {
+  remote_octojoom
+  touch "${STUB_DIR}/remote_has_folder"
+  make_available site.vdm.dev
+  fail_command rsync 23
+  run pullContainerMigration "${LOCAL_PATH}" "joomla/available/site.vdm.dev" web
+  assert_failure
+  assert_file_exists "${LOCAL_PATH}/docker-compose.yml"
+  refute_dialog 'success'
+  run find "$(dirname "${LOCAL_PATH}")" -maxdepth 1 -name '*.migration.*'
+  assert_equal "${output}" ''
+}
+
+@test "migration-remote: incomplete pull verification preserves the original directory" {
+  remote_octojoom
+  touch "${STUB_DIR}/remote_has_folder"
+  make_available site.vdm.dev
+  hook_command rsync <<'EOF'
+case " $* " in
+*' --dry-run '*) printf '%s\n' '>f+++++++++ missing.php' ;;
+esac
+EOF
+  run pullContainerMigration "${LOCAL_PATH}" "joomla/available/site.vdm.dev" web
+  assert_failure
+  assert_file_exists "${LOCAL_PATH}/docker-compose.yml"
+  refute_dialog 'success'
+}
+
+@test "migration-remote: archive verification fails for a missing local archive" {
+  run transferTarWasSuccessful "${SANDBOX}/missing.tar.gz" '/remote/missing.tar.gz' web
+  assert_failure
+  refute_command '^ssh'
+}
+
+@test "migration-remote: archive verification fails on an SSH error instead of matching empty checksums" {
+  printf 'archive\n' >"${SANDBOX}/archive.tar.gz"
+  fail_command ssh 255
+  run transferTarWasSuccessful "${SANDBOX}/archive.tar.gz" '/remote/archive.tar.gz' web
+  assert_failure
+}
+
+@test "migration-remote: remote archive extraction failure preserves the archive" {
+  local_remote
+  printf 'invalid gzip\n' >"${SANDBOX}/remote/archive.tar.gz"
+  run remoteUntarGz "${SANDBOX}/remote/archive.tar.gz" "${SANDBOX}/remote/extracted" web
+  assert_failure
+  assert_file_exists "${SANDBOX}/remote/archive.tar.gz"
+}
+
+@test "migration-remote: remote shell paths with apostrophes and metacharacters are literal" {
+  local_remote
+  local remote_path="${SANDBOX}/remote/a'b; touch ${SANDBOX}/injected"
+  run prepRemoteFolder "${remote_path}" web
+  assert_success
+  assert_file_exists "${remote_path}"
+  refute_file_exists "${SANDBOX}/injected"
+}
+
+@test "migration-remote: root and traversal paths cannot be remotely removed" {
+  run removeRemoteFolder / web
+  assert_failure
+  run removeRemoteFolder '/safe/../outside' web
+  assert_failure
+  refute_command '^ssh'
+}
+
+@test "migration-remote: root backup copy failure cannot return a usable backup path" {
+  mkdir -p "${SANDBOX}/source"
+  hook_command sudo <<'EOF'
+case "$1" in
+cp) exit 1 ;;
+*) exec "$@" ;;
+esac
+EOF
+  # shellcheck disable=SC2016
+  run env TMPDIR="${SANDBOX}" bash -c 'source "$1"; createTempBackup "$2"' \
+    bash "${BATS_RUN_TMPDIR}/octojoom-functions.sh" "${SANDBOX}/source"
+  assert_failure
+  assert_equal "${output}" ''
+  run find "${SANDBOX}" -maxdepth 1 -name 'octojoom-backup.*'
+  assert_equal "${output}" ''
+}
+
+@test "migration-remote: tar creation failure removes the incomplete archive" {
+  mkdir -p "${SANDBOX}/source" "${SANDBOX}/backup"
+  tar() { return 1; }
+  TMPDIR="${SANDBOX}"
+  run tarAndMoveTempBackup "${SANDBOX}/source" "${SANDBOX}/backup"
+  assert_failure
+  assert_equal "${output}" ''
+  run find "${SANDBOX}" -maxdepth 1 -name 'octojoom-archive.*'
+  assert_equal "${output}" ''
+}
+
+@test "migration-remote: real sandbox push verifies and publishes contents and retains requested backup" {
+  require_local_rsync
+  local_remote
+  make_available site.vdm.dev
+  local remote_path="${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev"
+  mkdir -p "${remote_path}"
+  printf 'previous\n' >"${remote_path}/old.txt"
+  answers yes
+  run pushContainerMigration "${LOCAL_PATH}" 'joomla/available/site.vdm.dev' web
+  assert_success
+  assert_answers_used
+  assert_file_exists "${remote_path}/docker-compose.yml"
+  refute_file_exists "${remote_path}/old.txt"
+  run find "$(dirname "${remote_path}")" -path '*_backup_*/old.txt'
+  assert_output_contains '_backup_'
+  run find "$(dirname "${remote_path}")" -maxdepth 1 -name '*.migration.*'
+  assert_equal "${output}" ''
+}
+
+@test "migration-remote: real sandbox pull copies contents and retains requested local backup" {
+  require_local_rsync
+  local_remote
+  make_available site.vdm.dev
+  local remote_path="${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev"
+  mkdir -p "${remote_path}"
+  printf 'downloaded\n' >"${remote_path}/downloaded.php"
+  answers yes
+  run pullContainerMigration "${LOCAL_PATH}" 'joomla/available/site.vdm.dev' web
+  assert_success
+  assert_answers_used
+  assert_file_contains "${LOCAL_PATH}/downloaded.php" downloaded
+  refute_file_exists "${LOCAL_PATH}/docker-compose.yml"
+  run find "$(dirname "${LOCAL_PATH}")" -path '*_backup_*/docker-compose.yml'
+  assert_output_contains '_backup_'
+}
+
+@test "migration-remote: real sandbox directory push verifies SHA-256 before extraction and publication" {
+  require_local_rsync
+  local_remote
+  mkdir -p "${VDM_PROJECT_PATH}/site1"
+  printf 'project contents\n' >"${VDM_PROJECT_PATH}/site1/index.php"
+  TMPDIR="${SANDBOX}"
+  answers no
+  run pushDirectoryMigration "${VDM_PROJECT_PATH}/site1" site1 web
+  assert_success
+  assert_answers_used
+  assert_file_contains "${SANDBOX}/remote/Projects/site1/index.php" 'project contents'
+  assert_command 'sha256sum|shasum'
+  assert_command 'tar -xzf'
+  run find "${SANDBOX}" -maxdepth 1 -name 'octojoom-archive.*'
+  assert_equal "${output}" ''
+}
+
+@test "migration-remote: directory push keeps its recovery archive and original remote on extraction error" {
+  remote_octojoom
+  mkdir -p "${VDM_PROJECT_PATH}/site1"
+  printf 'project contents\n' >"${VDM_PROJECT_PATH}/site1/index.php"
+  TMPDIR="${SANDBOX}"
+  transferTarWasSuccessful() { return 0; }
+  remoteUntarGz() { return 1; }
+  run pushDirectoryMigration "${VDM_PROJECT_PATH}/site1" site1 web
+  assert_failure
+  assert_dialog 'local archive was retained'
+  refute_dialog 'success'
+  refute_command "mv -- '/home/remote/Projects/site1'"
+  run find "${SANDBOX}" -maxdepth 1 -name 'octojoom-archive.*'
+  assert_output_contains 'octojoom-archive.'
+}
+
+@test "migration-remote: remote publication failure rolls back the original contents" {
+  require_local_rsync
+  local_remote
+  make_available site.vdm.dev
+  local remote_path="${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev"
+  mkdir -p "${remote_path}"
+  printf 'previous\n' >"${remote_path}/old.txt"
+  hook_command ssh <<'EOF'
+mv() {
+  case "${@: -2:1}" in
+  *.migration.*) return 1 ;;
+  esac
+  command mv "$@"
+}
+export -f mv
+HOME="${SANDBOX}/remote" bash -c "${*: -1}"
+EOF
+  answers yes
+  run pushContainerMigration "${LOCAL_PATH}" 'joomla/available/site.vdm.dev' web
+  assert_failure
+  assert_file_contains "${remote_path}/old.txt" previous
+  refute_file_exists "${remote_path}/docker-compose.yml"
+  refute_dialog 'success'
+  run find "$(dirname "${remote_path}")" -maxdepth 1 -name '*_backup_*'
+  assert_equal "${output}" ''
+}
+
+@test "migration-remote: local pull publication failure restores the original contents" {
+  require_local_rsync
+  local_remote
+  make_available site.vdm.dev
+  local remote_path="${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev"
+  mkdir -p "${remote_path}"
+  printf 'new\n' >"${remote_path}/new.php"
+  # Invoked by the sourced helper under bats run.
+  # shellcheck disable=SC2317
+  mv() {
+    case "${@: -2:1}" in
+    *.migration.*) return 1 ;;
+    esac
+    command mv "$@"
+  }
+  answers yes
+  run pullContainerMigration "${LOCAL_PATH}" 'joomla/available/site.vdm.dev' web
+  assert_failure
+  assert_file_exists "${LOCAL_PATH}/docker-compose.yml"
+  refute_file_exists "${LOCAL_PATH}/new.php"
+  refute_dialog 'success'
+}
+
+@test "migration-remote: successful remote archive extraction removes only its verified archive" {
+  local_remote
+  mkdir -p "${SANDBOX}/archive-source"
+  printf 'content\n' >"${SANDBOX}/archive-source/index.php"
+  tar -czf "${SANDBOX}/remote/archive.tar.gz" -C "${SANDBOX}/archive-source" .
+  run remoteUntarGz "${SANDBOX}/remote/archive.tar.gz" "${SANDBOX}/remote/extracted" web
+  assert_success
+  assert_file_contains "${SANDBOX}/remote/extracted/index.php" content
+  refute_file_exists "${SANDBOX}/remote/archive.tar.gz"
+}
+
+@test "migration-remote: archive checksums reject an invalid or mismatched remote digest" {
+  printf 'archive\n' >"${SANDBOX}/archive.tar.gz"
+  hook_command ssh <<'EOF'
+printf '%064d  /remote/archive.tar.gz\n' 0
+EOF
+  run transferTarWasSuccessful "${SANDBOX}/archive.tar.gz" '/remote/archive.tar.gz' web
+  assert_failure
+  hook_command ssh <<'EOF'
+printf 'no checksum\n'
+EOF
+  run transferTarWasSuccessful "${SANDBOX}/archive.tar.gz" '/remote/archive.tar.gz' web
+  assert_failure
+}
+
+@test "migration-remote: failed remote Octojoom sessions return failure" {
+  hook_command ssh <<'EOF'
+case "${*: -1}" in
+'bash octojoom') exit 255 ;;
+esac
+EOF
+  answers yes
+  run connectToRemoteSystem web
+  assert_failure
+  assert_dialog 'session failed'
+}
+
+@test "migration-remote: migration dispatcher returns the failed push status" {
+  remote_octojoom
+  ssh_config web
+  make_available site.vdm.dev
+  fail_command rsync 23
+  answers site.vdm.dev push web yes
+  run joomla__TRuST__migrate
+  assert_failure
+  assert_dialog 'failed'
+}
+
+@test "migration-remote: publishing a user-owned remote folder needs no sudo" {
+  require_local_rsync
+  local_remote
+  make_available site.vdm.dev
+  local remote_path="${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev"
+  mkdir -p "${remote_path}"
+  printf 'previous\n' >"${remote_path}/old.txt"
+  answers no
+  run pushContainerMigration "${LOCAL_PATH}" 'joomla/available/site.vdm.dev' web
+  assert_success
+  assert_file_exists "${remote_path}/docker-compose.yml"
+  refute_file_exists "${remote_path}/old.txt"
+  refute_command '^sudo'
+  run find "$(dirname "${remote_path}")" -maxdepth 1 -name '*_backup_*'
+  assert_equal "${output}" ''
+}
+
+@test "migration-remote: ownership repair uses the remote account IDs and quotes its path" {
+  local_remote
+  local remote_path="${SANDBOX}/remote/owner's project"
+  hook_command ssh <<'EOF'
+id() {
+  case "$1" in
+  -u) printf '501\n' ;;
+  -g) printf '502\n' ;;
+  esac
+}
+export -f id
+HOME="${SANDBOX}/remote" bash -c "${*: -1}"
+EOF
+  run chownRemoteFolder "${remote_path}" web
+  assert_success
+  assert_command "^sudo chown -R 501:502 -- ${remote_path}$"
+}
+
+@test "migration-remote: backupRemoteFolder preserves contents under a unique backup name" {
+  local_remote
+  local remote_path="${SANDBOX}/remote/project"
+  mkdir -p "${remote_path}"
+  printf 'old contents\n' >"${remote_path}/old.txt"
+  run backupRemoteFolder "${remote_path}" web
+  assert_success
+  refute_file_exists "${remote_path}"
+  run find "${SANDBOX}/remote" -path '*_backup_*/old.txt'
+  assert_output_contains 'project_backup_'
+}
+
+@test "migration-remote: failed remote backups return failure" {
+  fail_command ssh 255
+  run backupRemoteFolder '/home/remote/project' web
+  assert_failure
+}
+
+@test "migration-remote: duplicate remote settings use the last definition" {
+  hook_command ssh <<'EOF'
+case "${*: -1}" in
+grep*) printf '%s\n' 'VDM_REPO_PATH="/old/path"' 'VDM_REPO_PATH="/new/path"' ;;
+esac
+EOF
+  run getRemoteEnvValue web VDM_REPO_PATH
+  assert_success
+  assert_equal "${output}" /new/path
+}
+
+@test "migration-remote: remote rollback failure reports the retained recovery directory" {
+  require_local_rsync
+  local_remote
+  make_available site.vdm.dev
+  local remote_path="${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev"
+  mkdir -p "${remote_path}"
+  printf 'previous\n' >"${remote_path}/old.txt"
+  hook_command ssh <<'EOF'
+mv() {
+  case "${@: -2:1}" in
+  *.migration.* | *_backup_*) return 1 ;;
+  esac
+  command mv "$@"
+}
+export -f mv
+HOME="${SANDBOX}/remote" bash -c "${*: -1}"
+EOF
+  answers yes
+  run pushContainerMigration "${LOCAL_PATH}" 'joomla/available/site.vdm.dev' web
+  assert_failure
+  assert_dialog 'original directory is retained'
+  assert_dialog "${remote_path}_backup_"
+  refute_file_exists "${remote_path}"
+  run find "$(dirname "${remote_path}")" -path '*_backup_*/old.txt'
+  assert_output_contains '_backup_'
+}
+
+@test "migration-remote: local rollback failure reports the retained recovery directory" {
+  require_local_rsync
+  local_remote
+  make_available site.vdm.dev
+  local remote_path="${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev"
+  mkdir -p "${remote_path}"
+  printf 'new\n' >"${remote_path}/new.php"
+  # Invoked by the sourced helper under bats run.
+  # shellcheck disable=SC2317
+  mv() {
+    case "${@: -2:1}" in
+    *.migration.* | *_backup_*) return 1 ;;
+    esac
+    command mv "$@"
+  }
+  answers yes
+  run pullContainerMigration "${LOCAL_PATH}" 'joomla/available/site.vdm.dev' web
+  assert_failure
+  assert_dialog 'original directory is retained'
+  assert_dialog "${LOCAL_PATH}_backup_"
+  refute_file_exists "${LOCAL_PATH}"
+  run find "$(dirname "${LOCAL_PATH}")" -path '*_backup_*/docker-compose.yml'
+  assert_output_contains '_backup_'
+}
+
+@test "migration-remote: failed remote backup cleanup reports publication and recovery location" {
+  require_local_rsync
+  local_remote
+  make_available site.vdm.dev
+  local remote_path="${SANDBOX}/remote/Docker/joomla/available/site.vdm.dev"
+  mkdir -p "${remote_path}"
+  printf 'previous\n' >"${remote_path}/old.txt"
+  hook_command ssh <<'EOF'
+rm() {
+  case "${*: -1}" in
+  *_backup_*) return 1 ;;
+  esac
+  command rm "$@"
+}
+export -f rm
+HOME="${SANDBOX}/remote" bash -c "${*: -1}"
+EOF
+  hook_command sudo <<'EOF'
+exit 1
+EOF
+  answers no
+  run pushContainerMigration "${LOCAL_PATH}" 'joomla/available/site.vdm.dev' web
+  assert_failure
+  assert_dialog 'verified migration was published'
+  assert_dialog "${remote_path}_backup_"
+  assert_file_exists "${remote_path}/docker-compose.yml"
+  run find "$(dirname "${remote_path}")" -path '*_backup_*/old.txt'
+  assert_output_contains '_backup_'
 }

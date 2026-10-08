@@ -50,11 +50,98 @@ record_calls() {
 
 @test "cli: an empty option value exits 17" {
   local option
-  for option in --key= -k= --type= --container=; do
+  for option in --key= -k= --type= --task= --container= --access-token= \
+    --joomla-version= -j= --env-key= -e= --domain= -d= --sub-domain= -s= \
+    --username= -u= --uid= --gid= --port= -p= --ssh-dir= --time-zone= -t=; do
     run_octojoom "${option}"
     assert_status 17
   done
   refute_command 'docker compose .* up'
+}
+
+@test "cli: a missing value cannot consume the next option" {
+  local option
+  for option in --key --type --task --container --access-token -j -e -d -s -u --uid --gid -p --ssh-dir -t; do
+    run_octojoom "${option}" --help
+    assert_status 17
+    assert_output_contains "requires a non-empty option argument"
+  done
+}
+
+@test "cli: unknown flags and positional arguments are rejected" {
+  local argument
+  for argument in --typo stray --sudo=true; do
+    run_octojoom "${argument}"
+    assert_status 17
+    refute_file_contains "${STUB_DIR}/dialogs.log" "--menu"
+  done
+}
+
+@test "parseCLI: --sudo preserves the following flag and task options" {
+  parseCLI --sudo --yes --type joomla --task up
+  assert_equal "${VDM_SUDO_ACCESS}" true
+  assert_equal "${VDM_FORCE}" true
+  assert_equal "${VDM_CONTAINER_TYPE}" joomla
+  assert_equal "${VDM_TASK}" up
+}
+
+@test "parseCLI: update parses its remaining arguments before executing" {
+  parseCLI --update --access-token tokenvalue --yes
+  assert_equal "${OCTOJOOM_CLI_ACTION}" update
+  assert_equal "${VDM_ACCESS_TOKEN}" tokenvalue
+  assert_equal "${VDM_FORCE}" true
+}
+
+@test "parseCLI: conflicting maintenance actions fail" {
+  run parseCLI --update --uninstall
+  assert_status 17
+}
+
+@test "cli: an explicit domain overrides the saved global domain" {
+  make_joomla_container jcb JCB jcb custom.dev
+  run_octojoom --type joomla --task enable --domain custom.dev --sub-domain jcb
+  assert_success
+  assert_file_exists "${VDM_REPO_PATH}/joomla/enabled/jcb.custom.dev"
+  refute_file_exists "${VDM_REPO_PATH}/joomla/enabled/jcb.vdm.dev"
+}
+
+@test "cli: a subdomain target uses the saved domain without interactive selection" {
+  make_joomla_container jcb JCB jcb
+  run_octojoom --type joomla --task enable --sub-domain jcb
+  assert_success
+  assert_file_exists "${VDM_REPO_PATH}/joomla/enabled/jcb.vdm.dev"
+  refute_file_contains "${STUB_DIR}/dialogs.log" "--checklist"
+  assert_answers_used
+}
+
+@test "cli: startup cancels cleanly when the repository input is interrupted" {
+  printf '%s\n' 'VDM_REPO_PATH=""' >>"${VDM_SRC_PATH}/.env"
+  answers '<esc>'
+  run_octojoom
+  assert_status 255
+  assert_answers_used
+  refute_command 'docker network create'
+}
+
+@test "cli: startup stops when its config directory cannot be created" {
+  mkdir() { return 23; }
+  export -f mkdir
+  run_octojoom --type joomla --task up
+  assert_failure
+  refute_command 'docker compose .* up'
+}
+
+@test "cli: saved config cannot replace internal action or path state" {
+  make_joomla_container jcb JCB jcb
+  link_enabled joomla jcb.vdm.dev
+  printf '%s\n' 'VDM_CLI_ACTION=uninstall' 'VDM_CLI_KEYS=ignored' \
+    'VDM_CLI_VALUES=ignored' "VDM_SRC_PATH=\"${SANDBOX}/redirected\"" \
+    'VDM_FIRST_RUN=true' >>"${VDM_SRC_PATH}/.env"
+  run_octojoom --type joomla --task up
+  assert_success
+  assert_command '^docker compose .* up -d'
+  refute_file_exists "${SANDBOX}/redirected"
+  refute_file_contains "${STUB_DIR}/dialogs.full" 'Uninstalling'
 }
 
 @test "cli: --type joomla --task up brings the enabled containers up" {
@@ -73,10 +160,10 @@ record_calls() {
   assert_command '^docker compose .*enabled/jcb\.vdm\.dev/docker-compose\.yml up -d'
 }
 
-@test "cli: --container with an unknown name enables nothing" {
+@test "cli: --container with an unknown name fails without enabling anything" {
   make_joomla_container jcb JCB jcb
   run_octojoom --container nothere.vdm.dev
-  assert_success
+  assert_failure
   refute_file_exists "${VDM_REPO_PATH}/joomla/enabled/nothere.vdm.dev"
   refute_command 'docker compose .* up'
 }
@@ -88,11 +175,11 @@ record_calls() {
   assert_answers_used
 }
 
-@test "cli: an unknown task falls back to the main menu" {
-  answers quit
+@test "cli: an unknown task fails without opening the main menu" {
   run_octojoom --type joomla --task nonsense
-  assert_success
-  assert_answers_used
+  assert_status 17
+  assert_output_contains "Unsupported container type or task"
+  refute_file_contains "${STUB_DIR}/dialogs.log" "--menu"
   refute_command 'docker compose .* up'
 }
 
@@ -112,6 +199,37 @@ record_calls() {
   run main
   assert_success
   assert_equal "$(cat "${SANDBOX}/calls")" "mainMenu"
+}
+
+@test "main: preserves a task failure status" {
+  joomla__TRuST__up() { return 19; }
+  VDM_CONTAINER_TYPE=joomla
+  VDM_TASK=up
+  run main
+  assert_status 19
+}
+
+@test "main: incomplete type and task fail without showing a menu" {
+  record_calls mainMenu
+  VDM_CONTAINER_TYPE=joomla
+  VDM_TASK=''
+  run main
+  assert_status 17
+  refute_file_exists "${SANDBOX}/calls"
+}
+
+@test "mainMenu: an interrupted menu exits instead of reopening forever" {
+  answers '<esc>'
+  run mainMenu
+  assert_status 255
+  assert_answers_used
+}
+
+@test "showJoomla: an interrupted menu returns its failure status" {
+  answers '<esc>'
+  run showJoomla
+  assert_status 255
+  assert_answers_used
 }
 
 @test "showJoomla: setup runs the Joomla setup task, then back returns" {

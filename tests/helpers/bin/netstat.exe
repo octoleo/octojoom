@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Native Windows port-query stand-in. Never inspects the runner's sockets.
+# shellcheck source=tests/helpers/stub-lib.bash
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-lib.bash"
+stub_log "netstat.exe $*"
+stub_hook netstat.exe "$@"
+exit "$(stub_status netstat.exe)"

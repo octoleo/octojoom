@@ -47,7 +47,7 @@ jobs:
 
       - name: Lint the tests
         run: |
-          shellcheck -x tests/run.sh tests/test-clone.sh tests/test-clone-flow.sh \
+          shellcheck -x tests/run.sh tests/test-clone.sh tests/test-clone-flow.sh tests/integration/clone.sh \
             tests/helpers/common.bash tests/helpers/stub-lib.bash tests/helpers/bin/*
           find tests -path tests/.cache -prune -o -name '*.bats' -print0 | xargs -0 shellcheck -s bash
 
@@ -87,3 +87,14 @@ jobs:
           # docker compose config only runs for real on Linux, where docker is installed
           OCTOJOOM_NO_REAL_DOCKER: ${{ runner.os != 'Linux' && '1' || '' }}
         run: bash tests/run.sh
+
+  docker-integration:
+    name: Docker clone integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exercise the real Joomla/MariaDB clone lifecycle
+        # The inner deadline leaves time for the script's labeled-resource cleanup.
+        run: timeout --signal=TERM --kill-after=30s 12m bash tests/integration/clone.sh
