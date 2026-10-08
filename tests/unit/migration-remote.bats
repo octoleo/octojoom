@@ -57,6 +57,7 @@ local_remote() {
     printf 'VDM_PROJECT_PATH="%s"\n' "${SANDBOX}/remote/Projects"
   } >"${SANDBOX}/remote/.config/octojoom/.env"
   hook_command ssh <<'EOF'
+if [ "${OCTOJOOM_TRACE_REMOTE_TEST:-}" = 1 ]; then set -x; export SHELLOPTS; fi
 HOME="${SANDBOX}/remote" bash -c "${*: -1}"
 EOF
   hook_command rsync <<'EOF'
@@ -600,6 +601,13 @@ EOF
   mkdir -p "${SANDBOX}/archive-source"
   printf 'content\n' >"${SANDBOX}/archive-source/index.php"
   tar -czf "${SANDBOX}/remote/archive.tar.gz" -C "${SANDBOX}/archive-source" .
+  if [ "${OCTOJOOM_TRACE_REMOTE_TEST:-}" = 1 ]; then
+    tar --version
+    tar -tzf "${SANDBOX}/remote/archive.tar.gz"
+    tar -tvzf "${SANDBOX}/remote/archive.tar.gz"
+    run migrationValidateTar "${SANDBOX}/remote/archive.tar.gz" folder
+    printf 'Local validation status: %s\n%s\n' "$status" "$output"
+  fi
   run remoteUntarGz "${SANDBOX}/remote/archive.tar.gz" "${SANDBOX}/remote/extracted" web
   assert_success
   assert_file_contains "${SANDBOX}/remote/extracted/index.php" content
