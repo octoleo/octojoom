@@ -1,0 +1,8 @@
+# Shell scripts must keep LF line endings on every platform, including a
+# Windows checkout (a CR at the end of a line breaks bash).
+src/octojoom text eol=lf
+*.sh text eol=lf
+*.bash text eol=lf
+*.bats text eol=lf
+tests/helpers/bin/* text eol=lf
+*.yml text eol=lf
