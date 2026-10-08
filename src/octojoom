@@ -7802,7 +7802,9 @@ function migrationValidateTar() {
     [[ "$type" != *' link to '* && "$type" != *' -> '* ]] || return 1
   done <<< "$types"
   while IFS= read -r member; do
-    [[ -n "$member" && "$member" != /* && "$member" != *\\* && "$member" != *$'\r'* && "$member" != *$'\t'* ]] || return 1
+    # Keep the serialized function free of literal control characters: Cygwin
+    # can remove a carriage return when reparsing the definition over SSH.
+    [[ -n "$member" && "$member" != /* && "$member" != *\\* && "$member" != *[![:print:]]* ]] || return 1
     normalized="${member#./}"
     normalized="${normalized%/}"
     if [ -z "$normalized" ]; then

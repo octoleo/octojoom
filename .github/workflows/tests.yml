@@ -108,15 +108,3 @@ jobs:
 
       - name: Exercise source packaging and destination realignment with real databases
         run: timeout --signal=TERM --kill-after=30s 12m bash tests/integration/migration.sh
-
-  windows-archive-diagnostics:
-    name: Windows archive diagnostics
-    runs-on: windows-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: Trace isolated archive fixtures
-        shell: bash
-        env:
-          OCTOJOOM_TRACE_REMOTE_TEST: '1'
-        run: bash tests/run.sh --filter 'successful remote archive extraction' tests/unit/migration-remote.bats
