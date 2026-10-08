@@ -276,6 +276,7 @@ EOF
     link_enabled "${type}" abc.vdm.dev
     mkdir -p "${VDM_REPO_PATH}/${type}/escape"
     echo 'keep' >"${VDM_REPO_PATH}/${type}/escape/marker"
+    printf 'services:\n  escaped:\n    container_name: escaped\n' >"${VDM_REPO_PATH}/${type}/escape/docker-compose.yml"
     for action in enable disable; do
       VDM_CONTAINER_TYPE="${type}"
       VDM_CONTAINER='../escape'

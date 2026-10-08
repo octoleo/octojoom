@@ -1922,6 +1922,11 @@ function runContainerCompose() {
 }
 
 function joomla__TRuST__enable() {
+  if [ -n "${VDM_CONTAINER:-}" ] && ! isValidDomain "${VDM_CONTAINER}"; then
+    showError "The container identifier (${VDM_CONTAINER}) is invalid."
+    unset VDM_CONTAINER
+    return 1
+  fi
   # some local values
   local evn_file
   # check if this type have available containers
