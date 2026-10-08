@@ -1,0 +1,89 @@
+# Octojoom checks: every push to master or staging, and every pull request
+# towards them, must pass all jobs before it is merged.
+#
+# The same file also runs on Gitea Actions (it reads .github/workflows).
+# The macOS and Windows jobs need runners with the macos-latest and
+# windows-latest labels there.
+
+name: Tests
+
+on:
+  push:
+    branches:
+      - master
+      - staging
+  pull_request:
+    branches:
+      - master
+      - staging
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  SHELLCHECK_VERSION: v0.10.0
+
+jobs:
+  lint:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck ${{ env.SHELLCHECK_VERSION }}
+        run: |
+          curl -sSL --fail "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            | tar -xJ -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/shellcheck-${SHELLCHECK_VERSION}" >> "${GITHUB_PATH}"
+
+      - name: Lint the script
+        run: shellcheck src/octojoom
+
+      - name: Lint the tests
+        run: |
+          shellcheck -x tests/run.sh tests/test-clone.sh tests/test-clone-flow.sh \
+            tests/helpers/common.bash tests/helpers/stub-lib.bash tests/helpers/bin/*
+          find tests -name '*.bats' -print0 | xargs -0 shellcheck -s bash
+
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Bash 4 or newer (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          if ! bash -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]'; then
+            brew install bash
+          fi
+          echo "$(brew --prefix)/bin" >> "${GITHUB_PATH}"
+
+      - name: Show the tools under test
+        run: |
+          bash --version | head -n 1
+          echo "OSTYPE=${OSTYPE}"
+          sed --version 2>/dev/null | head -n 1 || echo "sed: BSD"
+
+      - name: Run the test suite
+        env:
+          # docker compose config only runs for real on Linux, where docker is installed
+          OCTOJOOM_NO_REAL_DOCKER: ${{ runner.os != 'Linux' && '1' || '' }}
+        run: bash tests/run.sh
