@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/macOS-tested-blue?logo=apple&logoColor=white" alt="macOS Tested">
   <img src="https://img.shields.io/badge/Windows-supported-0078D6?logo=windows&logoColor=white" alt="Windows Supported">
   <img src="https://img.shields.io/badge/License-GPLv2-blue.svg" alt="License GPLv2">
-  <img src="https://img.shields.io/badge/Version-3.9.0-orange" alt="Version 3.9.0">
+  <img src="https://img.shields.io/badge/Version-3.9.1-orange" alt="Version 3.9.1">
 </p>
 
 <p align="center">
@@ -372,9 +372,14 @@ We welcome contributions of all levels — from documentation to new distro supp
 
    ```bash
    shellcheck src/octojoom
-   bash tests/test-clone.sh
-   bash tests/test-clone-flow.sh
+   bash tests/run.sh
    ```
+
+   The tests need Bash 4 or newer (on macOS: `brew install bash`) and git, which
+   fetches the pinned bats-core once. They run in a throw-away folder with
+   stand-ins for whiptail, docker and sudo, so they never touch your containers
+   or your Octojoom config. Every push and pull request to `master` or `staging`
+   runs the same checks on Linux, macOS and Windows (`.github/workflows/tests.yml`).
 5. **Submit** a pull request with a clear explanation
 
 > 💬 Found a bug or want to suggest improvements?

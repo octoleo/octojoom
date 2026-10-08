@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # The most recent program version.
-_VERSION="3.9.0"
+_VERSION="3.9.1"
 _V="3.9"
 
 # Bash version required
