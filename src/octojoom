@@ -2420,6 +2420,7 @@ function cloneJoomlaContainer() {
   local host_conflict
   local host_suffix
   local shared_note=''
+  local copy_pid
   ##########################
   ### 1. select the source container
   container=$(getSelectedDirectory "Select the container you would like to clone." \
@@ -2697,8 +2698,10 @@ to start (${container}) again." 12
     echo $? >"${VDM_SRC_PATH}/.clone_status"
     progressSwitchOff
   } &
+  copy_pid=$!
   showProgress "Copying the (${project}) project folder to (${VDM_KEY}).\n(cp -a ${project}/. ${VDM_KEY}/)" "Cloning Project Files"
-  wait
+  # wait for the copy only, never for other background jobs of the shell
+  wait "${copy_pid}"
   copy_status=$(cat "${VDM_SRC_PATH}/.clone_status" 2>/dev/null)
   ##########################
   ### 18. start the source containers again (even when the copy failed)
