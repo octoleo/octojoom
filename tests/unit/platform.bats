@@ -3,12 +3,60 @@
 # Behaviour that differs between Linux, macOS and Windows (Git Bash).
 #
 # SC2034: OS_NUMBER is read by the loaded script functions.
-# shellcheck disable=SC2034
+# SC2317/SC2329: mkdir stand-ins are called by the loaded script.
+# shellcheck disable=SC2034,SC2317,SC2329
 
 load ../helpers/common
 
 setup() {
   octojoom_setup
+}
+
+@test "createPrivateDirectory: new Unix directories and parents use mode 700" {
+  skip_on_windows 'Windows inherits native ACLs rather than Unix file modes'
+  umask 022
+  run createPrivateDirectory -p "${SANDBOX}/private parent/private child"
+  assert_success
+  assert_equal "$(file_mode "${SANDBOX}/private parent")" 700
+  assert_equal "$(file_mode "${SANDBOX}/private parent/private child")" 700
+}
+
+@test "createPrivateDirectory: the caller keeps its original umask" {
+  local caller_umask
+  umask 022
+  caller_umask=$(umask)
+  createPrivateDirectory "${SANDBOX}/private"
+  assert_equal "$(umask)" "$caller_umask"
+  assert_file_exists "${SANDBOX}/private"
+}
+
+@test "createPrivateDirectory: Git Bash creation never supplies mode-changing flags" {
+  OS_NUMBER=3
+  mkdir() {
+    local argument
+    for argument in "$@"; do
+      case "$argument" in -m*|--mode*) return 77 ;; esac
+    done
+    command mkdir "$@"
+  }
+  run createPrivateDirectory -p "${SANDBOX}/Windows compatible/private"
+  assert_success
+  assert_file_exists "${SANDBOX}/Windows compatible/private"
+}
+
+@test "createPrivateDirectory: genuine mkdir failures retain their exact status" {
+  mkdir() { return 42; }
+  run createPrivateDirectory -p "${SANDBOX}/uncreated"
+  assert_status 42
+  refute_file_exists "${SANDBOX}/uncreated"
+}
+
+@test "createPrivateDirectory: exclusive clone directory creation rejects an existing destination" {
+  mkdir -p "${SANDBOX}/existing"
+  printf 'keep\n' >"${SANDBOX}/existing/data"
+  run createPrivateDirectory "${SANDBOX}/existing"
+  assert_failure
+  assert_file_contains "${SANDBOX}/existing/data" keep
 }
 
 @test "check_bash_version: accepts the current and lower required major version" {

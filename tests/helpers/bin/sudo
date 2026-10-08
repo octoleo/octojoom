@@ -28,6 +28,10 @@ skip() {
   stub_log "sudo-skipped $*"
   if [ "${1:-}" = "tee" ]; then
     cat >>"${STUB_DIR:-/dev/null}/sudo-tee.log"
+  elif [ "${1:-}" = "gpg" ] && [[ " $* " == *" --dearmor "* ]]; then
+    # Real gpg consumes the downloaded key. Closing this pipe early instead
+    # makes curl fail with SIGPIPE under pipefail, depending on scheduling.
+    cat >/dev/null
   fi
   exit 0
 }

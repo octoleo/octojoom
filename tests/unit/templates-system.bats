@@ -262,6 +262,25 @@ EOF
   refute_command '^(apt-get|groupadd|usermod|systemctl|gpg) '
 }
 
+@test "installer GPG stand-in: consumes the complete download under pipefail" {
+  printf '%131072s' key >"${STUB_DIR}/curl-body"
+  run bash -o pipefail -c 'curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --batch --yes --dearmor -o "$SANDBOX/key.gpg"'
+  assert_success
+  assert_command '^sudo gpg --batch --yes --dearmor '
+  refute_command '^gpg '
+  refute_file_exists "${SANDBOX}/key.gpg"
+}
+
+@test "installer GPG stand-in: a failing command hook is not converted into success" {
+  hook_command sudo <<'EOF'
+[ "$1" != gpg ] || exit 42
+exit 0
+EOF
+  run bash -o pipefail -c 'curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --batch --yes --dearmor -o "$SANDBOX/key.gpg"'
+  assert_status 42
+  refute_file_exists "${SANDBOX}/key.gpg"
+}
+
 @test "install_docker_macos: installs Docker Desktop with Homebrew and starts it" {
   eval "$(declare -f install_docker_macos | sed "s|/Applications/Docker.app|${SANDBOX}/Docker.app|g")"
   open() { echo "open $*" >>"${STUB_DIR}/commands.log"; }

@@ -51,6 +51,16 @@ function check_bash_version() {
 }
 # Check for the appropriate version of Bash
 check_bash_version "$_bash_v" || exit 1
+
+# Restrict new directories on Unix without mkdir's nonportable mode-setting
+# behavior on Git Bash. Keep the caller's umask and mkdir's exit status intact.
+function createPrivateDirectory() {
+  (
+    umask 077
+    mkdir "$@"
+  )
+}
+
 # Install whiptail with the host's package manager.
 function install_whiptail_linux() {
   if command -v apt-get >/dev/null 2>&1; then
@@ -547,7 +557,7 @@ function traefik__TRuST__setup() {
       sudo chmod 600 "${VDM_PROJECT_PATH}/traefik/${acme_file}" || return 1
     done
     # and is owned by root
-    sudo chown -R root:root "${VDM_PROJECT_PATH}/traefik" || return 1
+    sudo chown -R 0:0 "${VDM_PROJECT_PATH}/traefik" || return 1
   else
     VDM_REMOVE_SECURE="#"
     VDM_HTTP_SCHEME="http"
@@ -991,14 +1001,25 @@ function joomla__TRuST__setup() {
   # add PHP settings
   VDM_PHP_PROJECT_PATH="${VDM_KEY}"
   export VDM_PHP_PROJECT_PATH
-  if isExpert && setPHPSettings; then
-    VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini:/var/www/html/php.ini\"")
+  local customization_status
+  if isExpert; then
+    if setPHPSettings; then
+      VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini:/var/www/html/php.ini\"")
+    else
+      customization_status=$?
+      [ "$customization_status" -eq 1 ] || return "$customization_status"
+    fi
   fi
   # customize docker-entrypoint.sh
   VDM_ENTRY_PROJECT_PATH="${VDM_KEY}"
   export VDM_ENTRY_PROJECT_PATH
-  if isExpert && setDockerEntrypoint; then
-    VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}/entrypoint.sh:/entrypoint.sh\"")
+  if isExpert; then
+    if setDockerEntrypoint; then
+      VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}/entrypoint.sh:/entrypoint.sh\"")
+    else
+      customization_status=$?
+      [ "$customization_status" -eq 1 ] || return "$customization_status"
+    fi
   fi
   ##########################
   ### export all we need
@@ -1278,15 +1299,26 @@ function joomla__TRuST__bulk() {
   set_php_settings=false
   VDM_PHP_PROJECT_PATH="bulk"
   export VDM_PHP_PROJECT_PATH
-  if isExpert && setPHPSettings; then
-    set_php_settings=true
+  local customization_status
+  if isExpert; then
+    if setPHPSettings; then
+      set_php_settings=true
+    else
+      customization_status=$?
+      [ "$customization_status" -eq 1 ] || return "$customization_status"
+    fi
   fi
   # customize docker-entrypoint.sh
   set_docker_entry_point=false
   VDM_ENTRY_PROJECT_PATH="bulk"
   export VDM_ENTRY_PROJECT_PATH
-  if isExpert && setDockerEntrypoint; then
-    set_docker_entry_point=true
+  if isExpert; then
+    if setDockerEntrypoint; then
+      set_docker_entry_point=true
+    else
+      customization_status=$?
+      [ "$customization_status" -eq 1 ] || return "$customization_status"
+    fi
   fi
   # set persistence
   persistence_volume=false
@@ -1580,7 +1612,7 @@ function openssh__TRuST__setup() {
     if [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -ge 1 ] && \
       getInputYesNo "Can we create the ${VDM_PUBLIC_KEY_GLOBAL_DIR} ssh folder" \
       "Create the Path" 8 112; then
-      mkdir -p "${VDM_PUBLIC_KEY_GLOBAL_DIR}"
+      createPrivateDirectory -p "${VDM_PUBLIC_KEY_GLOBAL_DIR}" || return $?
     else
       # get the value
       VDM_PUBLIC_KEY_GLOBAL_DIR=$(getInput "Enter the ssh path where we can select the ssh key folders from." \
@@ -1589,8 +1621,7 @@ function openssh__TRuST__setup() {
       if [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -ge 1 ] && [ ! -d "${VDM_PUBLIC_KEY_GLOBAL_DIR}" ] && \
         getInputYesNo "Can we create the ${VDM_PUBLIC_KEY_GLOBAL_DIR} ssh folder" \
         "Create the Path" 8 112; then
-        # shellcheck disable=SC2174
-        mkdir -p -m 700 "${VDM_PUBLIC_KEY_GLOBAL_DIR}"
+        createPrivateDirectory -p "${VDM_PUBLIC_KEY_GLOBAL_DIR}" || return $?
       elif [ ${#VDM_PUBLIC_KEY_GLOBAL_DIR} -le 1 ]; then
         showError "You must set a ssh path where we can select the ssh key folders from."
       fi
@@ -1605,8 +1636,7 @@ function openssh__TRuST__setup() {
     if [ ${#VDM_PUBLIC_KEY_U_DIR} -ge 1 ] && \
       getInputYesNo "Can we create this (${VDM_PUBLIC_KEY_U_DIR}) containers' ssh public keys folder" \
       "Create the Path" 8 112; then
-      # shellcheck disable=SC2174
-      mkdir -p -m 700 "${VDM_PUBLIC_KEY_U_DIR}"
+      createPrivateDirectory -p "${VDM_PUBLIC_KEY_U_DIR}" || return $?
     else
       # get the value
       VDM_PUBLIC_KEY_U_DIR=$(getSelectedDirectory "Select the containers' ssh public keys folder." \
@@ -1619,8 +1649,7 @@ function openssh__TRuST__setup() {
         if [ ! -d "${VDM_PUBLIC_KEY_U_DIR}" ] && \
           getInputYesNo "Can we create this (${VDM_PUBLIC_KEY_U_DIR}) containers' ssh public keys folder" \
           "Create the Path" 8 112; then
-          # shellcheck disable=SC2174
-          mkdir -p -m 700 "${VDM_PUBLIC_KEY_U_DIR}"
+          createPrivateDirectory -p "${VDM_PUBLIC_KEY_U_DIR}" || return $?
           # TODO add option to add keys?
         fi
       else
@@ -1637,7 +1666,7 @@ function openssh__TRuST__setup() {
     if [ ${#VDM_PROJECT_U_DIR} -ge 1 ] && \
       getInputYesNo "Can we create the ${VDM_PROJECT_U_DIR} parent mounting directory" \
       "Create the Path" 8 112; then
-      mkdir -p "${VDM_PROJECT_U_DIR}"
+      createPrivateDirectory -p "${VDM_PROJECT_U_DIR}" || return $?
     else
       # get the value
       VDM_PROJECT_U_DIR=$(getInput "Enter the parent path where we can select the folders to mount to this container." \
@@ -1646,8 +1675,7 @@ function openssh__TRuST__setup() {
       if [ ${#VDM_PROJECT_U_DIR} -ge 1 ] && [ ! -d "${VDM_PROJECT_U_DIR}" ] && \
         getInputYesNo "Can we create the ${VDM_PROJECT_U_DIR} parent mounting directory" \
         "Create the Path" 8 112; then
-        # shellcheck disable=SC2174
-        mkdir -p -m 700 "${VDM_PROJECT_U_DIR}"
+        createPrivateDirectory -p "${VDM_PROJECT_U_DIR}" || return $?
       elif [ ${#VDM_PROJECT_U_DIR} -le 1 ]; then
         showError "You must set a parent mounting directory path where we can select the folders to mount to this container."
       fi
@@ -1888,8 +1916,7 @@ function saveContainerCompose() {
   local compose_file="${2:-}"
   local compose_dir="${compose_file%/*}"
   local compose_tmp
-  # shellcheck disable=SC2174
-  mkdir -p -m 700 "${compose_dir}" || return 1
+  createPrivateDirectory -p "${compose_dir}" || return 1
   compose_tmp=$(mktemp "${compose_dir}/.docker-compose.XXXXXX") || return 1
   if ! "${generator}" >"${compose_tmp}" || ! chmod 600 "${compose_tmp}" ||
     ! mv -f "${compose_tmp}" "${compose_file}"; then
@@ -2729,8 +2756,7 @@ The (${project}) folder needs $((needed / 1024)) MB but only $((available / 1024
   fi
   ##########################
   ### 13. the env values of the clone
-  # shellcheck disable=SC2174
-  mkdir -m 700 "${new_dir}" || return 1
+  createPrivateDirectory "${new_dir}" || return 1
   if ${per_container_env}; then
     if ! cloneContainerEnvFile "${src_dir}/.env" "${env_target}" "${old_env}" "${new_env}"; then
       showError "The env file ${env_target} could not be written, nothing was changed."
@@ -6005,13 +6031,28 @@ function setPersistence() {
   return 1
 }
 
-# set the PHP settings
+# Optional customization contract: 0 configured, 1 explicitly declined,
+# >=2 failed or cancelled. Once selected, an ordinary command failure (1)
+# must never be confused with declining the customization.
 function setPHPSettings() {
-  local default_error_reporting
+  local customization_status
   # ask the question
   if getInputYesNo "Would you like to set some PHP overrides for the Joomla container.\n\nTo make these changes we need sudo privileges." \
     "PHP.ini values" 9 112; then
+    if configurePHPSettings; then
+      return 0
+    else
+      customization_status=$?
+      [ "$customization_status" -gt 1 ] || customization_status=2
+      return "$customization_status"
+    fi
+  else
+    return $?
+  fi
+}
 
+function configurePHPSettings() {
+    local default_error_reporting edit_status
     # max_execution_time
     VDM_max_execution_time=$(getInputNow "Enter max execution time" \
         "${VDM_max_execution_time:-124}" 'max_execution_time') || return $?
@@ -6070,12 +6111,17 @@ function setPHPSettings() {
     } > "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini" || return 1
 
     # allow custom edit
-    if isExpert && getInputYesNo "Would you like to set some more custom PHP overrides for this Joomla container" \
-      "Edit PHP.ini" 8 112 "defaultno"; then
-      # give little heads-up
-      showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
-      # lets open the file with nano for now
-      sudo "${EDITOR:-nano}" "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini" || return $?
+    if isExpert; then
+      if getInputYesNo "Would you like to set some more custom PHP overrides for this Joomla container" \
+        "Edit PHP.ini" 8 112 "defaultno"; then
+        # give little heads-up
+        showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
+        # lets open the file with nano for now
+        sudo "${EDITOR:-nano}" "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini" || return $?
+      else
+        edit_status=$?
+        [ "$edit_status" -eq 1 ] || return "$edit_status"
+      fi
     fi
 
     # set the ownership
@@ -6089,16 +6135,28 @@ function setPHPSettings() {
 
     # yes load php.ini volume to the container
     return 0
-  fi
-  return 1
 }
 
 # set the docker entrypoint
 function setDockerEntrypoint() {
-  local entrypoint_dir="${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}" temporary
+  local customization_status
   # ask the question
   if getInputYesNo "Would you like to customize the entrypoint script for this Joomla container" \
     "entrypoint.sh values" 8 112 "defaultno"; then
+    if configureDockerEntrypoint; then
+      return 0
+    else
+      customization_status=$?
+      [ "$customization_status" -gt 1 ] || customization_status=2
+      return "$customization_status"
+    fi
+  else
+    return $?
+  fi
+}
+
+function configureDockerEntrypoint() {
+    local entrypoint_dir="${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}" temporary customization_status
     # make sure the directory exist
     mkdir -p "$entrypoint_dir" || return $?
     temporary=$(mktemp "${entrypoint_dir}/entrypoint.sh.tmp.XXXXXX") || return $?
@@ -6107,22 +6165,22 @@ function setDockerEntrypoint() {
       # give little heads-up
       showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
       # lets open the file with nano for now
-      if ! sudo "${EDITOR:-nano}" "$temporary" ||
-        ! sudo chown 0:0 "$temporary" || ! sudo chmod 700 "$temporary" ||
-        ! sudo mv -f "$temporary" "${entrypoint_dir}/entrypoint.sh"; then
+      if sudo "${EDITOR:-nano}" "$temporary" &&
+        sudo chown 0:0 "$temporary" && sudo chmod 700 "$temporary" &&
+        sudo mv -f "$temporary" "${entrypoint_dir}/entrypoint.sh"; then
+        return 0
+      else
+        customization_status=$?
         sudo rm -f "$temporary"
-        return 1
+        return "$customization_status"
       fi
-
-      # we have the file set
-      return 0
     else
+      customization_status=$?
       sudo rm -f "$temporary"
       # show the error
       showError "The entrypoint.sh could not be set."
+      return "$customization_status"
     fi
-  fi
-  return 1
 }
 
 # Set the secure Cloudflare state
@@ -7654,8 +7712,7 @@ esac
 # Set the src folder path based on OS
 VDM_SRC_PATH="${VDM_HOME_PATH}/.config/octojoom"
 # Create the folder if not set
-# shellcheck disable=SC2174
-mkdir -p -m '700' "${VDM_SRC_PATH}" || exit 1
+createPrivateDirectory -p "${VDM_SRC_PATH}" || exit 1
 # first run switch
 VDM_FIRST_RUN=false
 OCTOJOOM_RESOLVED_HOME_PATH="${VDM_HOME_PATH}"

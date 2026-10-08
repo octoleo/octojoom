@@ -89,6 +89,9 @@ Container-folder migration copies that selected folder. Shared parent `.env`
 credentials and separate project volumes require their own migration.
 PHP overrides currently require a host `www-data` account or explicit numeric
 container UID/GID values. Validate those IDs for macOS and custom images.
+Windows Git Bash does not enforce Unix permission bits. Protect configuration,
+credentials, and SSH directories with NTFS access controls for the deployment
+account; restrictive Unix modes in the portable tests do not verify those ACLs.
 Pin image versions for production deployments. Treat Docker socket access as
 administrative host access, and configure trusted proxy ranges explicitly
 when forwarding client headers through a proxy.

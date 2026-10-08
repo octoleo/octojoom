@@ -30,6 +30,27 @@ shared_env() {
   echo "${VDM_REPO_PATH}/joomla/.env"
 }
 
+# Expert setup answers before the optional PHP/entrypoint questions. Version
+# 4.2 keeps auto-deployment outside these focused failure-path regressions.
+expert_single_answers() {
+  answers "${JOOMENGINE_SOURCE}" 4.2 abc ABC abc \
+    abc_db abc_user userpass rootpass no yes yes no 1001 1002 "$@"
+}
+
+expert_bulk_answers() {
+  answers "${JOOMENGINE_SOURCE}" 4.2 site bulk_db bulk_user bulkpass 1001 1002 "$@"
+}
+
+fail_php_ownership() {
+  hook_command sudo <<'EOF'
+if [ "$1" = chown ]; then
+  [[ "${*: -1}" != */php.ini ]] || exit 1
+  exit 0
+fi
+exec "$@"
+EOF
+}
+
 ###############################################################################
 # joomla__TRuST__setup
 
@@ -149,6 +170,41 @@ shared_env() {
   assert_file_contains "${VDM_PROJECT_PATH}/abc/entrypoint.sh" 'custom entrypoint'
 }
 
+@test "joomla setup: PHP ownership failure stops before Compose publication or launch" {
+  octojoom_config 'VDM_EXPERT_MODE=true'
+  fail_php_ownership
+  expert_single_answers yes 300 2000 5000 E_ALL 128M 64M 1G no
+  run joomla__TRuST__setup
+  assert_status 2
+  assert_answers_used
+  refute_file_exists "$(compose_yml abc.vdm.dev)"
+  refute_command '^docker compose'
+  refute_dialog 'Setup of this container is complete'
+}
+
+@test "joomla setup: entrypoint download failure preserves its status and prevents publication" {
+  octojoom_config 'VDM_EXPERT_MODE=true'
+  fail_command curl 22
+  expert_single_answers no yes
+  run joomla__TRuST__setup
+  assert_status 22
+  assert_answers_used
+  refute_file_exists "$(compose_yml abc.vdm.dev)"
+  refute_command '^docker compose'
+  refute_dialog 'Setup of this container is complete'
+}
+
+@test "joomla setup: explicitly declining both customizations still completes" {
+  octojoom_config 'VDM_EXPERT_MODE=true'
+  expert_single_answers no no no
+  run joomla__TRuST__setup
+  assert_success
+  assert_answers_used
+  assert_file_exists "$(compose_yml abc.vdm.dev)"
+  refute_file_exists "${VDM_PROJECT_PATH}/abc/php.ini"
+  refute_file_exists "${VDM_PROJECT_PATH}/abc/entrypoint.sh"
+}
+
 ###############################################################################
 # joomla__TRuST__bulk
 
@@ -186,6 +242,41 @@ shared_env() {
   assert_success
   assert_file_exists "$(compose_yml site3.vdm.dev)"
   refute_file_exists "$(compose_yml site4.vdm.dev)"
+}
+
+@test "joomla bulk: PHP ownership failure prevents every Compose publication and launch" {
+  octojoom_config 'VDM_EXPERT_MODE=true'
+  fail_php_ownership
+  expert_bulk_answers yes 300 2000 5000 E_ALL 128M 64M 1G no
+  run joomla__TRuST__bulk
+  assert_status 2
+  assert_answers_used
+  refute_file_exists "${VDM_REPO_PATH}/joomla/available"
+  refute_command '^docker compose'
+}
+
+@test "joomla bulk: entrypoint failure aborts before container-count and enable questions" {
+  octojoom_config 'VDM_EXPERT_MODE=true'
+  fail_command curl 22
+  expert_bulk_answers no yes
+  run joomla__TRuST__bulk
+  assert_status 22
+  assert_answers_used
+  refute_file_exists "${VDM_REPO_PATH}/joomla/available"
+  refute_command '^docker compose'
+  refute_dialog 'Enter the number of containers'
+}
+
+@test "joomla bulk: declining PHP and entrypoint customization still creates every container" {
+  octojoom_config 'VDM_EXPERT_MODE=true'
+  expert_bulk_answers no no yes yes no yes 2 no
+  run joomla__TRuST__bulk
+  assert_success
+  assert_answers_used
+  assert_file_exists "$(compose_yml site1.vdm.dev)"
+  assert_file_exists "$(compose_yml site2.vdm.dev)"
+  refute_file_exists "${VDM_PROJECT_PATH}/bulk/php.ini"
+  refute_file_exists "${VDM_PROJECT_PATH}/bulk/entrypoint.sh"
 }
 
 ###############################################################################
@@ -278,8 +369,33 @@ shared_env() {
   VDM_PHP_PROJECT_PATH=abc
   answers no
   run setPHPSettings
-  assert_failure
+  assert_status 1
   refute_file_exists "${VDM_PROJECT_PATH}/abc/php.ini"
+}
+
+@test "optional customizations: cancellation at the initial prompts is a hard error" {
+  VDM_PHP_PROJECT_PATH=abc
+  VDM_ENTRY_PROJECT_PATH=abc
+  VDM_ENTRY_REPO='https://example.org/docker-entrypoint.sh'
+  answers '<esc>' '<esc>'
+  run setPHPSettings
+  assert_status 255
+  run setDockerEntrypoint
+  assert_status 255
+  assert_answers_used
+  refute_file_exists "${VDM_PROJECT_PATH}/abc/php.ini"
+  refute_command 'curl '
+}
+
+@test "setPHPSettings: cancellation at the additional edit prompt stops ownership changes" {
+  octojoom_config 'VDM_EXPERT_MODE=true'
+  VDM_PHP_PROJECT_PATH=abc
+  answers yes 300 2000 5000 E_ALL 128M 64M 1G '<esc>'
+  run setPHPSettings
+  assert_status 255
+  assert_answers_used
+  refute_command '^sudo chown'
+  refute_command '^sudo chmod'
 }
 
 @test "setPHPSettings: writes php.ini and remembers the values" {
@@ -326,8 +442,18 @@ EOF
   VDM_ENTRY_PROJECT_PATH=abc
   answers no
   run setDockerEntrypoint
-  assert_failure
+  assert_status 1
   refute_command 'curl '
+  refute_file_exists "${VDM_PROJECT_PATH}/abc/entrypoint.sh"
+}
+
+@test "setDockerEntrypoint: selected command status one is a hard error, distinct from No" {
+  VDM_ENTRY_REPO='https://example.org/docker-entrypoint.sh'
+  VDM_ENTRY_PROJECT_PATH=abc
+  fail_command curl 1
+  answers yes
+  run setDockerEntrypoint
+  assert_status 2
   refute_file_exists "${VDM_PROJECT_PATH}/abc/entrypoint.sh"
 }
 
@@ -351,7 +477,7 @@ EOF
   fail_command curl 22
   answers yes
   run setDockerEntrypoint
-  assert_failure
+  assert_status 22
   refute_command '^sudo chmod'
   refute_file_exists "${VDM_PROJECT_PATH}/abc/entrypoint.sh"
 }
@@ -373,7 +499,7 @@ exit 22
 EOF
   answers yes
   run setDockerEntrypoint
-  assert_failure
+  assert_status 22
   assert_equal "$(cat "${VDM_PROJECT_PATH}/abc/entrypoint.sh")" 'original entrypoint'
   [ -z "$(find "${VDM_PROJECT_PATH}/abc" -name 'entrypoint.sh.tmp.*' -print)" ]
 }
@@ -392,6 +518,6 @@ exec "$@"
 EOF
   answers yes
   run setDockerEntrypoint
-  assert_failure
+  assert_status 7
   assert_equal "$(cat "${VDM_PROJECT_PATH}/abc/entrypoint.sh")" 'original entrypoint'
 }

@@ -2,12 +2,13 @@
 #
 # The Traefik and Portainer containers: setup (plain and with Let's Encrypt),
 # enable, disable and delete. Enabling Traefik first checks that ports 80 and
-# 443 are free with "sudo lsof"; the sudo stand-in prints nothing for it, so
-# the ports count as free unless a test says otherwise (ports_held_by).
+# 443 are free with lsof on Unix or native netstat on Windows. Their stand-ins
+# report free ports unless a test says otherwise (ports_held_by).
 
 # SC2016: the compose files hold ${...} references that must stay literal.
 # SC2034: the VDM_* globals are read by the loaded script functions.
-# shellcheck disable=SC2016,SC2034
+# SC2030/SC2031: Bats isolates each test's intentional platform override.
+# shellcheck disable=SC2016,SC2030,SC2031,SC2034
 
 load ../helpers/common
 
@@ -82,6 +83,42 @@ EOF
   grep -qE '^#.*CLOUDFLARE_DNS_API_TOKEN' "${TRAEFIK_YML}"
 }
 
+@test "traefik setup: numeric root ownership works without a host root group name" {
+  octojoom_config 'VDM_SECURE=true'
+  VDM_CONTAINER_TYPE=traefik
+  OS_NUMBER=2
+  hook_command sudo <<'EOF'
+if [ "$1" = chown ]; then
+  [ "$3" = 0:0 ] || exit 7
+  exit 0
+fi
+exec "$@"
+EOF
+  answers no admin@vdm.dev yes no
+  run traefik__TRuST__setup
+  assert_success
+  assert_answers_used
+  assert_command "^sudo chown -R 0:0 ${ACME_DIR}$"
+  refute_command '^sudo chown -R root:root '
+  assert_file_exists "$TRAEFIK_YML"
+}
+
+@test "traefik setup: numeric ownership failure stops before Compose publication or launch" {
+  octojoom_config 'VDM_SECURE=true'
+  VDM_CONTAINER_TYPE=traefik
+  hook_command sudo <<'EOF'
+[ "$1" != chown ] || exit 7
+exec "$@"
+EOF
+  answers no admin@vdm.dev yes
+  run traefik__TRuST__setup
+  assert_failure
+  assert_answers_used
+  assert_command "^sudo chown -R 0:0 ${ACME_DIR}$"
+  refute_file_exists "$TRAEFIK_YML"
+  refute_command '^docker compose'
+}
+
 @test "traefik setup: with Cloudflare it saves the API token and turns on the Cloudflare lines" {
   octojoom_config "VDM_SECURE=true"
   VDM_CONTAINER_TYPE='traefik'
@@ -119,7 +156,12 @@ EOF
   VDM_CONTAINER_TYPE='traefik'
   run traefik__TRuST__enable
   assert_success
-  assert_command '^sudo lsof '
+  if [ "$OS_NUMBER" -eq 3 ]; then
+    assert_command '^netstat.exe -ano -p TCP$'
+    refute_command '^sudo lsof '
+  else
+    assert_command '^sudo lsof '
+  fi
   assert_command "^docker compose --env-file ${GLOBAL_ENV} --file ${TRAEFIK_YML} up -d"
   run isContainerRunning traefik
   assert_success
