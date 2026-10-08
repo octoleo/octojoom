@@ -116,6 +116,7 @@ function install_docker_linux() {
 
   # Detect the distribution.
   if [ -f /etc/os-release ]; then
+    # shellcheck source=/dev/null
     . /etc/os-release
     DISTRO="${ID}"
     # For derivatives (e.g., Linux Mint, Pop!_OS, Zorin), use the parent distro.
