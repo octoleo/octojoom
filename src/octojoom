@@ -3642,13 +3642,21 @@ function cloneJoomlaConfiguration() {
       rm -f "${tmp_file}"
       return 1
     }
-  else
-    # tee (run privileged) is what writes the file, the redirects only feed it
+  elif useSudo; then
+    # tee (run with sudo) is what writes the file, the redirects only feed it
     # shellcheck disable=SC2024
     runPrivileged tee "${file}" < "${tmp_file}" > /dev/null || {
       rm -f "${tmp_file}"
       return 1
     }
+  else
+    # no sudo here (Windows): lift the owner write bit for the write and put it back
+    if ! chmod u+w "${file}" || ! cat "${tmp_file}" > "${file}"; then
+      chmod u-w "${file}" 2>/dev/null
+      rm -f "${tmp_file}"
+      return 1
+    fi
+    chmod u-w "${file}"
   fi
   rm -f "${tmp_file}"
   return 0
