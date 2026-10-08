@@ -6283,8 +6283,10 @@ function deleteEnvVariable() {
 
 	# Filter the .env file and remove matching line(s)
 	if grep -E -v "^${safe_key}=.*$" "${VDM_SRC_PATH}/.env" > "${tmp_file}"; then
-		# Preserve original permissions
-		chmod --reference="${VDM_SRC_PATH}/.env" "${tmp_file}"
+		# Preserve original permissions (GNU stat, then BSD stat on macOS)
+		local env_mode
+		env_mode=$(stat -c '%a' "${VDM_SRC_PATH}/.env" 2>/dev/null || stat -f '%Lp' "${VDM_SRC_PATH}/.env" 2>/dev/null)
+		[ -n "${env_mode}" ] && chmod "${env_mode}" "${tmp_file}"
 		mv "${tmp_file}" "${VDM_SRC_PATH}/.env"
 	else
 		rm -f "${tmp_file}"
