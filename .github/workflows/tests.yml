@@ -47,7 +47,7 @@ jobs:
 
       - name: Lint the tests
         run: |
-          shellcheck -x tests/run.sh tests/test-clone.sh tests/test-clone-flow.sh tests/integration/clone.sh tests/integration/migration.sh \
+          shellcheck -x tests/run.sh tests/test-clone.sh tests/test-clone-flow.sh tests/integration/clone.sh tests/integration/migration.sh tests/integration/v4.sh \
             tests/helpers/common.bash tests/helpers/stub-lib.bash tests/helpers/bin/*
           find tests -path tests/.cache -prune -o -name '*.bats' -print0 | xargs -0 shellcheck -s bash
 
@@ -75,6 +75,17 @@ jobs:
             brew install bash
           fi
           echo "$(brew --prefix)/bin" >> "${GITHUB_PATH}"
+
+      - name: Ensure jq is available
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            case "${RUNNER_OS}" in
+              Linux) sudo apt-get update && sudo apt-get install -y jq ;;
+              macOS) brew install jq ;;
+              Windows) choco install jq -y --no-progress ;;
+            esac
+          fi
+          jq --version
 
       - name: Show the tools under test
         run: |
@@ -108,3 +119,20 @@ jobs:
 
       - name: Exercise source packaging and destination realignment with real databases
         run: timeout --signal=TERM --kill-after=30s 12m bash tests/integration/migration.sh
+
+  v4-integration:
+    name: Joomla 4.0 workflow (${{ matrix.scenario }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [lifecycle, mysql, postgres]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install archive and local certificate tools
+        run: sudo apt-get update && sudo apt-get install -y jq zip unzip mkcert libnss3-tools
+      - name: Exercise real Joomla environments and recovery
+        env:
+          V4_SCENARIO: ${{ matrix.scenario }}
+        run: timeout --signal=TERM --kill-after=30s 32m bash tests/integration/v4.sh

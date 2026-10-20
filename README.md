@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/macOS-tested-blue?logo=apple&logoColor=white" alt="macOS Tested">
   <img src="https://img.shields.io/badge/Windows-supported-0078D6?logo=windows&logoColor=white" alt="Windows Supported">
   <img src="https://img.shields.io/badge/License-GPLv2-blue.svg" alt="License GPLv2">
-  <img src="https://img.shields.io/badge/Version-3.9.1-orange" alt="Version 3.9.1">
+  <img src="https://img.shields.io/badge/Version-4.0.0-orange" alt="Version 4.0.0">
 </p>
 
 <p align="center">
@@ -52,6 +52,10 @@ It provides both:
 - **Interactive menu-driven control** via *whiptail* dialogs
 - **Direct CLI commands** for automation and scripting
 
+### OctoJoom 4.0
+
+Use the Joomla **Sites** dashboard to select a project and manage its runtime, database, backups, local HTTPS, mail and developer tools. Every action also has a noninteractive command with validated JSON input/output for automation and future desktop clients. See the [command guide](docs/COMMANDS.md) and [release scope](docs/V4-IMPLEMENTATION.md).
+
 ### ✨ Key Features
 - 🚀 Quick Joomla + OpenSSH Docker deployment
 - ⚙️ Automatic `.env` management for persistent settings
@@ -86,6 +90,7 @@ Ensure the following are installed before running Octojoom:
 | **Bash** | ≥ 4.0 | Required shell |
 | **curl** | any | Downloads resources |
 | **awk** | any | Text parsing |
+| **jq** | 1.6 or newer | Versioned requests and structured results |
 | **whiptail / newt** | any | Interactive menus |
 | **Docker Engine & Docker Compose** | latest | Container runtime |
 
@@ -104,7 +109,7 @@ Follow the setup guide for your system below.
 ```bash
 # Install dependencies
 sudo apt-get update
-sudo apt-get install -y bash curl whiptail
+sudo apt-get install -y bash curl whiptail jq
 
 # Install Octojoom
 sudo curl -L "https://raw.githubusercontent.com/octoleo/octojoom/refs/heads/master/src/octojoom" -o /usr/local/bin/octojoom
@@ -128,7 +133,7 @@ octojoom -h
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
 # Install dependencies
-brew install newt
+brew install bash newt jq
 brew install --cask docker
 
 # Launch Docker Desktop once manually
