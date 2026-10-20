@@ -4418,13 +4418,12 @@ function showJoomla() {
     # menu for dynamic addition
     local menu_options=()
     # our counter
-    local i=5
+    local i=4
     # load the back menu
     menu_options+=("back" "<-- Return to the main menu.")
-    menu_options+=("sites" "Joomla sites: information and actions")
-    menu_options+=("create" "Create Joomla site (v4)")
     # setup new container
-    menu_options+=("setup" "Legacy container setup")
+    menu_options+=("setup" "Setup new container")
+    menu_options+=("sites" "Select a site: information, settings and actions")
     # enable existing container
     hasDirectories 'joomla/available' &&
       menu_options+=("enable" "Enable existing container") && i=$((i + 1))
@@ -4476,9 +4475,6 @@ function showJoomla() {
     "sites")
       v4SitesMenu
       ;;
-    "create")
-      v4TuiAction site.create
-      ;;
     "setup")
       setupContainer 'joomla'
       ;;
@@ -4523,7 +4519,7 @@ function showJoomla() {
 
     # menu loop
     case $CHOICE in
-    "sites" | "create" | "setup" | "edit" | "enable" | "disable" | "down" | "up" | "fix" | "clonefiles" | "clone" | "delete" | "reset" | "joomla_env" | "bulk")
+    "sites" | "setup" | "edit" | "enable" | "disable" | "down" | "up" | "fix" | "clonefiles" | "clone" | "delete" | "reset" | "joomla_env" | "bulk")
       continue
       ;;
     *) return 0 ;;
