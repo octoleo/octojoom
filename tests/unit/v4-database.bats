@@ -553,3 +553,35 @@ restore_dependencies() {
   [ "$status" -ne 0 ]
   [ "$(cat "$SANDBOX/tls-cleaned")" = clone.test ]
 }
+
+@test "v4 portable environment includes identity with absolute Compose bind mounts" {
+  printf 'services: {}\n' > "$V4_COMPOSE"
+  v4PackageEnvironment "$SANDBOX/portable.env"
+  local value
+  migrationReadEnvValue "$SANDBOX/portable.env" VDM_PROJECT_PATH value
+  [ "$value" = "$VDM_PROJECT_PATH" ]
+  migrationReadEnvValue "$SANDBOX/portable.env" VDM_SOURCE_DB value
+  [ "$value" = joomla ]
+  migrationReadEnvValue "$SANDBOX/portable.env" VDM_SOURCE_DB_USER value
+  [ "$value" = joomla ]
+  migrationReadEnvValue "$SANDBOX/portable.env" VDM_SOURCE_DB_PASS value
+  [ "$value" = project-secret ]
+  migrationReadEnvValue "$SANDBOX/portable.env" VDM_SOURCE_DB_ROOT value
+  [ "$value" = root-secret ]
+  run ! grep -q 'unrelated-secret' "$SANDBOX/portable.env"
+}
+
+@test "v4 restores old portable environments with destination root written exactly once" {
+  printf 'VDM_SOURCE_DB="joomla"\nVDM_SOURCE_DB_USER="joomla"\nVDM_SOURCE_DB_PASS="secret"\n' > "$SANDBOX/old.env"
+  v4RestoreEnvironment "$SANDBOX/old.env" "$SANDBOX/new.env" SOURCE CLONE
+  local value
+  migrationReadEnvValue "$SANDBOX/new.env" VDM_PROJECT_PATH value
+  [ "$value" = "$VDM_PROJECT_PATH" ]
+  migrationReadEnvValue "$SANDBOX/new.env" VDM_CLONE_DB_PASS value
+  [ "$value" = secret ]
+  printf 'VDM_PROJECT_PATH="/old/host/projects"\n' >> "$SANDBOX/old.env"
+  v4RestoreEnvironment "$SANDBOX/old.env" "$SANDBOX/new.env" SOURCE CLONE
+  [ "$(grep -c '^VDM_PROJECT_PATH=' "$SANDBOX/new.env")" -eq 1 ]
+  migrationReadEnvValue "$SANDBOX/new.env" VDM_PROJECT_PATH value
+  [ "$value" = "$VDM_PROJECT_PATH" ]
+}

@@ -90,7 +90,7 @@ Ensure the following are installed before running Octojoom:
 | **Bash** | ≥ 4.0 | Required shell |
 | **curl** | any | Downloads resources |
 | **awk** | any | Text parsing |
-| **jq** | 1.6 or newer | Versioned requests and structured results |
+| **jq** | 1.6+; native Windows 1.7+ | Versioned requests and structured results |
 | **whiptail / newt** | any | Interactive menus |
 | **Docker Engine & Docker Compose** | latest | Container runtime |
 
@@ -156,7 +156,7 @@ octojoom -h
 <details>
 <summary>🪟 <strong>Windows (MSYS2 / Cygwin / Git Bash)</strong></summary>
 
-1. Install **[Docker Desktop](https://www.docker.com/products/docker-desktop)**.
+1. Install **[Docker Desktop](https://www.docker.com/products/docker-desktop)** and configure it to use Linux containers.
 2. Install **Chocolatey**:
 
    ```powershell

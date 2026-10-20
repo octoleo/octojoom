@@ -33,11 +33,45 @@ setup() {
   jq -e '.services.mailpitdemo.ports==["127.0.0.1:0:8025"] and (.services.redisdemo|has("ports")|not) and (.services.nodedemo|has("ports")|not) and (.services.joomlademo.networks|has("octojoom_local")) and (.services.mariadbdemo|has("networks")|not) and .services.nodedemo.profiles==["tools"]' <<<"$output"
 }
 
+@test "native Docker scalar output removes CRLF without hiding command failure" {
+  docker() { printf 'true\r\n'; }
+  run v4NetworkDockerScalar inspect --format '{{.State.Running}}' example
+  assert_success
+  [ "$output" = true ]
+  docker() { printf 'failure\r\n'; return 7; }
+  run v4NetworkDockerScalar inspect example
+  assert_status 7
+}
+
 @test "local TLS attaches Nginx rather than PHP FPM to the proxy network" {
   V4_META=$(jq '.webserver="nginx" | .tls.mode="local"' <<<"$V4_META")
   run v4NetworkCompose '{"services":{"joomlademo":{},"nginxdemo":{}},"networks":{}}'
   assert_success
   jq -e '.services.nginxdemo.networks.octojoom_local=={} and (.services.joomlademo|has("networks")|not)' <<<"$output"
+}
+
+@test "Node bind sources cross the host path boundary without rewriting container paths" {
+  v4DockerHostPath() { printf 'C:/native%s\n' "$1"; }
+  V4_META=$(jq '.services.node=true' <<<"$V4_META")
+  run v4NetworkCompose '{"services":{"joomlademo":{}},"networks":{}}'
+  assert_success
+  jq -e --arg root "C:/native$V4_DOCROOT" '.services.nodedemo.volumes[0].source==$root and .services.nodedemo.volumes[0].target=="/var/www/html" and .services.nodedemo.working_dir=="/var/www/html"' <<<"$output"
+}
+
+@test "TLS proxy translates host bind and Compose paths but keeps Linux container paths" {
+  local root="$SANDBOX/tls"
+  v4DockerHostPath() { printf 'C:/native%s\n' "$1"; }
+  docker() {
+    printf '%s\n' "$*" >>"$SANDBOX/docker-paths.log"
+    case "$1 $2" in
+      'inspect octojoom-local-proxy'|'network inspect') return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  run v4LocalProxyEnsure "$root" 8080 8443
+  assert_success
+  jq -e --arg root "C:/native$root" '.services.proxy.volumes[0].source==($root+"/routes") and .services.proxy.volumes[1].source==($root+"/certs") and .services.proxy.volumes[0].target=="/routes" and .services.proxy.volumes[1].target=="/certs" and (.services.proxy.command|index("--providers.file.directory=/routes"))' "$root/proxy.json"
+  grep -Fq -- "compose -f C:/native$root/proxy.json config -q" "$SANDBOX/docker-paths.log"
 }
 
 @test "invalid service port fails before returning Compose" {
@@ -222,7 +256,7 @@ setup() {
   v4Unlock() { rmdir "$1"; }
   v4ApplyConfig() { printf '%s\n' "$1" >"$SANDBOX/last-meta.json"; }
   docker() {
-    if [[ "$*" == *'json .Mounts'* ]]; then jq -n --arg root "$VDM_SRC_PATH/local-tls/routes" '[{Destination:"/routes",Source:$root}]';
+    if [[ "$*" == *'json .Mounts'* ]]; then jq -n --arg root "$(v4DockerHostPath "$VDM_SRC_PATH/local-tls/routes")" '[{Destination:"/routes",Source:$root}]';
     elif [[ "$*" == *'--format'* ]]; then printf '%s\n' v4;
     elif [ "$1" = stop ]; then printf '%s\n' "$2" >"$SANDBOX/stopped";
     else return 0; fi
@@ -326,9 +360,10 @@ class JConfig {
 }
 PHP
   v4Compose() {
-    local code="${11}" operation="${12}"
-    code="${code//\/var\/www\/html\/configuration.php/$SANDBOX\/configuration.php}"
-    "$V4_TEST_PHP" -r "$code" "$operation"
+    local code="${11}" operation="${12}" native_path
+    native_path=$(v4DockerHostPath "$SANDBOX/configuration.php")
+    code="${code//\/var\/www\/html\/configuration.php/$native_path}"
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$V4_TEST_PHP" -r "$code" "$operation"
   }
   local settings
   settings=$(v4MailSettings read)
@@ -337,7 +372,7 @@ PHP
   printf '%s\n' "$settings" | v4MailSettings write
   [ "$(v4MailSettings read | jq -Sc .)" = "$(jq -Sc . <<<"$settings")" ]
   grep -q "Keep this site name" "$SANDBOX/configuration.php"
-  "$V4_TEST_PHP" -l "$SANDBOX/configuration.php"
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$V4_TEST_PHP" -l "$(v4DockerHostPath "$SANDBOX/configuration.php")"
 }
 
 @test "mail PHP editor refuses expression properties without modifying the file" {
@@ -348,9 +383,10 @@ PHP
   printf '%s\n' '<?php class JConfig {' ' public $smtppass = CUSTOM_PASSWORD;' '}' >"$SANDBOX/configuration.php"
   cp "$SANDBOX/configuration.php" "$SANDBOX/original.php"
   v4Compose() {
-    local code="${11}" operation="${12}"
-    code="${code//\/var\/www\/html\/configuration.php/$SANDBOX\/configuration.php}"
-    "$V4_TEST_PHP" -r "$code" "$operation"
+    local code="${11}" operation="${12}" native_path
+    native_path=$(v4DockerHostPath "$SANDBOX/configuration.php")
+    code="${code//\/var\/www\/html\/configuration.php/$native_path}"
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$V4_TEST_PHP" -r "$code" "$operation"
   }
   local status=0
   printf '%s\n' '{"smtppass":"replacement"}' | v4MailSettings write || status=$?

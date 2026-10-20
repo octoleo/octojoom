@@ -8936,6 +8936,45 @@ function parseCLI() {
 
 #####################################################################################################################VDM
 # OCTOJOOM V4: cli
+# Native jq on Windows must not rewrite data arguments or emit CRLF. File
+# operands are translated explicitly; JSON strings and jq programs stay literal.
+function jq() {
+  case "${OSTYPE:-}" in
+    msys*|cygwin*)
+      local argument filter_seen=false positional_values=false
+      local -a jq_args=(-b)
+      while [ "$#" -gt 0 ]; do
+        argument="$1"; shift
+        case "$argument" in
+          --arg|--argjson)
+            [ "$#" -ge 2 ] || { command jq "$argument" "$@"; return $?; }
+            jq_args+=("$argument" "$1" "$2"); shift 2 ;;
+          --rawfile|--slurpfile|--argfile)
+            [ "$#" -ge 2 ] || return 2
+            jq_args+=("$argument" "$1" "$(cygpath -m -- "$2")"); shift 2 ;;
+          -f|--from-file|-L)
+            [ "$#" -ge 1 ] || return 2
+            jq_args+=("$argument" "$(cygpath -m -- "$1")"); shift
+            [ "$argument" = -L ] || filter_seen=true ;;
+          --indent)
+            [ "$#" -ge 1 ] || return 2
+            jq_args+=("$argument" "$1"); shift ;;
+          --args|--jsonargs) positional_values=true; jq_args+=("$argument") ;;
+          --) jq_args+=("$argument") ;;
+          -*) jq_args+=("$argument") ;;
+          *)
+            if [ "$filter_seen" = false ]; then
+              jq_args+=("$argument"); filter_seen=true
+            elif [ "$positional_values" = true ]; then jq_args+=("$argument")
+            else jq_args+=("$(cygpath -m -- "$argument")"); fi ;;
+        esac
+      done
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' command jq "${jq_args[@]}"
+      ;;
+    *) command jq "$@" ;;
+  esac
+}
+
 # OctoJoom 4 command contract. All handlers are shared with the site TUI.
 # JSON is parsed as data by jq; no request value is evaluated as shell code.
 function v4Error() {
@@ -9062,18 +9101,40 @@ function v4ValidateActionRequest() {
     v4Error "Unsupported options for $action: ${unknown//$'\n'/, }. Consult site schema for this action's fields." 2
     return 2
   fi
+  if ! jq -e '[(if (.site // "")!="" then 1 else 0 end), (if .all==true then 1 else 0 end), (if ((.sites // [])|length)>0 then 1 else 0 end)] | add <= 1' <<< "$V4_REQUEST" >/dev/null; then
+    v4Error 'Choose one target selection: --site, --sites, or --all.' 2
+    return 2
+  fi
+  V4_REQUEST=$(jq -c 'if .site=="" then del(.site) else . end | if .sites==[] then del(.sites) else . end' <<< "$V4_REQUEST") || return 2
 }
 
 # Published form descriptors are exactly the descriptors consumed by the TUI.
 function v4FormSchemas() {
-  (
-    set -o pipefail
-    local action form
-    while IFS= read -r action; do
-      form=$(v4ActionSchema "$action") || exit $?
-      jq -cn --arg action "$action" --argjson form "$form" '{key:$action,value:$form}' || exit 1
-    done < <(v4ActionSchemas | jq -r 'keys[]') | jq -sc 'from_entries'
-  )
+  local schema registry
+  schema=$(v4RequestSchema) || return 1
+  registry=$(v4ActionSchemas) || return 1
+  jq -c --argjson schema "$schema" '
+    with_entries(.value |= (
+    . as $action | .fields = [.fields[] | . as $name |
+      select($schema.options[$name] != null) |
+      {name:$name,type:(if $name=="tables" then "array" elif $name=="command" then "string" else $schema.options[$name] end),required:(($action.required // [])|index($name)!=null),
+       default:(if (($action.defaults // {})|has($name)) then $action.defaults[$name] else null end),secret:($name|test("password|token")),
+       description:($name|gsub("_";" ")),
+       enum:(if $name == "webserver" then ["apache","nginx"]
+        elif $name == "profile" then ["local","server"]
+        elif $name == "database_engine" then ["mariadb","mysql","postgres"]
+        elif $name == "tls_mode" then (if $action.title=="Create Joomla site" or $action.title=="Import existing Joomla" then ["none","acme"] else ["none","local","acme"] end)
+        elif $name == "direction" then ["push","pull"]
+        elif $name == "target" and $action.title=="Project directory" then ["project","docroot"]
+        elif $name == "target" then ["site","admin","database","mail","directory"]
+        elif $name == "scope" then ["full","site","database"]
+        elif $name == "format" then ["tar.gz","zip"]
+        elif $name == "state" then ["all","running","stopped"]
+        elif $name == "channel" then ["master","staging"]
+        elif $name == "mode" then ["clone","replace","fresh"]
+        elif $name == "service" and $action.title=="Optional project service" then ["mail","redis","node"]
+        else [] end)}]
+    ))' <<< "$registry"
 }
 
 function v4Parse() {
@@ -9200,6 +9261,11 @@ function v4Parse() {
 
 function v4Init() {
   local root src repo projects backup
+  # Read by legacy filesystem privilege helpers invoked through this API.
+  # shellcheck disable=SC2034
+  case "${OSTYPE:-}" in
+    linux-gnu*) OS_NUMBER=1 ;; darwin*) OS_NUMBER=2 ;; msys*|cygwin*) OS_NUMBER=3 ;; *) OS_NUMBER=0 ;;
+  esac
   root="${OCTOJOOM_HOME:-${HOME:-}}"
   [ -n "$root" ] || { v4Error 'HOME or OCTOJOOM_HOME must be configured.' 3; return 3; }
   root=$(v4CanonicalRoot "$root") || return $?
@@ -9331,22 +9397,49 @@ function v4LoadSite() {
   export V4_HOST V4_KEY V4_ENV_KEY V4_DIR V4_COMPOSE V4_ENV_FILE V4_PROJECT V4_DOCROOT V4_DB_ENGINE V4_DB_SERVICE V4_WEB_SERVICE V4_META V4_LEGACY V4_NAMED_VOLUMES
 }
 
-function v4Compose() {
-  if ! { [ -f "${V4_COMPOSE:-}" ] && [ -f "${V4_ENV_FILE:-}" ]; }; then v4Error 'Load a site before running Compose.' 3; return 3; fi
-  local override="$V4_DIR/docker-compose.override.yml" variable
-  local compose_args=(--env-file "$V4_ENV_FILE" --file "$V4_COMPOSE")
-  if [ -f "$override" ]; then
-    [ ! -L "$override" ] || { v4Error 'Compose overrides must be regular files.' 2; return 2; }
-    compose_args+=(--file "$override")
-  fi
+
+# Keep container paths, programs and argument arrays literal when launching the
+# native Windows CLI. Callers convert only the host filesystem operands.
+function v4Docker() {
+  case "${OSTYPE:-}" in
+    msys*|cygwin*) MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker "$@" ;;
+    *) docker "$@" ;;
+  esac
+}
+
+# Compose interpolation is scoped to the selected dotenv, including staged
+# validation. Only the project-root path is converted for native Windows binds.
+function v4ComposeScopedDocker() {
   (
-    # Environment interpolation must come from the selected project's dotenv,
-    # never a stale exported credential inherited from a previous operation.
+    local variable project_root="${VDM_PROJECT_PATH:-}"
+    [ -f "${V4_ENV_FILE:-}" ] || { v4Error 'The selected Compose environment is unavailable.' 3; return 3; }
+    migrationReadEnvValue "$V4_ENV_FILE" VDM_PROJECT_PATH project_root || true
     while IFS= read -r variable; do
       [[ "$variable" =~ ^VDM_[A-Za-z0-9_]+$ ]] && unset "$variable"
     done < <(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?(VDM_[A-Za-z0-9_]+)[[:space:]]*=.*$/\2/p' "$V4_ENV_FILE")
-    docker compose "${compose_args[@]}" "$@"
+    case "${OSTYPE:-}" in
+      msys*|cygwin*)
+        if [ -n "$project_root" ]; then
+          VDM_PROJECT_PATH=$(v4DockerHostPath "$project_root") || return $?
+          export VDM_PROJECT_PATH
+        fi ;;
+    esac
+    v4Docker compose "$@"
   )
+}
+
+function v4Compose() {
+  if ! { [ -f "${V4_COMPOSE:-}" ] && [ -f "${V4_ENV_FILE:-}" ]; }; then v4Error 'Load a site before running Compose.' 3; return 3; fi
+  local override="$V4_DIR/docker-compose.override.yml" env_path compose_path override_path
+  env_path=$(v4DockerHostPath "$V4_ENV_FILE") || return $?
+  compose_path=$(v4DockerHostPath "$V4_COMPOSE") || return $?
+  local compose_args=(--env-file "$env_path" --file "$compose_path")
+  if [ -f "$override" ]; then
+    [ ! -L "$override" ] || { v4Error 'Compose overrides must be regular files.' 2; return 2; }
+    override_path=$(v4DockerHostPath "$override") || return $?
+    compose_args+=(--file "$override_path")
+  fi
+  v4ComposeScopedDocker "${compose_args[@]}" "$@"
 }
 
 function v4Exec() {
@@ -9470,10 +9563,17 @@ function v4Main() {
   local V4_NONINTERACTIVE=true
   local handler status=0 temporary data='null' error='' action='request' raw='' result_file error_file streaming=false
   V4_ERROR=''; V4_ERROR_FILE=''; V4_RESULT_FILE=''
-  if ! command -v jq >/dev/null 2>&1; then
+  if ! type -P jq >/dev/null 2>&1; then
     printf '%s\n' 'ERROR: OctoJoom v4 commands require jq. Install jq using your operating system package manager.' >&2
     return 3
   fi
+  case "${OSTYPE:-}" in
+    msys*|cygwin*)
+      if ! MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' command jq -b -n null >/dev/null 2>&1; then
+        printf '%s\n' 'ERROR: Native Windows jq 1.7 or newer is required for binary output.' >&2
+        return 3
+      fi ;;
+  esac
   # Recognize --json even if validation fails before that flag is parsed.
   V4_JSON=false
   local previous=''
@@ -9622,6 +9722,16 @@ function v4ShouldHandle() {
 # shellcheck disable=SC2034,SC2030,SC2031
 # Joomla runtime configuration. Compose JSON is YAML-compatible; keep user
 # customizations in docker-compose.override.yml so regeneration is lossless.
+function v4DockerHostPath() {
+  case "${OSTYPE:-}" in
+    msys*|cygwin*)
+      command -v cygpath >/dev/null 2>&1 || { v4Error 'Windows Docker host paths require cygpath from Git Bash or Cygwin.' 3; return 3; }
+      cygpath -am -- "$1"
+      ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
 function v4RuntimeValidateMeta() {
   local meta="$1" path part
   jq -e '
@@ -9677,13 +9787,15 @@ function v4RuntimeValidateImage() {
   version=$(jq -r '.joomla_version' <<< "$meta")
   driver=mysqli
   [ "$(jq -r '.database.engine' <<< "$meta")" != postgres ] || driver=pgsql
-  docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image" >&2 || return 1
-  actual=$(docker run --rm --network none --entrypoint php "$image" -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;') || return 1
+  v4Docker image inspect "$image" >/dev/null 2>&1 || v4Docker pull "$image" >&2 || return 1
+  actual=$(v4Docker run --rm --network none --entrypoint php "$image" -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;') || return 1
   [ "$actual" = "$php" ] || { v4Error 'The selected image does not provide the requested PHP version.' 2; return 2; }
-  docker run --rm --network none --entrypoint php "$image" -r 'exit(extension_loaded($argv[1]) ? 0 : 1);' "$driver" >/dev/null || {
+  # shellcheck disable=SC2016 # PHP receives literal variable expressions.
+  v4Docker run --rm --network none --entrypoint php "$image" -r 'exit(extension_loaded($argv[1]) ? 0 : 1);' "$driver" >/dev/null || {
     v4Error "The selected Joomla image lacks the required $driver extension." 2; return 2;
   }
-  source_version=$(docker run --rm --network none --entrypoint php "$image" -r '
+  # shellcheck disable=SC2016 # PHP receives literal variable expressions.
+  source_version=$(v4Docker run --rm --network none --entrypoint php "$image" -r '
     $f="/usr/src/joomla/administrator/manifests/files/joomla.xml";
     if (!is_file($f)) exit(1); $x=simplexml_load_file($f); echo (string)$x->version;') || {
     v4Error 'The selected image does not expose a verifiable Joomla installation.' 2; return 2;
@@ -9696,7 +9808,8 @@ function v4RuntimeValidateImage() {
   fi
   sapi=apache2
   [ "$(jq -r '.webserver' <<< "$meta")" != nginx ] || sapi='php-fpm'
-  docker run --rm --network none --entrypoint sh "$image" -c 'command -v "$1" >/dev/null' sh "$sapi" || {
+  # shellcheck disable=SC2016 # The container shell owns the positional parameter.
+  v4Docker run --rm --network none --entrypoint sh "$image" -c 'command -v "$1" >/dev/null' sh "$sapi" || {
     v4Error 'The selected image does not provide the requested webserver runtime.' 2; return 2;
   }
 }
@@ -9764,7 +9877,7 @@ EOF_NGINX
 
 # Writes generated files into a chosen directory, leaving custom override files alone.
 function v4GenerateCompose() {
-  local output="${1:-$V4_COMPOSE}" generated_dir json temporary network
+  local output="${1:-$V4_COMPOSE}" generated_dir json temporary network host_project
   v4RuntimeValidateMeta "$V4_META" || return $?
   generated_dir=$(dirname "$output")
   mkdir -p "$generated_dir" || return 1
@@ -9772,11 +9885,12 @@ function v4GenerateCompose() {
   v4RuntimeWriteNginx "$generated_dir/nginx.generated.conf" || return $?
   network=$(jq -r '.network // empty' <<< "$V4_META")
   network="${network:-${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}}"
-  json=$(jq -n --argjson m "$V4_META" --arg network "$network" '
+  host_project=$(v4DockerHostPath "$(jq -r '.project_dir' <<< "$V4_META")") || return $?
+  json=$(jq -n --argjson m "$V4_META" --arg network "$network" --arg host_project "$host_project" '
     def env($suffix): "${VDM_" + $m.env_key + "_" + $suffix + "}";
     ($m.key) as $k | ($m.database.engine+$k) as $db | ("joomla"+$k) as $web |
     (if $m.webserver == "nginx" then "nginx"+$k else $web end) as $http |
-    ($m.project_dir+"/"+$m.docroot) as $root |
+    ($host_project+"/"+$m.docroot) as $root |
     (if $m.database.engine == "postgres" then
        {POSTGRES_DB:env("DB"),POSTGRES_USER:env("DB_USER"),POSTGRES_PASSWORD:env("DB_PASS")}
      elif $m.database.engine == "mysql" then
@@ -9788,7 +9902,7 @@ function v4GenerateCompose() {
      else ["CMD-SHELL","mariadb-admin ping --silent"] end) as $db_health |
     {name:(("octojoom"+$k)|ascii_downcase), services:{
       ($db):{image:($m.database.engine+":"+$m.database.version),container_name:$db,restart:"unless-stopped",
-        environment:$db_env,volumes:[{type:"bind",source:($m.project_dir+"/db"),target:(if $m.database.engine=="postgres" then (if ($m.database.version | split(".")[0] | split("-")[0] | tonumber) >= 18 then "/var/lib/postgresql" else "/var/lib/postgresql/data" end) else "/var/lib/mysql" end)}],
+        environment:$db_env,volumes:[{type:"bind",source:($host_project+"/db"),target:(if $m.database.engine=="postgres" then (if ($m.database.version | split(".")[0] | split("-")[0] | tonumber) >= 18 then "/var/lib/postgresql" else "/var/lib/postgresql/data" end) else "/var/lib/mysql" end)}],
         networks:["default"],healthcheck:{test:$db_health,interval:"3s",timeout:"3s",retries:40}},
       ($web):{image:$m.image,container_name:$web,restart:"unless-stopped",working_dir:"/var/www/html",
         environment:({JOOMLA_DB_HOST:($db+(if $m.database.engine=="postgres" then ":5432" else ":3306" end)),JOOMLA_DB_NAME:env("DB"),JOOMLA_DB_USER:env("DB_USER"),JOOMLA_DB_PASSWORD:env("DB_PASS"),JOOMLA_DB_TYPE:(if $m.database.engine=="postgres" then "pgsql" else "mysqli" end),JOOMLA_DB_PREFIX:(($k|ascii_downcase|gsub("[^a-z0-9]";""))[0:10]+"_")} +
@@ -9842,7 +9956,7 @@ function v4ProvisionMetadataUnlocked() {
   if [ "$(jq -r '.profile' <<< "$meta")" = server ]; then
     local gateway
     gateway=$(jq -r '.network // empty' <<< "$meta"); gateway="${gateway:-${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}}"
-    docker network inspect "$gateway" >/dev/null 2>&1 || { v4Error 'The server proxy network is unavailable. Set up the server proxy or use profile=local.' 3; return 3; }
+    v4Docker network inspect "$gateway" >/dev/null 2>&1 || { v4Error 'The server proxy network is unavailable. Set up the server proxy or use profile=local.' 3; return 3; }
   fi
   if ! { [ -f "$env_source" ] && [ ! -L "$env_source" ]; }; then v4Error 'A regular scoped environment file is required.' 2; return 2; fi
   migrationReadEnvValue "$env_source" VDM_PROJECT_PATH source_root || { v4Error 'The scoped environment is missing its project root.' 2; return 2; }
@@ -10042,9 +10156,16 @@ function v4RuntimeDownloadSource() {
 }
 
 function v4RuntimeValidateComposeFile() {
-  local args=(--env-file "$V4_ENV_FILE" --project-directory "$V4_DIR" --file "$1")
-  [ ! -f "$V4_DIR/docker-compose.override.yml" ] || args+=(--file "$V4_DIR/docker-compose.override.yml")
-  docker compose "${args[@]}" config --quiet >/dev/null 2>&1 || {
+  local env_file directory file override
+  env_file=$(v4DockerHostPath "$V4_ENV_FILE") || return $?
+  directory=$(v4DockerHostPath "$V4_DIR") || return $?
+  file=$(v4DockerHostPath "$1") || return $?
+  local args=(--env-file "$env_file" --project-directory "$directory" --file "$file")
+  if [ -f "$V4_DIR/docker-compose.override.yml" ]; then
+    override=$(v4DockerHostPath "$V4_DIR/docker-compose.override.yml") || return $?
+    args+=(--file "$override")
+  fi
+  v4ComposeScopedDocker "${args[@]}" config --quiet >/dev/null 2>&1 || {
     v4Error 'The proposed Compose configuration is invalid.' 2; return 2;
   }
 }
@@ -10052,14 +10173,20 @@ function v4RuntimeValidateComposeFile() {
 # Resolve the override as Compose does, but do not refresh already-present tags:
 # a PHP/settings action must not silently replace a database image as a side effect.
 function v4RuntimePrepareImages() {
-  local config image
-  local args=(--env-file "$V4_ENV_FILE" --project-directory "$V4_DIR" --file "$1")
-  [ ! -f "$V4_DIR/docker-compose.override.yml" ] || args+=(--file "$V4_DIR/docker-compose.override.yml")
-  config=$(docker compose "${args[@]}" config --format json) || return 1
+  local config image env_file directory file override
+  env_file=$(v4DockerHostPath "$V4_ENV_FILE") || return $?
+  directory=$(v4DockerHostPath "$V4_DIR") || return $?
+  file=$(v4DockerHostPath "$1") || return $?
+  local args=(--env-file "$env_file" --project-directory "$directory" --file "$file")
+  if [ -f "$V4_DIR/docker-compose.override.yml" ]; then
+    override=$(v4DockerHostPath "$V4_DIR/docker-compose.override.yml") || return $?
+    args+=(--file "$override")
+  fi
+  config=$(v4ComposeScopedDocker "${args[@]}" config --format json) || return 1
   jq -e '.services | type=="object"' <<< "$config" >/dev/null || return 2
   while IFS= read -r image; do
     [ -n "$image" ] || continue
-    docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image" >&2 || return 1
+    v4Docker image inspect "$image" >/dev/null 2>&1 || v4Docker pull "$image" >&2 || return 1
   done < <(jq -r '.services[] | select(.build == null) | .image // empty' <<< "$config" | LC_ALL=C sort -u)
 }
 
@@ -10266,7 +10393,7 @@ try {
         if(!isset($seen[$key])) throw new RuntimeException("Required Joomla configuration property is missing.");
     $info=stat($path);$tmp=tempnam(dirname($path),".octojoom-config-");
     if($tmp===false||file_put_contents($tmp,$out)===false) throw new RuntimeException("Cannot stage Joomla configuration.");
-    if(!chmod($tmp,$info["mode"]&0777)||!chown($tmp,$info["uid"])||!chgrp($tmp,$info["gid"])||!rename($tmp,$path)) {
+    if(!chmod($tmp,$info["mode"]&0777)||(fileowner($tmp)!==$info["uid"]&&!chown($tmp,$info["uid"]))||(filegroup($tmp)!==$info["gid"]&&!chgrp($tmp,$info["gid"]))||!rename($tmp,$path)) {
         @unlink($tmp);throw new RuntimeException("Cannot publish Joomla configuration.");
     }
 } catch(Throwable $e) {fwrite(STDERR,$e->getMessage()."\n");exit(1);}
@@ -10765,10 +10892,13 @@ function v4PackageVerify() {
   [ -s "$directory/database.sql.gz" ] && gzip -t "$directory/database.sql.gz" || return 2
 }
 
-# Package only the effective project's env references. An unrelated shared env
-# secret cannot leak into a backup, clone or migration archive.
+# Package the project's identity, credentials and effective Compose references.
+# Absolute bind mounts need no Compose interpolation, but restore still needs a
+# destination root. Unrelated shared environment secrets are never included.
 function v4PackageEnvironment() {
   local output="$1" name value refs file all_refs=''
+  all_refs=$(printf '%s\n' VDM_PROJECT_PATH "VDM_${V4_ENV_KEY}_DB" "VDM_${V4_ENV_KEY}_DB_USER" "VDM_${V4_ENV_KEY}_DB_PASS")$'\n'
+  [ "$V4_DB_ENGINE" = postgres ] || all_refs+="VDM_${V4_ENV_KEY}_DB_ROOT"$'\n'
   for file in "$V4_COMPOSE" "$V4_DIR/docker-compose.override.yml"; do
     [ -f "$file" ] || continue
     refs=$(migrationComposeReferences "$file") || { v4Error 'Compose uses unsupported environment expressions.' 2; return 2; }
@@ -10934,12 +11064,15 @@ function v4BackupDelete() {
 function v4RestoreEnvironment() {
   local input="$1" output="$2" old="$3" new="$4" line name value
   : > "$output" || return 1
+  # Write this independently of archive contents for older v4 archives whose
+  # absolute Compose bind mounts caused the source root to be omitted.
+  formatEnvAssignment "VDM_PROJECT_PATH=\"$VDM_PROJECT_PATH\"" >> "$output" || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     [[ "$line" =~ ^(VDM_[A-Za-z0-9_]+)=(.*)$ ]] || return 2
     name="${BASH_REMATCH[1]}"
     decodeEnvValue "${BASH_REMATCH[2]}" value || return 2
     case "$name" in
-      VDM_PROJECT_PATH) value="$VDM_PROJECT_PATH" ;;
+      VDM_PROJECT_PATH) continue ;;
       "VDM_${old}_"*) name="VDM_${new}_${name#"VDM_${old}_"}" ;;
     esac
     formatEnvAssignment "$name=\"$value\"" >> "$output" || return 1
@@ -11447,8 +11580,14 @@ function v4DatabaseBatchSites() {
 # OCTOJOOM V4: network
 # Local development networking. Host trust and certificates never enter project archives.
 
+function v4NetworkDockerScalar() {
+  local value
+  value=$(v4Docker "$@") || return $?
+  printf '%s\n' "${value%$'\r'}"
+}
+
 function v4NetworkCompose() {
-  local compose="$1" key host frontend tls mail redis node mail_port node_image
+  local compose="$1" key host frontend tls mail redis node mail_port node_image host_docroot
   key=$(jq -r '.key' <<<"$V4_META")
   host=$(jq -r '.host' <<<"$V4_META")
   frontend="joomla${key}"
@@ -11459,11 +11598,12 @@ function v4NetworkCompose() {
   node=$(jq -r '.services.node // false' <<<"$V4_META")
   mail_port=$(jq -r '.services.mail_port // 0' <<<"$V4_META")
   node_image=$(jq -r '.services.node_image // "node:22-bookworm-slim"' <<<"$V4_META")
+  host_docroot=$(v4DockerHostPath "$V4_DOCROOT") || return $?
   if ! { [[ "$mail_port" =~ ^[0-9]+$ ]] && [ "$mail_port" -le 65535 ]; }; then v4Error 'Invalid mail UI port.' 2; return 2; fi
   [[ "$node_image" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@-]+$ ]] || { v4Error 'Invalid Node image.' 2; return 2; }
   jq --arg key "$key" --arg host "$host" --arg frontend "$frontend" --arg tls "$tls" \
     --argjson mail "$mail" --argjson redis "$redis" --argjson node "$node" \
-    --arg port "$mail_port" --arg image "$node_image" --arg root "$V4_DOCROOT" '
+    --arg port "$mail_port" --arg image "$node_image" --arg root "$host_docroot" '
     def network_object: if type=="array" then map({key:.,value:{}})|from_entries elif type=="object" then . else {default:{}} end;
     if $tls=="local" then
       .networks.octojoom_local={external:true,name:"octojoom_local"} |
@@ -11538,8 +11678,10 @@ function v4HostsEntry() {
 }
 
 function v4LocalProxyEnsure() {
-  local root="$1" http="$2" https="$3" file previous owner scope mounts
+  local root="$1" http="$2" https="$3" file previous owner scope mounts host_root host_file
   file="$root/proxy.json"
+  host_root=$(v4DockerHostPath "$root") || return $?
+  host_file=$(v4DockerHostPath "$file") || return $?
   mkdir -p "$root/routes" "$root/certs" || return 1
   chmod 700 "$root" "$root/routes" "$root/certs" || return 1
   if [ -f "$file" ]; then
@@ -11548,50 +11690,51 @@ function v4LocalProxyEnsure() {
       v4Error 'The shared local proxy already uses different ports. Use its existing ports for all local sites.' 3; return 3;
     }
   fi
-  if docker inspect octojoom-local-proxy >/dev/null 2>&1; then
-    owner=$(docker inspect --format '{{index .Config.Labels "io.octojoom.local-proxy"}}' octojoom-local-proxy) || return 1
+  if v4Docker inspect octojoom-local-proxy >/dev/null 2>&1; then
+    owner=$(v4NetworkDockerScalar inspect --format '{{index .Config.Labels "io.octojoom.local-proxy"}}' octojoom-local-proxy) || return 1
     [ "$owner" = v4 ] || { v4Error 'An unrelated container owns the local-proxy name.' 3; return 3; }
-    scope=$(docker inspect --format '{{index .Config.Labels "io.octojoom.local-root"}}' octojoom-local-proxy) || return 1
+    scope=$(v4NetworkDockerScalar inspect --format '{{index .Config.Labels "io.octojoom.local-root"}}' octojoom-local-proxy) || return 1
     if [ "$scope" != "$root" ]; then
-      mounts=$(docker inspect --format '{{json .Mounts}}' octojoom-local-proxy) || return 1
-      jq -e --arg source "$root/routes" 'any(.[]; .Destination=="/routes" and .Source==$source)' <<<"$mounts" >/dev/null || {
+      mounts=$(v4NetworkDockerScalar inspect --format '{{json .Mounts}}' octojoom-local-proxy) || return 1
+      jq -e --arg source "$host_root/routes" 'any(.[]; .Destination=="/routes" and .Source==$source)' <<<"$mounts" >/dev/null || {
         v4Error 'The local proxy belongs to another OctoJoom configuration directory. Use that directory instead.' 3; return 3;
       }
     fi
   fi
-  if ! docker network inspect octojoom_local >/dev/null 2>&1; then
-    docker network create --label io.octojoom.local-network=v4 octojoom_local >/dev/null || return 1
+  if ! v4Docker network inspect octojoom_local >/dev/null 2>&1; then
+    v4Docker network create --label io.octojoom.local-network=v4 octojoom_local >/dev/null || return 1
   else
-    owner=$(docker network inspect --format '{{index .Labels "io.octojoom.local-network"}}' octojoom_local) || return 1
+    owner=$(v4NetworkDockerScalar network inspect --format '{{index .Labels "io.octojoom.local-network"}}' octojoom_local) || return 1
     [ "$owner" = v4 ] || { v4Error 'An unrelated Docker network owns the local TLS network name.' 3; return 3; }
   fi
-  jq -n --arg root "$root" --arg http "$http" --arg https "$https" '{
+  jq -n --arg root "$root" --arg host_root "$host_root" --arg http "$http" --arg https "$https" '{
     name:"octojoom-local",services:{proxy:{image:"traefik:v3.6",container_name:"octojoom-local-proxy",
       restart:"unless-stopped",labels:{"io.octojoom.local-proxy":"v4","io.octojoom.local-root":$root},
       command:["--entrypoints.web.address=:80","--entrypoints.websecure.address=:443","--providers.file.directory=/routes","--providers.file.watch=true","--log.level=WARN"],
       ports:[("127.0.0.1:"+$http+":80"),("127.0.0.1:"+$https+":443")],
-      volumes:[{type:"bind",source:($root+"/routes"),target:"/routes",read_only:true},{type:"bind",source:($root+"/certs"),target:"/certs",read_only:true}],
+      volumes:[{type:"bind",source:($host_root+"/routes"),target:"/routes",read_only:true},{type:"bind",source:($host_root+"/certs"),target:"/certs",read_only:true}],
       networks:{local:{}}
     }},networks:{local:{external:true,name:"octojoom_local"}}}' >"$file.tmp" || return 1
   chmod 600 "$file.tmp" && mv -f "$file.tmp" "$file" || return 1
-  docker compose -f "$file" config -q >/dev/null && docker compose -f "$file" up -d >&2
+  v4Docker compose -f "$host_file" config -q >/dev/null && v4Docker compose -f "$host_file" up -d >&2
 }
 
 # Stop only this installation's proxy when its final route has been removed.
 function v4LocalProxyStopIfIdle() {
-  local root="$1" owner scope mounts route
+  local root="$1" owner scope mounts route host_root
   for route in "$root"/routes/*.json; do [ ! -e "$route" ] || return 0; done
-  if ! docker inspect octojoom-local-proxy >/dev/null 2>&1; then return 0; fi
-  owner=$(docker inspect --format '{{index .Config.Labels "io.octojoom.local-proxy"}}' octojoom-local-proxy) || return 1
+  if ! v4Docker inspect octojoom-local-proxy >/dev/null 2>&1; then return 0; fi
+  owner=$(v4NetworkDockerScalar inspect --format '{{index .Config.Labels "io.octojoom.local-proxy"}}' octojoom-local-proxy) || return 1
   [ "$owner" = v4 ] || { v4Error 'Refusing to stop an unrelated local-proxy container.' 3; return 3; }
-  scope=$(docker inspect --format '{{index .Config.Labels "io.octojoom.local-root"}}' octojoom-local-proxy) || return 1
+  scope=$(v4NetworkDockerScalar inspect --format '{{index .Config.Labels "io.octojoom.local-root"}}' octojoom-local-proxy) || return 1
   if [ "$scope" != "$root" ]; then
-    mounts=$(docker inspect --format '{{json .Mounts}}' octojoom-local-proxy) || return 1
-    jq -e --arg source "$root/routes" 'any(.[]; .Destination=="/routes" and .Source==$source)' <<<"$mounts" >/dev/null || {
+    host_root=$(v4DockerHostPath "$root") || return $?
+    mounts=$(v4NetworkDockerScalar inspect --format '{{json .Mounts}}' octojoom-local-proxy) || return 1
+    jq -e --arg source "$host_root/routes" 'any(.[]; .Destination=="/routes" and .Source==$source)' <<<"$mounts" >/dev/null || {
       v4Error 'Refusing to stop a local proxy owned by another configuration directory.' 3; return 3;
     }
   fi
-  docker stop octojoom-local-proxy >/dev/null
+  v4Docker stop octojoom-local-proxy >/dev/null
 }
 
 function v4LocalRoute() {
@@ -11617,10 +11760,10 @@ function v4NetworkSyncRoute() {
 
 function v4ShareRunning() {
   local name="octojoom-share-${V4_KEY,,}" owner running
-  docker inspect "$name" >/dev/null 2>&1 || return 1
-  owner=$(docker inspect --format '{{index .Config.Labels "io.octojoom.share.site"}}' "$name") || return 1
+  v4Docker inspect "$name" >/dev/null 2>&1 || return 1
+  owner=$(v4NetworkDockerScalar inspect --format '{{index .Config.Labels "io.octojoom.share.site"}}' "$name") || return 1
   [ "$owner" = "$V4_HOST" ] || return 1
-  running=$(docker inspect --format '{{.State.Running}}' "$name") || return 1
+  running=$(v4NetworkDockerScalar inspect --format '{{.State.Running}}' "$name") || return 1
   [ "$running" = true ]
 }
 
@@ -11650,6 +11793,8 @@ function v4TlsSetup() {
     mkcert -install </dev/null >&2 || return 1
   fi
   caroot=$(mkcert -CAROOT) || return 1
+  caroot=${caroot%$'\r'}
+  case "${OSTYPE:-}" in msys*|cygwin*) caroot=$(cygpath -au -- "$caroot") || return 1;; esac
   [ -f "$caroot/rootCA.pem" ] || { v4Error 'mkcert has no local CA. Run TLS setup with trust installation enabled.' 3; return 3; }
   root="$VDM_SRC_PATH/local-tls"
   mkdir -p "$root/routes" "$root/certs" "$root/hosts" || return 1
@@ -11746,10 +11891,10 @@ function v4TlsDisable() {
 
 function v4ShareRemove() {
   local name="octojoom-share-${V4_KEY,,}" owner
-  if docker inspect "$name" >/dev/null 2>&1; then
-    owner=$(docker inspect --format '{{index .Config.Labels "io.octojoom.share.site"}}' "$name") || return 1
+  if v4Docker inspect "$name" >/dev/null 2>&1; then
+    owner=$(v4NetworkDockerScalar inspect --format '{{index .Config.Labels "io.octojoom.share.site"}}' "$name") || return 1
     [ "$owner" = "$V4_HOST" ] || { v4Error 'Refusing to remove a sharing container owned by another site.' 3; return 3; }
-    docker rm -f "$name" >/dev/null || return 1
+    v4Docker rm -f "$name" >/dev/null || return 1
   fi
   rm -f -- "$V4_DIR/.share.json"
 }
@@ -11767,28 +11912,29 @@ function v4ShareStart() {
   service="joomla${V4_KEY}"
   [ "$(jq -r '.webserver' <<<"$V4_META")" != nginx ] || service="nginx${V4_KEY}"
   id=$(v4Compose ps -q "$service") || return 1
+  id=${id%$'\r'}
   [ -n "$id" ] || { v4Error 'Start this site before sharing it.' 3; return 3; }
   if [ -f "$V4_DOCROOT/configuration.php" ]; then v4RealignConfiguration || return $?; fi
-  networks=$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$id") || return 1
+  networks=$(v4NetworkDockerScalar inspect --format '{{json .NetworkSettings.Networks}}' "$id") || return 1
   network=$(jq -er 'keys | (map(select(endswith("_default"))) + map(select(.!="octojoom_local"))) | .[0]' <<<"$networks") || { v4Error 'The site has no available private Docker network.' 3; return 3; }
   name="octojoom-share-${V4_KEY,,}"
-  if docker inspect "$name" >/dev/null 2>&1; then
-    owner=$(docker inspect --format '{{index .Config.Labels "io.octojoom.share.site"}}' "$name") || return 1
+  if v4Docker inspect "$name" >/dev/null 2>&1; then
+    owner=$(v4NetworkDockerScalar inspect --format '{{index .Config.Labels "io.octojoom.share.site"}}' "$name") || return 1
     [ "$owner" = "$V4_HOST" ] || { v4Error 'Another container already uses this sharing name.' 3; return 3; }
-    state=$(docker inspect --format '{{.State.Running}}' "$name") || return 1
+    state=$(v4NetworkDockerScalar inspect --format '{{.State.Running}}' "$name") || return 1
     if [ "$state" = true ]; then v4ShareStatus; return $?; fi
     v4ShareRemove || return $?
   fi
   # Tunnel HTTPS terminates at Cloudflare; the origin is the selected private HTTP service.
   # Database UIs, mail UIs and the local proxy are never tunnel targets.
-  docker run -d --name "$name" --network "$network" --label "io.octojoom.share.site=$V4_HOST" \
+  v4Docker run -d --name "$name" --network "$network" --label "io.octojoom.share.site=$V4_HOST" \
     --label io.octojoom.share=v4 --restart no "$image" tunnel --no-autoupdate --url "http://${service}:80" >/dev/null || return 1
   started=$SECONDS
   url=''
   while [ "$((SECONDS-started))" -lt "$timeout" ]; do
-    url=$(docker logs "$name" 2>&1 | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | head -n 1)
+    url=$(v4Docker logs "$name" 2>&1 | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | head -n 1)
     [ -z "$url" ] || break
-    state=$(docker inspect --format '{{.State.Running}}' "$name" 2>/dev/null) || break
+    state=$(v4NetworkDockerScalar inspect --format '{{.State.Running}}' "$name" 2>/dev/null) || break
     [ "$state" = true ] || break
     sleep 1
   done
@@ -11815,11 +11961,11 @@ function v4ShareStatus() {
   v4LoadSite "$(v4Get site)" || return $?
   name="octojoom-share-${V4_KEY,,}"
   running=false
-  if docker inspect "$name" >/dev/null 2>&1; then
-    owner=$(docker inspect --format '{{index .Config.Labels "io.octojoom.share.site"}}' "$name") || return 1
+  if v4Docker inspect "$name" >/dev/null 2>&1; then
+    owner=$(v4NetworkDockerScalar inspect --format '{{index .Config.Labels "io.octojoom.share.site"}}' "$name") || return 1
     [ "$owner" = "$V4_HOST" ] || { v4Error 'The sharing container belongs to another site.' 3; return 3; }
-    running=$(docker inspect --format '{{.State.Running}}' "$name") || return 1
-    if [ "$running" = true ]; then url=$(docker logs "$name" 2>&1 | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | head -n 1); fi
+    running=$(v4NetworkDockerScalar inspect --format '{{.State.Running}}' "$name") || return 1
+    if [ "$running" = true ]; then url=$(v4Docker logs "$name" 2>&1 | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | head -n 1); fi
   fi
   v4Result "$(jq -n --arg site "$V4_HOST" --arg url "$url" --argjson running "$running" '{site:$site,running:$running,url:(if $url=="" then null else $url end),temporary:true}')"
 }
@@ -11843,7 +11989,7 @@ function v4MailSettings() {
       if($count!==1){fwrite(STDERR,"Unsupported or missing literal mail property: ".$name."\n");exit(2);}
     }
     $mode=fileperms($path)&0777;$uid=fileowner($path);$gid=filegroup($path);$tmp=tempnam(dirname($path),".mail-");
-    if($tmp===false || file_put_contents($tmp,$replacement)===false || !chmod($tmp,$mode) || !chown($tmp,$uid) || !chgrp($tmp,$gid) || !rename($tmp,$path)){if($tmp!==false){@unlink($tmp);}exit(1);}
+    if($tmp===false || file_put_contents($tmp,$replacement)===false || !chmod($tmp,$mode) || (fileowner($tmp)!==$uid && !chown($tmp,$uid)) || (filegroup($tmp)!==$gid && !chgrp($tmp,$gid)) || !rename($tmp,$path)){if($tmp!==false){@unlink($tmp);}exit(1);}
   ' "$operation"
 }
 
@@ -11896,6 +12042,7 @@ function v4MailStatus() {
   v4LoadSite "$(v4Get site)" || return $?
   enabled=$(jq -r '.services.mail // false' <<<"$V4_META")
   if [ "$enabled" = true ]; then port=$(v4Compose port "mailpit${V4_KEY}" 8025 2>/dev/null) || port=''; fi
+  port=${port%$'\r'}
   v4Result "$(jq -n --argjson enabled "$enabled" --arg port "$port" '{capture_enabled:$enabled,inbox:(if $port=="" then null else "http://"+$port end)}')"
 }
 
@@ -12082,7 +12229,7 @@ function v4ServiceName() {
 # Return only public container state; inspect never exposes Config.Env.
 function v4ContainerState() {
   local service="$1" state
-  state=$(docker inspect --type container --format '{{json .State}}' "$service" 2>/dev/null) || {
+  state=$(v4Docker inspect --type container --format '{{json .State}}' "$service" 2>/dev/null) || {
     printf '{"status":"missing","running":false,"health":null}\n'; return 0;
   }
   jq -ce '{status:(.Status // "unknown"),running:(.Running == true),health:(.Health.Status // null)}' <<< "$state" 2>/dev/null || {
@@ -12388,8 +12535,8 @@ function v4SitePermissions() {
     source=$(jq -er --arg service "$V4_WEB_SERVICE" '.services[$service].volumes[] | select(.type=="bind" and .target=="/var/www/html" and (.read_only // false | not)) | .source' <<< "$compose") || {
       v4Error 'Permission repair requires the managed writable document-root bind mount.' 2; exit $?
     }
-    normalized="$V4_DOCROOT"
-    case "${OSTYPE:-}" in msys*|cygwin*) normalized=$(cygpath -m "$V4_DOCROOT") || exit 2; source="${source//\\//}" ;; esac
+    normalized=$(v4DockerHostPath "$V4_DOCROOT") || exit $?
+    case "${OSTYPE:-}" in msys*|cygwin*) source="${source//\\//}" ;; esac
     [ "$source" = "$normalized" ] || { v4Error 'The effective web volume differs from the managed document root.' 2; exit $?; }
     timeout=$(v4Get timeout 120)
     if ! { [[ "$timeout" =~ ^[0-9]+$ ]] && [ "$timeout" -gt 0 ] && [ "$timeout" -le 3600 ]; }; then
@@ -12557,7 +12704,7 @@ function v4SiteJoomla() {
 
 function v4SiteComposer() {
   v4ToolsLoad || return $?
-  local workdir phar version status=0
+  local workdir phar host_phar version status=0
   workdir=$(v4Get workdir /var/www/html)
   [[ "$workdir" == /* && "$workdir" != *$'\n'* ]] || { v4Error 'workdir must be an absolute container path.' 2; return $?; }
   [ "${#V4_ARGS[@]}" -gt 0 ] || V4_ARGS=(--version)
@@ -12567,8 +12714,9 @@ function v4SiteComposer() {
   else
     version=$(v4Get composer_version "$(jq -r '.tools.composer_version // "2.10.3"' <<< "$V4_META")")
     phar=$(v4ComposerPhar "$version") || return $?
+    host_phar=$(v4DockerHostPath "$phar") || return $?
     v4ToolRun v4Compose run --rm --no-deps -T --workdir "$workdir" \
-      --volume "$phar:/opt/octojoom/composer.phar:ro" --entrypoint php \
+      --volume "$host_phar:/opt/octojoom/composer.phar:ro" --entrypoint php \
       "$V4_WEB_SERVICE" /opt/octojoom/composer.phar --no-interaction "${V4_ARGS[@]}" || status=$?
   fi
   [ "$status" -eq 0 ] || return "$status"
@@ -12706,12 +12854,12 @@ function v4SiteDiagnose() {
   local checks='[]' name status detail rc=0 daemon=false facts urls url
   for name in bash jq docker tar gzip curl; do
     status=pass; detail='available'
-    if ! command -v "$name" >/dev/null 2>&1; then status=fail; detail='not installed'; rc=1; fi
+    if ! type -P "$name" >/dev/null 2>&1; then status=fail; detail='not installed'; rc=1; fi
     checks=$(jq -c --arg name "$name" --arg status "$status" --arg detail "$detail" '. + [{check:$name,status:$status,detail:$detail}]' <<< "$checks") || return 1
   done
-  if docker info >/dev/null 2>&1; then daemon=true; status=pass; detail='reachable'; else status=fail; detail='Docker daemon is unavailable or permission was denied'; rc=1; fi
+  if v4Docker info >/dev/null 2>&1; then daemon=true; status=pass; detail='reachable'; else status=fail; detail='Docker daemon is unavailable or permission was denied'; rc=1; fi
   checks=$(jq -c --arg status "$status" --arg detail "$detail" '. + [{check:"docker-daemon",status:$status,detail:$detail}]' <<< "$checks") || return 1
-  if docker compose version >/dev/null 2>&1; then status=pass; detail='available'; else status=fail; detail='Docker Compose v2 is required'; rc=1; fi
+  if v4Docker compose version >/dev/null 2>&1; then status=pass; detail='available'; else status=fail; detail='Docker Compose v2 is required'; rc=1; fi
   checks=$(jq -c --arg status "$status" --arg detail "$detail" '. + [{check:"docker-compose",status:$status,detail:$detail}]' <<< "$checks") || return 1
   if v4Has site; then
     v4ToolsLoad || return $?
@@ -13711,30 +13859,9 @@ JSON
 }
 
 function v4ActionSchema() {
-  local action="$1" schema description
-  schema=$(v4RequestSchema) || return 1
-  description=$(v4ActionSchemas | jq -c --arg action "$action" '.[$action] // empty') || return 1
-  [ -n "$description" ] || return 1
-  jq -c --argjson schema "$schema" '
-    . as $action | .fields = [.fields[] | . as $name |
-      select($schema.options[$name] != null) |
-      {name:$name,type:(if $name=="tables" then "array" elif $name=="command" then "string" else $schema.options[$name] end),required:(($action.required // [])|index($name)!=null),
-       default:(if (($action.defaults // {})|has($name)) then $action.defaults[$name] else null end),secret:($name|test("password|token")),
-       description:($name|gsub("_";" ")),
-       enum:(if $name == "webserver" then ["apache","nginx"]
-        elif $name == "profile" then ["local","server"]
-        elif $name == "database_engine" then ["mariadb","mysql","postgres"]
-        elif $name == "tls_mode" then (if $action.title=="Create Joomla site" or $action.title=="Import existing Joomla" then ["none","acme"] else ["none","local","acme"] end)
-        elif $name == "direction" then ["push","pull"]
-        elif $name == "target" and $action.title=="Project directory" then ["project","docroot"]
-        elif $name == "target" then ["site","admin","database","mail","directory"]
-        elif $name == "scope" then ["full","site","database"]
-        elif $name == "format" then ["tar.gz","zip"]
-        elif $name == "state" then ["all","running","stopped"]
-        elif $name == "channel" then ["master","staging"]
-        elif $name == "mode" then ["clone","replace","fresh"]
-        elif $name == "service" and $action.title=="Optional project service" then ["mail","redis","node"]
-        else [] end)}]' <<< "$description"
+  local forms
+  forms=$(v4FormSchemas) || return 1
+  jq -ec --arg action "$1" '.[$action] // empty' <<< "$forms"
 }
 
 function v4TuiEditField() {
@@ -13796,7 +13923,7 @@ function v4TuiRun() {
 function v4TuiAction() {
   local action="$1" site="${2:-}" schema request title field name current label selection changed missing target
   local choices=()
-  command -v jq >/dev/null 2>&1 || { showError 'Install jq to use the OctoJoom 4 command interface and site dashboard.'; return 3; }
+  type -P jq >/dev/null 2>&1 || { showError 'Install jq to use the OctoJoom 4 command interface and site dashboard.'; return 3; }
   schema=$(v4ActionSchema "$action") || { showError 'This action has no request form.'; return 2; }
   if [ -n "$site" ]; then
     schema=$(jq -c '.fields |= map(select(.name!="all" and .name!="sites"))' <<< "$schema") || return 1
@@ -13880,7 +14007,7 @@ function v4SiteDashboard() {
 function v4SitesMenu() {
   local response host description selection
   local choices=()
-  command -v jq >/dev/null 2>&1 || { showError 'Install jq to use the OctoJoom 4 site dashboard.'; return 3; }
+  type -P jq >/dev/null 2>&1 || { showError 'Install jq to use the OctoJoom 4 site dashboard.'; return 3; }
   while true; do
     response=$(v4Main site list --json) || { showError "$response"; return 1; }
     choices=(back 'Return to Joomla menu' batch 'Batch actions for multiple sites' create 'Create Joomla site' import 'Import an existing Joomla site' restore 'Restore a backup as a site' download 'Download Joomla source' diagnose 'Check for OctoJoom updates' update 'Install OctoJoom update')

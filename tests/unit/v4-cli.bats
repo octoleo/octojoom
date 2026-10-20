@@ -158,10 +158,12 @@ v4_cli_fixture() {
 }
 
 @test "v4 initialization uses explicit absolute paths without creating them" {
+  local physical_sandbox
+  physical_sandbox=$(cd "$SANDBOX" && pwd -P)
   V4_REQUEST=$(jq -cn --arg repo "$SANDBOX/new repo" --arg project "$SANDBOX/new projects" '{repo_path:$repo,project_path:$project}')
   v4Init
-  [ "$VDM_REPO_PATH" = "$SANDBOX/new repo" ]
-  [ "$VDM_PROJECT_PATH" = "$SANDBOX/new projects" ]
+  [ "$VDM_REPO_PATH" = "$physical_sandbox/new repo" ]
+  [ "$VDM_PROJECT_PATH" = "$physical_sandbox/new projects" ]
   [ ! -e "$VDM_REPO_PATH" ]
   [ ! -e "$VDM_PROJECT_PATH" ]
   V4_REQUEST='{"repo_path":"/tmp/../etc"}'
@@ -339,15 +341,101 @@ YAML
 }
 
 @test "v4 roots resolve existing aliases without creating missing suffixes" {
+  local physical_target
   mkdir -p "$SANDBOX/physical"
+  physical_target=$(cd "$SANDBOX/physical" && pwd -P)
   ln -s "$SANDBOX/physical" "$SANDBOX/alias"
   V4_REQUEST=$(jq -cn --arg repo "$SANDBOX/alias/new repo" --arg project "$SANDBOX/alias/new projects" --arg backup "$SANDBOX/alias/new backups" '{repo_path:$repo,project_path:$project,backup_path:$backup}')
   v4Init
-  [ "$VDM_REPO_PATH" = "$SANDBOX/physical/new repo" ]
-  [ "$VDM_PROJECT_PATH" = "$SANDBOX/physical/new projects" ]
-  [ "$VDM_BACKUP_PATH" = "$SANDBOX/physical/new backups" ]
+  [ "$VDM_REPO_PATH" = "$physical_target/new repo" ]
+  [ "$VDM_PROJECT_PATH" = "$physical_target/new projects" ]
+  [ "$VDM_BACKUP_PATH" = "$physical_target/new backups" ]
   [ ! -e "$VDM_REPO_PATH" ]
   ln -s "$SANDBOX/missing-target" "$SANDBOX/dangling"
   run v4CanonicalRoot "$SANDBOX/dangling/new"
   assert_status 2
+}
+
+@test "v4 rejects ambiguous batch targets and ignores empty selections" {
+  function v4DbExport() { v4Result "$V4_REQUEST"; }
+  run v4Main database export --site alpha.test --all --json
+  assert_status 2
+  run v4Main database export --all --sites '["alpha.test"]' --json
+  assert_status 2
+  run v4Main database export --site alpha.test --sites '["beta.test"]' --json
+  assert_status 2
+  run v4Main database export --site alpha.test --sites '[]' --json
+  assert_success
+  [ "$(jq -r .data.site <<< "$output")" = alpha.test ]
+  [ "$(jq -r '.data | has("sites")' <<< "$output")" = false ]
+  run v4Main database export --all --site '' --sites '[]' --json
+  assert_success
+  [ "$(jq -r '.data | has("site") or has("sites")' <<< "$output")" = false ]
+}
+
+@test "v4 native Windows jq keeps JSON paths literal and translates only files" {
+  local native="$SANDBOX/native" argument
+  local -a arguments=()
+  mkdir "$native"
+  cat > "$native/jq" <<'SH'
+#!/usr/bin/env bash
+printf '%s\0' "$@" > "$SANDBOX/jq-arguments"
+printf '%s\n' "$MSYS_NO_PATHCONV" "$MSYS2_ARG_CONV_EXCL" > "$SANDBOX/jq-environment"
+SH
+  chmod +x "$native/jq"
+  function cygpath() { printf 'C:/translated%s\n' "${@: -1}"; }
+  PATH="$native:$PATH" OSTYPE=msys jq -n --arg project '/c/Users/Dev/Projects' --rawfile body /tmp/request --slurpfile metadata /tmp/meta '. + {project:$project}' /tmp/input
+  while IFS= read -r -d '' argument; do arguments+=("$argument"); done < "$SANDBOX/jq-arguments"
+  [ "${arguments[0]}" = -b ]
+  [ "${arguments[4]}" = /c/Users/Dev/Projects ]
+  [ "${arguments[7]}" = C:/translated/tmp/request ]
+  [ "${arguments[10]}" = C:/translated/tmp/meta ]
+  [ "${arguments[11]}" = '. + {project:$project}' ]
+  [ "${arguments[12]}" = C:/translated/tmp/input ]
+  [ "$(cat "$SANDBOX/jq-environment")" = $'1\n*' ]
+}
+
+@test "v4 initializes platform before legacy privilege helpers run" {
+  local original_ostype="$OSTYPE"
+  OSTYPE=msys v4Init
+  [ "$OS_NUMBER" -eq 3 ]
+  OSTYPE=darwin v4Init
+  [ "$OS_NUMBER" -eq 2 ]
+  OSTYPE=linux-gnu v4Init
+  [ "$OS_NUMBER" -eq 1 ]
+  OSTYPE="$original_ostype"
+}
+
+@test "v4 native Docker boundary preserves container paths and code literally" {
+  local argument
+  local -a arguments=()
+  function docker() {
+    printf '%s\0' "$@" > "$SANDBOX/docker-arguments"
+    printf '%s\n' "$MSYS_NO_PATHCONV" "$MSYS2_ARG_CONV_EXCL" > "$SANDBOX/docker-environment"
+  }
+  OSTYPE=msys v4Docker exec --workdir /var/www/html joomlaalpha php -r 'echo "/var/www/html";'
+  while IFS= read -r -d '' argument; do arguments+=("$argument"); done < "$SANDBOX/docker-arguments"
+  [ "${arguments[2]}" = /var/www/html ]
+  [ "${arguments[6]}" = 'echo "/var/www/html";' ]
+  [ "$(cat "$SANDBOX/docker-environment")" = $'1\n*' ]
+}
+
+@test "v4 Windows Compose translates selected root without leaking caller settings" {
+  v4_cli_fixture
+  v4LoadSite alpha.test
+  local selected_root="$VDM_PROJECT_PATH" argument
+  local -a arguments=()
+  function cygpath() { printf 'C:/translated%s\n' "${@: -1}"; }
+  function docker() {
+    printf '%s\0' "$@" > "$SANDBOX/scoped-compose-arguments"
+    printf '%s\n' "$VDM_PROJECT_PATH" "${VDM_ALPHA_DB:-unset}" > "$SANDBOX/scoped-compose-environment"
+  }
+  export VDM_ALPHA_DB=stale_database
+  OSTYPE=msys v4Compose exec -T joomlaalpha php -v
+  while IFS= read -r -d '' argument; do arguments+=("$argument"); done < "$SANDBOX/scoped-compose-arguments"
+  [ "${arguments[2]}" = "C:/translated$V4_ENV_FILE" ]
+  [ "${arguments[4]}" = "C:/translated$V4_COMPOSE" ]
+  [ "$(cat "$SANDBOX/scoped-compose-environment")" = "C:/translated$selected_root"$'\nunset' ]
+  [ "$VDM_PROJECT_PATH" = "$selected_root" ]
+  [ "$VDM_ALPHA_DB" = stale_database ]
 }

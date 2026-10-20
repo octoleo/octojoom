@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
-# shellcheck disable=SC2034,SC2317,SC2154
+# Test fixtures use literal shell input and globals in dynamically loaded functions.
+# Bats executes each test independently.
+# shellcheck disable=SC2034,SC2317,SC2154,SC2016,SC2030,SC2031
 load ../helpers/common
 bats_require_minimum_version 1.5.0
 
@@ -130,7 +132,7 @@ v4Stopped() {
 @test "v4 tools: permissions use runtime ownership and physical traversal then restore service state" {
   V4_REQUEST='{"site":"abc.test","yes":true}'
   v4Compose() {
-    if [ "$1" = config ]; then jq -nc --arg source "$V4_DOCROOT" '{services:{joomlaabc:{volumes:[{type:"bind",source:$source,target:"/var/www/html"}]}}}'; return; fi
+    if [ "$1" = config ]; then jq -nc --arg source "$(v4DockerHostPath "$V4_DOCROOT")" '{services:{joomlaabc:{volumes:[{type:"bind",source:$source,target:"/var/www/html"}]}}}'; return; fi
     printf '%s\n' "${@: -1}" > "$STUB_DIR/permissions-script"
     printf '{"directories":8,"files":12,"symlinks_skipped":1,"configuration_private":true,"uid":33,"gid":33}\n'
   }
@@ -150,7 +152,7 @@ v4Stopped() {
 @test "v4 tools: failed permissions repair restores services and returns failure" {
   V4_REQUEST='{"site":"abc.test","yes":true}'
   v4Compose() {
-    if [ "$1" = config ]; then jq -nc --arg source "$V4_DOCROOT" '{services:{joomlaabc:{volumes:[{type:"bind",source:$source,target:"/var/www/html"}]}}}'; else return 17; fi
+    if [ "$1" = config ]; then jq -nc --arg source "$(v4DockerHostPath "$V4_DOCROOT")" '{services:{joomlaabc:{volumes:[{type:"bind",source:$source,target:"/var/www/html"}]}}}'; else return 17; fi
   }
   v4Quiesce() { V4_RESUME_SERVICES=(joomlaabc); }
   v4Resume() { printf resumed > "$STUB_DIR/permissions-state"; }
@@ -159,6 +161,24 @@ v4Stopped() {
   assert_failure
   [ "$(cat "$STUB_DIR/permissions-state")" = resumed ]
   [ ! -d "$VDM_REPO_PATH/joomla/available/abc.test/.operation.lock" ]
+}
+
+@test "v4 tools: permissions compare native Docker host paths against managed metadata" {
+  V4_REQUEST='{"site":"abc.test","yes":true}'
+  v4DockerHostPath() {
+    [ "$1" = "$V4_DOCROOT" ] || return 99
+    printf '%s\n' 'C:/Development Sites/abc/joomla'
+  }
+  v4Compose() {
+    if [ "$1" = config ]; then
+      printf '{"services":{"joomlaabc":{"volumes":[{"type":"bind","source":"C:/Development Sites/abc/joomla","target":"/var/www/html"}]}}}\n'
+    else printf '{"directories":1,"files":2,"symlinks_skipped":0,"configuration_private":true,"uid":33,"gid":33}\n'; fi
+  }
+  v4Quiesce() { V4_RESUME_SERVICES=(); }
+  v4Resume() { return 0; }
+  run v4SitePermissions
+  assert_success
+  [ "$(jq -r .docroot <<< "$output")" = "$VDM_PROJECT_PATH/abc/joomla" ]
 }
 
 @test "v4 tools: open print returns resource without launching browser" {
@@ -411,6 +431,18 @@ v4Stopped() {
   [ "$(jq -r '.stdout|fromjson|.[0]' <<< "$output")" = run ]
   [[ "$output" == *joomlaabc* ]]
   [[ "$output" == *composer.phar* ]]
+}
+
+@test "v4 tools: Composer converts only the PHAR host mount path" {
+  v4HasContainerTool() { return 1; }
+  v4ComposerPhar() { printf '%s\n' "$V4_DIR/tools/composer.phar"; }
+  v4DockerHostPath() { printf '%s\n' 'C:/Developer Tools/composer.phar'; }
+  v4Compose() { jq -nc '$ARGS.positional' --args -- "$@"; }
+  V4_ARGS=(--version)
+  run v4SiteComposer
+  assert_success
+  [ "$(jq -r '.stdout|fromjson|.[index("--volume")+1]' <<< "$output")" = 'C:/Developer Tools/composer.phar:/opt/octojoom/composer.phar:ro' ]
+  [ "$(jq -r '.stdout|fromjson|.[index("joomlaabc")+1]' <<< "$output")" = /opt/octojoom/composer.phar ]
 }
 
 @test "v4 tools: npm requires a real available tool service" {

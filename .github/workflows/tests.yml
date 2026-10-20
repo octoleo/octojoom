@@ -87,6 +87,35 @@ jobs:
           fi
           jq --version
 
+      - name: Ensure native Docker Compose CLI is available (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Only the client is needed: this job never starts a Docker daemon.
+          if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+            $clientRoot = Join-Path $env:RUNNER_TEMP 'octojoom-docker-cli'
+            $archive = Join-Path $env:RUNNER_TEMP 'docker-cli.zip'
+            Invoke-WebRequest 'https://download.docker.com/win/static/stable/x86_64/docker-29.6.2.zip' -OutFile $archive
+            Expand-Archive $archive -DestinationPath $clientRoot -Force
+            $clientBin = Join-Path $clientRoot 'docker'
+            $env:PATH = "$clientBin;$env:PATH"
+            Add-Content $env:GITHUB_PATH $clientBin
+          }
+          docker --version
+          if ($LASTEXITCODE -ne 0) { throw 'Native Docker CLI is unavailable.' }
+          docker compose version
+          if ($LASTEXITCODE -ne 0) {
+            $pluginDir = Join-Path $env:USERPROFILE '.docker/cli-plugins'
+            New-Item -ItemType Directory -Force $pluginDir | Out-Null
+            $plugin = Join-Path $pluginDir 'docker-compose.exe'
+            Invoke-WebRequest 'https://github.com/docker/compose/releases/download/v2.40.3/docker-compose-windows-x86_64.exe' -OutFile $plugin
+            if ((Get-FileHash $plugin -Algorithm SHA256).Hash.ToLowerInvariant() -ne '4c864dd7f879dd40366e087e68a8a02cbcf018be0128867b13369898e67e1532') {
+              throw 'Docker Compose download checksum mismatch.'
+            }
+          }
+          docker compose version
+          if ($LASTEXITCODE -ne 0) { throw 'Native Docker Compose CLI is unavailable.' }
+
       - name: Show the tools under test
         run: |
           bash --version | head -n 1
@@ -95,8 +124,9 @@ jobs:
 
       - name: Run the test suite
         env:
-          # docker compose config only runs for real on Linux, where docker is installed
+          # Keep legacy daemon checks Linux-only; the Windows config check is separate.
           OCTOJOOM_NO_REAL_DOCKER: ${{ runner.os != 'Linux' && '1' || '' }}
+          OCTOJOOM_REQUIRE_NATIVE_COMPOSE: ${{ runner.os == 'Windows' && '1' || '' }}
         run: bash tests/run.sh
 
   docker-integration:

@@ -110,13 +110,23 @@ setup() {
 }
 
 @test "interruption after publishing the update restores the previous executable" {
+  local canonical_target
+  canonical_target="$(cd -- "$(dirname -- "$UPDATE_TARGET")" && pwd -P)/$(basename -- "$UPDATE_TARGET")"
+  # macOS exposes /var through /private/var. Exercise the same alias/canonical
+  # boundary on every platform so the injected signal follows the real rename.
+  ln -s "$SANDBOX/bin" "$SANDBOX/bin-alias"
+  V4_REQUEST=$(jq --arg path "$SANDBOX/bin-alias/octojoom" '.install_path=$path' <<<"$V4_REQUEST")
   mv() {
     local source="${3:-}" destination="${4:-}"
     command mv "$@" || return $?
-    if [[ "$source" == */.octojoom-update.* ]] && [ "$destination" = "$UPDATE_TARGET" ]; then kill -TERM "${BASHPID}"; fi
+    if [[ "$source" == */.octojoom-update.* ]] && [ "$destination" = "$canonical_target" ]; then
+      touch "$SANDBOX/signal-injected"
+      kill -TERM "${BASHPID}"
+    fi
   }
   run v4UpdateApply
   assert_status 143
+  [ -f "$SANDBOX/signal-injected" ]
   cmp -s "$SANDBOX/original" "$UPDATE_TARGET"
   [ ! -d "${UPDATE_TARGET}.update.lock" ]
 }

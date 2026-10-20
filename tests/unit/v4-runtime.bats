@@ -1,4 +1,7 @@
 #!/usr/bin/env bats
+# The loader supplies functions that use these globals and invoke test doubles.
+# Each Bats test runs in its own subshell; PHP/Compose fixtures retain literals.
+# shellcheck disable=SC2034,SC2030,SC2031,SC2317,SC2329,SC2016
 load ../helpers/common
 
 setup() {
@@ -37,7 +40,7 @@ setup() {
 @test "nginx routes Joomla API PATH_INFO to FPM with custom docroot and private config" {
   V4_META=$(jq '.webserver="nginx" | .image="joomla:5.4.9-php8.3-fpm"' <<< "$V4_META")
   v4GenerateCompose
-  jq -e --arg root "$V4_DOCROOT" '.services.nginxexample.ports[0].host_ip=="127.0.0.1" and .services.joomlaexample.ports==null and .services.joomlaexample.volumes[0].source==$root and .services.nginxexample.volumes[0].source==$root and .services.nginxexample.volumes[0].read_only==true' "$V4_COMPOSE"
+  jq -e --arg root "$(v4DockerHostPath "$V4_DOCROOT")" '.services.nginxexample.ports[0].host_ip=="127.0.0.1" and .services.joomlaexample.ports==null and .services.joomlaexample.volumes[0].source==$root and .services.nginxexample.volumes[0].source==$root and .services.nginxexample.volumes[0].read_only==true' "$V4_COMPOSE"
   grep -F 'location /api/' "$V4_DIR/nginx.generated.conf"
   grep -F 'fastcgi_param PATH_INFO $octojoom_path_info;' "$V4_DIR/nginx.generated.conf"
   grep -F 'location ~ ^/configuration\.php(/|$) { deny all; }' "$V4_DIR/nginx.generated.conf"
@@ -369,4 +372,45 @@ HOOK
   [[ "$output" == *'Stop the active share'* ]]
   [ ! -e "$SANDBOX/image-touched" ]
   [ ! -e "$SANDBOX/config-touched" ]
+}
+
+@test "Docker host path conversion uses native Windows paths only on Windows" {
+  local original_type="$OSTYPE"
+  cygpath() { [ "$1" = -am ] && [ "$2" = -- ] && [ "$3" = '/c/Users/Example Person/site' ] && printf 'C:/Users/Example Person/site\n'; }
+  OSTYPE=msys
+  run v4DockerHostPath '/c/Users/Example Person/site'
+  assert_success
+  [ "$output" = 'C:/Users/Example Person/site' ]
+  OSTYPE=linux-gnu
+  run v4DockerHostPath '/home/example/site'
+  assert_success
+  [ "$output" = '/home/example/site' ]
+  OSTYPE="$original_type"
+}
+
+@test "generated Compose converts host bindings while preserving metadata and container paths" {
+  v4DockerHostPath() { printf 'C:/Users/Example Person/Projects/example\n'; }
+  local original="$V4_META"
+  v4GenerateCompose
+  jq -e '.services.joomlaexample.volumes[0].source=="C:/Users/Example Person/Projects/example/public/joomla" and .services.joomlaexample.volumes[0].target=="/var/www/html" and .services.mariadbexample.volumes[0].source=="C:/Users/Example Person/Projects/example/db" and .services.mariadbexample.volumes[0].target=="/var/lib/mysql" and .services.joomlaexample.working_dir=="/var/www/html"' "$V4_COMPOSE"
+  [ "$V4_META" = "$original" ]
+}
+
+@test "native Windows Compose resolves generated host paths without a Docker daemon" {
+  is_windows || skip 'Native Windows Compose validation runs on Windows'
+  local native_docker
+  # This config-only check is independent of daemon-based test exclusions.
+  native_docker=$(PATH="${PATH//${HELPERS_DIR}\/bin:/}" type -P docker || true)
+  if [ -z "$native_docker" ] || ! "$native_docker" compose version >/dev/null 2>&1; then
+    if [ "${OCTOJOOM_REQUIRE_NATIVE_COMPOSE:-}" = 1 ]; then
+      printf 'Windows CI requires the native Docker Compose CLI.\n' >&2
+      return 1
+    fi
+    skip 'Native Docker Compose CLI is unavailable'
+  fi
+  v4GenerateCompose
+  local file env_file expected
+  file=$(v4DockerHostPath "$V4_COMPOSE"); env_file=$(v4DockerHostPath "$V4_ENV_FILE"); expected=$(v4DockerHostPath "$V4_DOCROOT")
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$native_docker" compose --file "$file" --env-file "$env_file" config --format json > "$SANDBOX/resolved-compose.json"
+  jq -e --arg expected "$expected" '.services.joomlaexample.volumes[] | select(.target=="/var/www/html") | (.source|gsub("\\\\";"/")|ascii_downcase)==($expected|ascii_downcase) and .target=="/var/www/html"' "$SANDBOX/resolved-compose.json"
 }

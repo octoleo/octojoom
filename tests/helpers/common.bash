@@ -84,7 +84,11 @@ octojoom_globals() {
 # the sandbox
 
 octojoom_setup() {
+  bats_require_minimum_version 1.5.0
   SANDBOX="${BATS_TEST_TMPDIR}/sandbox"
+  mkdir -p "$SANDBOX"
+  # Match production path normalization, including macOS /var -> /private/var.
+  SANDBOX=$(cd "$SANDBOX" && pwd -P)
   STUB_DIR="${SANDBOX}/stub"
   STUB_SANDBOX="${SANDBOX}"
   STUB_KILL_PID="${BASHPID}"
@@ -110,7 +114,7 @@ octojoom_setup() {
   octojoom_load
   octojoom_globals
   # on Windows the script calls docker.exe; send it to the docker stand-in
-  # shellcheck disable=SC2317
+  # shellcheck disable=SC2317,SC2329
   docker.exe() { docker "$@"; }
   export -f docker.exe
 
