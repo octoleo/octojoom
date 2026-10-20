@@ -43,3 +43,26 @@ setup() { octojoom_setup; octojoom_config; }
   assert_success
   [ "$(jq -r '.fields[]|select(.name=="commands")|.type' <<< "$output")" = array ]
 }
+
+@test "v4 SQL menu command captures a structured result instead of opening a terminal" {
+  v4Main() {
+    printf '%s\n' "$@" > "$SANDBOX/invocation"
+    cat > "$SANDBOX/request"
+    printf '%s\n' '{"ok":true,"data":{"stdout":"1"},"error":null}'
+  }
+  whiptail() { printf '%s\n' "$@" > "$SANDBOX/display"; }
+  run v4TuiRun database.console '{"site":"alpha.test","command":"SELECT 1"}' SQL
+  assert_success
+  grep -qx -- '--json' "$SANDBOX/invocation"
+  [ "$(jq -r .command "$SANDBOX/request")" = 'SELECT 1' ]
+  grep -q 'stdout' "$SANDBOX/display"
+}
+
+@test "v4 menu forms expose conditional creation inputs and correct path choices" {
+  run v4ActionSchema site.create
+  assert_success
+  [ "$(jq -r '.conditions[]|select(.when.install==true)|.required[0]' <<< "$output")" = admin_email ]
+  run v4ActionSchema site.path
+  assert_success
+  [ "$(jq -c '.fields[]|select(.name=="target")|.enum' <<< "$output")" = '["project","docroot"]' ]
+}

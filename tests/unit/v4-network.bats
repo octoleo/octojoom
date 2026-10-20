@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 # shellcheck shell=bash
+# Fixture literals and dynamically loaded function overrides are intentional.
+# shellcheck disable=SC2317
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2329
 load ../helpers/common
 
@@ -83,6 +85,26 @@ setup() {
   [ "$(cat "$hosts")" = '127.0.0.1 demo.test.other # octojoom-v4:demo.test.other' ]
 }
 
+@test "an IPv6-only manual host mapping gains the required IPv4 loopback entry" {
+  local hosts="$SANDBOX/hosts"
+  printf '::1 demo.test # manual IPv6\n' >"$hosts"
+  V4_REQUEST=$(jq --arg path "$hosts" '.hosts_file=$path' <<<"$V4_REQUEST")
+  v4HostsEntry add demo.test
+  grep -q '^127.0.0.1.*demo.test' "$hosts"
+  v4HostsEntry remove demo.test
+  [ "$(cat "$hosts")" = '::1 demo.test # manual IPv6' ]
+}
+
+@test "Windows CRLF host entries retain conflict protection and exact marker ownership" {
+  local hosts="$SANDBOX/hosts"
+  printf '192.0.2.8 demo.test\r\n127.0.0.1 other.test # octojoom-v4:other.test\r\n' >"$hosts"
+  V4_REQUEST=$(jq --arg path "$hosts" '.hosts_file=$path' <<<"$V4_REQUEST")
+  run v4HostsEntry add demo.test
+  assert_status 3
+  v4HostsEntry remove other.test
+  [ "$(wc -l <"$hosts" | tr -d ' ')" -eq 1 ]
+}
+
 @test "TLS requires explicit confirmation before touching trust or Docker" {
   V4_REQUEST='{"site":"demo.test","yes":false}'
   run v4TlsSetup
@@ -130,6 +152,88 @@ setup() {
   [ "$(cat "$root/certs/demo.test-key.pem")" = old-key ]
   [ "$(cat "$root/routes/demo.test.json")" = old-route ]
   jq -e '.tls.mode=="none"' "$SANDBOX/last-meta.json"
+  [ ! -d "$root/.lock" ]
+}
+
+@test "TLS setup can leave hostname resolution unmanaged" {
+  local root="$VDM_SRC_PATH/local-tls"
+  mkdir -p "$SANDBOX/ca"
+  printf '%s\n' ca >"$SANDBOX/ca/rootCA.pem"
+  V4_REQUEST='{"site":"demo.test","yes":true,"install_trust":false,"update_hosts":false,"hosts_file":"/missing/unmanaged/hosts"}'
+  mkcert() {
+    if [ "$1" = -CAROOT ]; then printf '%s\n' "$SANDBOX/ca"; return; fi
+    printf '%s\n' cert >"$2"
+    printf '%s\n' key >"$4"
+  }
+  v4Lock() { mkdir "$1"; }
+  v4Unlock() { rmdir "$1"; }
+  v4LocalProxyEnsure() { return 0; }
+  v4ApplyConfig() { printf '%s\n' "$1" >"$SANDBOX/last-meta.json"; }
+  run v4TlsSetup
+  assert_success
+  jq -e '.tls.mode=="local" and .tls.update_hosts==false' "$SANDBOX/last-meta.json"
+  [ ! -f "$root/hosts/demo.test.json" ]
+}
+
+@test "local proxy refuses to join an unrelated same-named network" {
+  docker() {
+    case "$1 $2" in
+      'inspect octojoom-local-proxy') return 1 ;;
+      'network inspect') if [ "${3:-}" = --format ]; then printf '%s\n' unrelated; fi ;;
+      *) return 1 ;;
+    esac
+  }
+  run v4LocalProxyEnsure "$SANDBOX/tls" 80 443
+  assert_status 3
+  [[ "$output" == *'unrelated Docker network'* ]]
+}
+
+@test "idle proxy cleanup refuses another OctoJoom configuration directory" {
+  docker() {
+    if [[ "$*" == *'json .Mounts'* ]]; then printf '%s\n' '[{"Destination":"/routes","Source":"/another/installation/routes"}]';
+    elif [[ "$*" == *'--format'* ]]; then printf '%s\n' v4;
+    elif [ "$1" = stop ]; then touch "$SANDBOX/should-not-stop";
+    else return 0; fi
+  }
+  run v4LocalProxyStopIfIdle "$SANDBOX/tls"
+  assert_status 3
+  [ ! -f "$SANDBOX/should-not-stop" ]
+}
+
+@test "proxy cleanup keeps the proxy running while another route exists" {
+  local root="$SANDBOX/tls"
+  mkdir -p "$root/routes"
+  printf '{}\n' >"$root/routes/other.test.json"
+  docker() { touch "$SANDBOX/should-not-inspect"; return 1; }
+  run v4LocalProxyStopIfIdle "$root"
+  assert_success
+  [ ! -f "$SANDBOX/should-not-inspect" ]
+}
+
+@test "disabling the final TLS site deletes leaf keys and stops only its proxy" {
+  local root="$VDM_SRC_PATH/local-tls"
+  mkdir -p "$root/routes" "$root/certs" "$root/hosts"
+  printf '{}\n' >"$root/routes/demo.test.json"
+  printf 'certificate\n' >"$root/certs/demo.test.pem"
+  printf 'private-key\n' >"$root/certs/demo.test-key.pem"
+  printf '{"file":"/etc/hosts"}\n' >"$root/hosts/demo.test.json"
+  V4_META=$(jq '.tls.mode="local"' <<<"$V4_META")
+  v4Lock() { mkdir "$1"; }
+  v4Unlock() { rmdir "$1"; }
+  v4ApplyConfig() { printf '%s\n' "$1" >"$SANDBOX/last-meta.json"; }
+  docker() {
+    if [[ "$*" == *'json .Mounts'* ]]; then jq -n --arg root "$VDM_SRC_PATH/local-tls/routes" '[{Destination:"/routes",Source:$root}]';
+    elif [[ "$*" == *'--format'* ]]; then printf '%s\n' v4;
+    elif [ "$1" = stop ]; then printf '%s\n' "$2" >"$SANDBOX/stopped";
+    else return 0; fi
+  }
+  run v4TlsDisable
+  assert_success
+  jq -e '.local_tls==false and .host_trust_retained==true' <<<"$output"
+  [ ! -f "$root/routes/demo.test.json" ]
+  [ ! -f "$root/certs/demo.test-key.pem" ]
+  [ -f "$root/hosts/demo.test.json" ]
+  [ "$(cat "$SANDBOX/stopped")" = octojoom-local-proxy ]
   [ ! -d "$root/.lock" ]
 }
 

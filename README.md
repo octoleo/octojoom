@@ -54,7 +54,7 @@ It provides both:
 
 ### OctoJoom 4.0
 
-Use the Joomla **Sites** dashboard to select a project and manage its runtime, database, backups, local HTTPS, mail and developer tools. Every action also has a noninteractive command with validated JSON input/output for automation and future desktop clients. See the [command guide](docs/COMMANDS.md) and [release scope](docs/V4-IMPLEMENTATION.md).
+Use the Joomla **Sites** dashboard to select a project and manage its runtime, database, backups, local HTTPS, mail and developer tools. Every action also has a noninteractive command with validated JSON input/output for automation and future desktop clients. See the [command guide](docs/COMMANDS.md) and [release scope](docs/V4-IMPLEMENTATION.md) and [Joomla addon capability mapping](docs/ADDON-PARITY.md).
 
 ### ✨ Key Features
 - 🚀 Quick Joomla + OpenSSH Docker deployment
@@ -165,7 +165,7 @@ octojoom -h
 3. Install dependencies:
 
    ```bash
-   choco install curl awk newt
+   choco install curl awk newt jq
    ```
 4. Install Octojoom:
 
@@ -192,13 +192,13 @@ Install dependencies manually for your distribution:
 
 ```bash
 # Fedora / CentOS / RHEL
-sudo dnf install -y bash curl newt
+sudo dnf install -y bash curl newt jq
 
 # Arch / Manjaro
-sudo pacman -S --needed bash curl newt
+sudo pacman -S --needed bash curl newt jq
 
 # openSUSE
-sudo zypper install -y bash curl newt
+sudo zypper install -y bash curl newt jq
 
 # Install Octojoom
 sudo curl -L "https://raw.githubusercontent.com/octoleo/octojoom/refs/heads/master/src/octojoom" -o /usr/local/bin/octojoom

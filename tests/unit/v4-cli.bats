@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 # shellcheck shell=bash
+# Fixture literals and dynamically loaded function overrides are intentional.
+# shellcheck disable=SC2016,SC2030,SC2031,SC2317
 # shellcheck disable=SC2034,SC2154
 
 load ../helpers/common
@@ -295,5 +297,57 @@ YAML
   assert_success
   [ "$(jq -r .data.stdout <<< "$output")" = 1 ]
   run v4Main database console --site alpha.test --json
+  assert_status 2
+}
+
+@test "v4 rejects supported option names that do not belong to the action" {
+  function v4SiteInfo() { printf 'HANDLER SHOULD NOT RUN\n'; }
+  v4Main site info --site alpha.test --php-version 8.3 --json > "$SANDBOX/result" 2> "$SANDBOX/errors" && return 1
+  [ "$(jq -r .error.code "$SANDBOX/result")" -eq 2 ]
+  [[ "$(jq -r .error.message "$SANDBOX/result")" == *php_version* ]]
+  [[ "$(cat "$SANDBOX/result")" != *'HANDLER SHOULD NOT RUN'* ]]
+  [ ! -s "$STUB_DIR/commands.log" ]
+}
+
+@test "v4 action guard accepts normalized aliases and common flags" {
+  function v4SiteCreate() { v4Result "$(jq -c '{database_engine,activate}' <<< "$V4_REQUEST")"; }
+  run v4Main --type joomla --task setup --db-engine mysql --start=false --no-interaction --yes --json
+  assert_success
+  [ "$(jq -r .data.database_engine <<< "$output")" = mysql ]
+  [ "$(jq -r .data.activate <<< "$output")" = false ]
+}
+
+@test "v4 publishes desktop form descriptors from the TUI contract" {
+  run v4Main site schema --json
+  assert_success
+  [ "$(jq -r '.data.form_schemas["site.path"].fields[] | select(.name=="target") | .enum | join(",")' <<< "$output")" = project,docroot ]
+  [ "$(jq -r '.data.form_schemas["site.create"].fields[] | select(.name=="admin_password") | .secret' <<< "$output")" = true ]
+  [ "$(jq -r '.data.action_schemas["site.create"].conditions[0].required[0]' <<< "$output")" = admin_email ]
+}
+
+@test "v4 validates explicit and persisted hook maps with the shared validator" {
+  V4_REQUEST='{"hooks":{"post-start":[["php","-v"]]},"trust_hooks":false}'
+  v4ValidateRequest
+  V4_REQUEST='{"hooks":{"unknown-event":[["php","-v"]]}}'
+  run v4ValidateRequest
+  assert_status 2
+  v4_cli_fixture
+  local metadata
+  metadata=$(jq '.hooks={"post-start":[["php",{}]]}' "$V4_DIR/project.json")
+  run v4ValidateMetadata "$metadata"
+  assert_failure
+}
+
+@test "v4 roots resolve existing aliases without creating missing suffixes" {
+  mkdir -p "$SANDBOX/physical"
+  ln -s "$SANDBOX/physical" "$SANDBOX/alias"
+  V4_REQUEST=$(jq -cn --arg repo "$SANDBOX/alias/new repo" --arg project "$SANDBOX/alias/new projects" --arg backup "$SANDBOX/alias/new backups" '{repo_path:$repo,project_path:$project,backup_path:$backup}')
+  v4Init
+  [ "$VDM_REPO_PATH" = "$SANDBOX/physical/new repo" ]
+  [ "$VDM_PROJECT_PATH" = "$SANDBOX/physical/new projects" ]
+  [ "$VDM_BACKUP_PATH" = "$SANDBOX/physical/new backups" ]
+  [ ! -e "$VDM_REPO_PATH" ]
+  ln -s "$SANDBOX/missing-target" "$SANDBOX/dangling"
+  run v4CanonicalRoot "$SANDBOX/dangling/new"
   assert_status 2
 }

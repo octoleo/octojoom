@@ -47,14 +47,14 @@ jobs:
 
       - name: Lint the tests
         run: |
-          shellcheck -x tests/run.sh tests/test-clone.sh tests/test-clone-flow.sh tests/integration/clone.sh tests/integration/migration.sh tests/integration/v4.sh \
+          shellcheck -x tests/run.sh tests/test-clone.sh tests/test-clone-flow.sh tests/integration/clone.sh tests/integration/migration.sh tests/integration/v4.sh tests/integration/v4-migration.sh \
             tests/helpers/common.bash tests/helpers/stub-lib.bash tests/helpers/bin/*
           find tests -path tests/.cache -prune -o -name '*.bats' -print0 | xargs -0 shellcheck -s bash
 
   test:
     name: Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -121,17 +121,17 @@ jobs:
         run: timeout --signal=TERM --kill-after=30s 12m bash tests/integration/migration.sh
 
   v4-integration:
-    name: Joomla 4.0 workflow (${{ matrix.scenario }})
+    name: OctoJoom 4.0 workflow (${{ matrix.scenario }})
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        scenario: [lifecycle, mysql, postgres]
+        scenario: [lifecycle, mysql, postgres, migration]
     steps:
       - uses: actions/checkout@v4
       - name: Install archive and local certificate tools
-        run: sudo apt-get update && sudo apt-get install -y jq zip unzip mkcert libnss3-tools
+        run: sudo apt-get update && sudo apt-get install -y jq zip unzip mkcert libnss3-tools openssh-server rsync
       - name: Exercise real Joomla environments and recovery
         env:
           V4_SCENARIO: ${{ matrix.scenario }}

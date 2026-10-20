@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end v4 CLI acceptance against real Joomla/PHP and database containers.
-# Run separately in CI: V4_SCENARIO=lifecycle|mysql|postgres bash tests/integration/v4.sh
+# Run separately in CI: V4_SCENARIO=lifecycle|mysql|postgres|migration bash tests/integration/v4.sh
 # This is intentionally an actual Joomla installation, not a mock JConfig fixture.
-# TLS uses a disposable CA and hosts file, without installing host trust. Public
-# tunnels are deliberately excluded from this deterministic acceptance gate.
+# TLS uses a disposable CA and hosts file, without installing host trust.
+# Lifecycle sharing exposes only this generated fixture for the test duration.
 # Every resource is scoped to a random test identity; cleanup never prunes Docker.
 
 set -e -o pipefail
@@ -11,6 +11,7 @@ set -e -o pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../../src/octojoom"
 SCENARIO="${V4_SCENARIO:-lifecycle}"
+if [ "${SCENARIO}" = migration ]; then exec bash "${TEST_DIR}/v4-migration.sh"; fi
 JOOMLA_VERSION='5.4.9'
 PHP_VERSION='8.2'
 PHP_TARGET_VERSION='8.3'
@@ -54,14 +55,17 @@ BACKUP_PATH="${OCTOJOOM_HOME}/Backups"
 NETWORK="octojoom-v4-${RUN_ID}"
 SOURCE_KEY="source${RUN_ID}"
 TARGET_KEY="target${RUN_ID}"
+BLOCKED_KEY="blocked${RUN_ID}"
 SOURCE_SITE="source.${RUN_ID}.invalid"
 TARGET_SITE="target.${RUN_ID}.invalid"
+BLOCKED_SITE="blocked.${RUN_ID}.invalid"
 ADMIN_PASSWORD="Integration-Admin-${RUN_ID}"
 DB_PASSWORD="Integration-Db-${RUN_ID}"
 ROOT_PASSWORD="Integration-Root-${RUN_ID}"
 RESULT="${WORK}/result.json"
 ERROR_OUTPUT="${WORK}/errors.log"
-RESOURCE_KEYS=("${SOURCE_KEY}" "${TARGET_KEY}")
+RESOURCE_KEYS=("${SOURCE_KEY}" "${TARGET_KEY}" "${BLOCKED_KEY}")
+RESOURCE_SITES=("${SOURCE_SITE}" "${TARGET_SITE}" "${BLOCKED_SITE}")
 TLS_RESOURCES_OWNED=false
 mkdir -p "${WORK}/bin" "${OCTOJOOM_HOME}/.config/octojoom" "${REPO_PATH}" "${PROJECT_PATH}" "${BACKUP_PATH}"
 printf '127.0.0.1 localhost\n' >"${WORK}/hosts"
@@ -86,15 +90,19 @@ cleanup() {
     [ ! -s "${ERROR_OUTPUT}" ] || tail -80 "${ERROR_OUTPUT}" >&2
     for key in "${RESOURCE_KEYS[@]}"; do
       for service in joomla nginx mariadb mysql postgres; do
-        timeout 10s "${DOCKER_BIN}" inspect --format '{{.Name}} {{json .State}}' "${service}${key}" 2>/dev/null >&2
-        timeout 10s "${DOCKER_BIN}" logs --tail 40 "${service}${key}" 2>/dev/null >&2
+        if timeout 10s "${DOCKER_BIN}" inspect --format '{{.Name}} {{json .State}}' "${service}${key}" >&2 2>/dev/null; then
+          timeout 10s "${DOCKER_BIN}" logs --tail 40 "${service}${key}" >&2 2>&1
+        fi
       done
+      if timeout 10s "${DOCKER_BIN}" inspect "octojoom-share-${key}" >/dev/null 2>&1; then
+        timeout 10s "${DOCKER_BIN}" logs --tail 40 "octojoom-share-${key}" >&2 2>&1
+      fi
     done
     if [ "${TLS_RESOURCES_OWNED}" = true ]; then
-      timeout 10s "${DOCKER_BIN}" logs --tail 40 octojoom-local-proxy 2>/dev/null >&2
+      timeout 10s "${DOCKER_BIN}" logs --tail 40 octojoom-local-proxy >&2 2>&1
     fi
   fi
-  for site in "${SOURCE_SITE}" "${TARGET_SITE}"; do
+  for site in "${RESOURCE_SITES[@]}"; do
     compose="${REPO_PATH}/joomla/available/${site}/docker-compose.yml"
     if [ -f "${compose}" ] && [ -f "${compose%/*}/.env" ]; then
       timeout 60s "${DOCKER_BIN}" compose --env-file "${compose%/*}/.env" -f "${compose}" down --volumes --remove-orphans >/dev/null 2>&1
@@ -106,6 +114,7 @@ cleanup() {
   fi
   # Exact names cover an interrupted create that has not published its files yet.
   for key in "${RESOURCE_KEYS[@]}"; do
+    timeout 15s "${DOCKER_BIN}" rm -fv "octojoom-share-${key}" >/dev/null 2>&1
     for service in joomla nginx mariadb mysql postgres phpmyadmin adminer mailcatcher mailpit redis node; do
       timeout 15s "${DOCKER_BIN}" rm -fv "${service}${key}" >/dev/null 2>&1
     done
@@ -332,7 +341,7 @@ sql "${TARGET_KEY}" "UPDATE octojoom_integration_marker SET value='target-only' 
 api site start "$(request_for_site "${SOURCE_SITE}")"
 [ "$(sql "${SOURCE_KEY}" 'SELECT value FROM octojoom_integration_marker WHERE id=1')" = source-changed ] || fail 'The restored site wrote into the source database.'
 [ "$(sql "${TARGET_KEY}" 'SELECT value FROM octojoom_integration_marker WHERE id=1')" = target-only ] || fail 'The restored site lost its independent data.'
-pass 'Portable restore has independent files, credentials, database and network'
+pass 'Portable restore has independent files, configuration, database and network'
 
 api database export '{"all":true}'
 jq -e '.data.results | length == 2 and all(.[]; .ok == true and (.file | length > 0))' "${RESULT}" >/dev/null || fail 'Batch export did not return both completed site exports.'
@@ -410,13 +419,68 @@ PY
   api mail configure "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,enabled:false,yes:true}')"
   [ "$(timeout 15s "${DOCKER_BIN}" exec "joomla${TARGET_KEY}" php -r "${mail_digest_code}")" = "${original_mail_digest}" ] || fail 'Disabling capture did not restore the original mail configuration.'
   pass 'Joomla delivers mail to its private inbox and restores original settings when capture is disabled'
+
+  api site joomla "$(request_for_site "${TARGET_SITE}")" -- --version
+  jq -e --arg version "${JOOMLA_VERSION}" '.data.exit_code == 0 and (.data.stdout | contains($version))' "${RESULT}" >/dev/null || fail 'Joomla CLI did not execute in the installed release.'
+  api site composer "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,composer_version:"2.10.3"}')" -- --version
+  jq -e '.data.exit_code == 0 and (.data.stdout | contains("Composer version 2.10.3"))' "${RESULT}" >/dev/null || fail 'The verified Composer executable did not run in the PHP container.'
+  api service configure "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,service:"node",enabled:true,yes:true}')"
+  timeout 15s "${DOCKER_BIN}" exec --user www-data "joomla${TARGET_KEY}" mkdir /var/www/html/octojoom-assets
+  printf '%s\n' '{"private":true,"scripts":{"build":"node -e \"require('\''fs'\'').writeFileSync('\''octojoom-node-output.txt'\'','\''node works'\'')\""}}' \
+    | timeout 15s "${DOCKER_BIN}" exec -i --user www-data "joomla${TARGET_KEY}" sh -c 'cat > /var/www/html/octojoom-assets/package.json'
+  api site npm "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,workdir:"/var/www/html/octojoom-assets"}')" -- run build
+  [ "$(timeout 15s "${DOCKER_BIN}" exec "joomla${TARGET_KEY}" cat /var/www/html/octojoom-assets/octojoom-node-output.txt)" = 'node works' ] || fail 'On-demand npm did not build inside the selected project mount.'
+  if "${DOCKER_BIN}" ps --filter "label=com.docker.compose.project=octojoom${TARGET_KEY}" --filter "label=com.docker.compose.service=node${TARGET_KEY}" --format '{{.ID}}' | grep -q .; then
+    fail 'The on-demand Node operation left an idle container.'
+  fi
+  api service configure "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,service:"node",enabled:false,yes:true}')"
+  api service configure "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,service:"redis",enabled:true,yes:true}')"
+  api site exec "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,service:"redis"}')" -- redis-cli ping
+  jq -e '.data.exit_code == 0 and .data.stdout == "PONG\n"' "${RESULT}" >/dev/null || fail 'The selected private Redis service did not respond.'
+  "${DOCKER_BIN}" inspect --format '{{json .NetworkSettings.Ports}}' "redis${TARGET_KEY}" | jq -e 'all(.[]; . == null)' >/dev/null || fail 'Redis unexpectedly published a host port.'
+  api service configure "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,service:"redis",enabled:false,yes:true}')"
+  pass 'Joomla CLI, verified Composer, on-demand npm builds and private Redis execute through the shared command interface'
+
+  timeout 15s "${DOCKER_BIN}" exec "joomla${TARGET_KEY}" sh -c 'printf broken-owner > /var/www/html/images/octojoom-permissions.txt; chmod 600 /var/www/html/images/octojoom-permissions.txt'
+  if timeout 15s "${DOCKER_BIN}" exec --user www-data "joomla${TARGET_KEY}" test -r /var/www/html/images/octojoom-permissions.txt; then fail 'Permissions fixture did not isolate the wrong owner.'; fi
+  api site permissions "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,yes:true}')"
+  jq -e '.data.owner == "www-data" and .data.configuration_private == true' "${RESULT}" >/dev/null || fail 'Permission repair did not report the Joomla web worker owner.'
+  timeout 15s "${DOCKER_BIN}" exec --user www-data "joomla${TARGET_KEY}" test -w /var/www/html/images/octojoom-permissions.txt || fail 'Permission repair did not restore write access.'
+  [ "$(timeout 15s "${DOCKER_BIN}" exec "joomla${TARGET_KEY}" stat -c '%a' /var/www/html/configuration.php)" = 600 ] || fail 'Permission repair left configuration.php readable by other container users.'
+  assert_installed "${TARGET_KEY}" nginx "${ENGINE}" "${PHP_TARGET_VERSION}"
+  pass 'Permission repair fixes container-owned files, protects configuration.php and resumes Joomla'
+
+  api share start "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,timeout:120,yes:true}')"
+  share_url=$(jq -er '.data.url' "${RESULT}")
+  [[ "${share_url}" =~ ^https://[a-z0-9-]+\.trycloudflare\.com$ ]] || fail 'The sharing provider did not return an HTTPS review URL.'
+  api share status "$(request_for_site "${TARGET_SITE}")"
+  jq -e --arg url "${share_url}" '.data.running == true and .data.url == $url' "${RESULT}" >/dev/null || fail 'Sharing status does not describe the active review URL.'
+  share_ready=false
+  share_started=$SECONDS
+  # The URL is issued before Cloudflare finishes route propagation. Retry only
+  # the public readiness check; any remaining failure stays a real failed gate.
+  while (( SECONDS - share_started < 180 )); do
+    if curl -fsS --connect-timeout 5 --max-time 10 "${share_url}/octojoom-integration.txt" \
+      >"${WORK}/share-marker" 2>"${WORK}/share-errors" && [ "$(cat "${WORK}/share-marker")" = after-snapshot ]; then
+      share_ready=true; break
+    fi
+    sleep 2
+  done
+  [ "${share_ready}" = true ] || { cat "${WORK}/share-errors" >&2; fail 'Public review URL did not reach the selected fixture within the readiness deadline.'; }
+  curl -fsS --connect-timeout 5 --max-time 20 "${share_url}/" >"${WORK}/share-homepage"
+  grep -qi '<html' "${WORK}/share-homepage" || fail 'The public review URL did not render Joomla.'
+  api share stop "$(request_for_site "${TARGET_SITE}")"
+  if "${DOCKER_BIN}" inspect "octojoom-share-${TARGET_KEY}" >/dev/null 2>&1; then fail 'Stopping sharing left its tunnel container behind.'; fi
+  api share status "$(request_for_site "${TARGET_SITE}")"
+  jq -e '.data.running == false and .data.url == null' "${RESULT}" >/dev/null || fail 'Stopped sharing still reports an active review endpoint.'
+  pass 'A temporary HTTPS review URL serves this Joomla project and stops without leaving a tunnel'
 fi
 
 if [ "${ENGINE}" = postgres ]; then
-  expect_failure 2 database switch "$(jq -cn --arg site "${SOURCE_SITE}" --arg target "blocked.${RUN_ID}.invalid" --arg key "blocked${RUN_ID}" \
+  expect_failure 2 database switch "$(jq -cn --arg site "${SOURCE_SITE}" --arg target "${BLOCKED_SITE}" --arg key "${BLOCKED_KEY}" \
     '{site:$site,target_site:$target,target_key:$key,database_engine:"mysql",database_version:"8.4",mode:"clone",yes:true}')"
   grep -qi 'Cross-family' "${ERROR_OUTPUT}" || fail 'Cross-family conversion failed for an unexpected reason.'
-  [ ! -e "${REPO_PATH}/joomla/available/blocked.${RUN_ID}.invalid" ] || fail 'Rejected conversion created a destination.'
+  [ ! -e "${REPO_PATH}/joomla/available/${BLOCKED_SITE}" ] || fail 'Rejected conversion created a destination.'
   [ "$(sql "${SOURCE_KEY}" 'SELECT value FROM octojoom_integration_marker WHERE id=1')" = source-changed ] || fail 'Rejected cross-family conversion changed the source.'
   pass 'Unsupported cross-family SQL conversion refuses safely before creating a destination'
 else

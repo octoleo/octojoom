@@ -103,6 +103,64 @@ v4Stopped() {
   [ "$(jq -r .path <<< "$output")" = "$VDM_PROJECT_PATH/abc" ]
 }
 
+@test "v4 tools: permissions require explicit confirmation before changing files" {
+  run v4SitePermissions
+  assert_status 2
+  refute_command '^docker '
+}
+
+@test "v4 tools: permissions reject a symlinked configuration file" {
+  V4_REQUEST='{"site":"abc.test","yes":true}'
+  mv "$VDM_PROJECT_PATH/abc/joomla/configuration.php" "$SANDBOX/configuration.php"
+  ln -s "$SANDBOX/configuration.php" "$VDM_PROJECT_PATH/abc/joomla/configuration.php"
+  run v4SitePermissions
+  assert_status 2
+  refute_command '^docker '
+}
+
+@test "v4 tools: permissions reject an override pointing outside the managed document root" {
+  V4_REQUEST='{"site":"abc.test","yes":true}'
+  v4Compose() { printf '{"services":{"joomlaabc":{"volumes":[{"type":"bind","source":"/other/site","target":"/var/www/html"}]}}}\n'; }
+  v4Quiesce() { printf quiesced > "$STUB_DIR/permissions-state"; }
+  run v4SitePermissions
+  assert_status 2
+  [ ! -e "$STUB_DIR/permissions-state" ]
+}
+
+@test "v4 tools: permissions use runtime ownership and physical traversal then restore service state" {
+  V4_REQUEST='{"site":"abc.test","yes":true}'
+  v4Compose() {
+    if [ "$1" = config ]; then jq -nc --arg source "$V4_DOCROOT" '{services:{joomlaabc:{volumes:[{type:"bind",source:$source,target:"/var/www/html"}]}}}'; return; fi
+    printf '%s\n' "${@: -1}" > "$STUB_DIR/permissions-script"
+    printf '{"directories":8,"files":12,"symlinks_skipped":1,"configuration_private":true,"uid":33,"gid":33}\n'
+  }
+  v4Quiesce() { V4_RESUME_SERVICES=(joomlaabc); printf quiesced > "$STUB_DIR/permissions-state"; }
+  v4Resume() { printf resumed >> "$STUB_DIR/permissions-state"; }
+  v4WaitServices() { [ "$*" = '120 joomlaabc' ]; }
+  run v4SitePermissions
+  assert_success
+  [ "$(jq -r .configuration_mode <<< "$output")" = 0600 ]
+  [ "$(jq .files <<< "$output")" -eq 12 ]
+  [ "$(cat "$STUB_DIR/permissions-state")" = quiescedresumed ]
+  grep -q 'find -P' "$STUB_DIR/permissions-script"
+  grep -q 'id -u www-data' "$STUB_DIR/permissions-script"
+  [ ! -d "$VDM_REPO_PATH/joomla/available/abc.test/.operation.lock" ]
+}
+
+@test "v4 tools: failed permissions repair restores services and returns failure" {
+  V4_REQUEST='{"site":"abc.test","yes":true}'
+  v4Compose() {
+    if [ "$1" = config ]; then jq -nc --arg source "$V4_DOCROOT" '{services:{joomlaabc:{volumes:[{type:"bind",source:$source,target:"/var/www/html"}]}}}'; else return 17; fi
+  }
+  v4Quiesce() { V4_RESUME_SERVICES=(joomlaabc); }
+  v4Resume() { printf resumed > "$STUB_DIR/permissions-state"; }
+  v4WaitServices() { return 0; }
+  run v4SitePermissions
+  assert_failure
+  [ "$(cat "$STUB_DIR/permissions-state")" = resumed ]
+  [ ! -d "$VDM_REPO_PATH/joomla/available/abc.test/.operation.lock" ]
+}
+
 @test "v4 tools: open print returns resource without launching browser" {
   V4_REQUEST='{"site":"abc.test","target":"directory","print":true}'
   v4OpenResource() { return 99; }
@@ -184,6 +242,7 @@ v4Stopped() {
   assert_failure
   [ "$(jq .succeeded "$STUB_DIR/batch.json")" -eq 1 ]
   [ "$(jq .failed "$STUB_DIR/batch.json")" -eq 1 ]
+  [ "$(jq -r '.results[1].error' "$STUB_DIR/batch.json")" = 'The site operation exited with status 1.' ]
 }
 
 @test "v4 tools: delete requires explicit confirmation" {
@@ -223,7 +282,7 @@ v4Stopped() {
   local recovery
   recovery=$(jq -r .recovery_directory <<< "$output")
   grep -q retained-value "$recovery/.env"
-  ! grep -q unrelated-secret "$recovery/.env"
+  run ! grep -q unrelated-secret "$recovery/.env"
 }
 
 @test "v4 tools: explicit managed data deletion removes both project and configuration" {
@@ -272,6 +331,25 @@ v4Stopped() {
   run v4HookConfigure
   assert_success
   [ "$(jq -r '.hooks["post-import-db"][0][2]' "$VDM_REPO_PATH/joomla/available/abc.test/project.json")" = cache:clean ]
+}
+
+@test "v4 tools: shared hooks validator permits explicit supported events only" {
+  run v4ValidateHooks '{"pre-import":[["php","check.php"]],"post-restore":[]}'
+  assert_success
+  run v4ValidateHooks '{"post-unknown":[["php","check.php"]]}'
+  assert_status 2
+}
+
+@test "v4 tools: shared hooks validator rejects shell strings and empty executable" {
+  run v4ValidateHooks '{"post-start":"php cli/joomla.php"}'
+  assert_status 2
+  run v4ValidateHooks '{"post-start":[["","argument"]]}'
+  assert_status 2
+}
+
+@test "v4 tools: shared hooks validator rejects control characters" {
+  run v4ValidateHooks '{"post-start":[["printf","line\nline"]]}'
+  assert_status 2
 }
 
 @test "v4 tools: hooks execute arrays without interpreting shell text" {
