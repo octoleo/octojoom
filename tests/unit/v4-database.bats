@@ -678,9 +678,10 @@ HASH
 @test "v4 SQL console transports large query results through stdin" {
   v4Exec() { awk 'BEGIN { for (i=0; i<65536; i++) printf "x" }'; }
   V4_REQUEST='{"site":"source.test","command":"SELECT large_value FROM example","json":true}'
-  run v4DbConsole
-  [ "$status" -eq 0 ]
-  [ "$(jq '.output|length' <<< "$output")" -eq 65536 ]
+  # Bats run splits output through a here-string, which exceeds Git Bash's
+  # native pipe capacity here. Verify the complete command result from a file.
+  v4DbConsole > "$SANDBOX/large-query.json"
+  [ "$(jq '.output|length' "$SANDBOX/large-query.json")" -eq 65536 ]
 }
 
 @test "v4 archive manifests support metadata beyond native Windows argument limits" {
