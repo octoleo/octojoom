@@ -150,16 +150,37 @@ setup() {
   local root="$SANDBOX/tls"
   mkdir -p "$root/routes"
   v4LocalRoute "$root" demo demo.test nginxdemo
-  jq -e '.http.services["octojoom-demo"].loadBalancer.servers==[{url:"http://nginxdemo:80"}] and .tls.certificates[0].certFile=="/certs/demo.test.pem"' "$root/routes/demo.test.json"
-  run grep -qE 'docker.sock|phpmyadmin|mailpit|rootCA' "$root/routes/demo.test.json"
+  # Traefik v3 file-directory discovery accepts YAML/TOML, not .json files.
+  [ -f "$root/routes/demo.test.yaml" ]
+  [ ! -e "$root/routes/demo.test.json" ]
+  jq -e '.http.services["octojoom-demo"].loadBalancer.servers==[{url:"http://nginxdemo:80"}] and .tls.certificates[0].certFile=="/certs/demo.test.pem"' "$root/routes/demo.test.yaml"
+  run grep -qE 'docker.sock|phpmyadmin|mailpit|rootCA' "$root/routes/demo.test.yaml"
   assert_failure
+}
+
+@test "TLS readiness verifies the site certificate through its dedicated loopback port" {
+  curl() { printf '%s\n' "$*" >"$SANDBOX/tls-curl-args"; return 0; }
+  run v4LocalTlsVerify demo.test 8443 "$SANDBOX/rootCA.pem"
+  assert_success
+  grep -Fq -- '--resolve demo.test:8443:127.0.0.1' "$SANDBOX/tls-curl-args"
+  grep -Fq -- "--cacert $(v4DockerHostPath "$SANDBOX/rootCA.pem")" "$SANDBOX/tls-curl-args"
+  grep -Fq -- '--noproxy *' "$SANDBOX/tls-curl-args"
+  run grep -Eq -- '--insecure|(^| )-k( |$)' "$SANDBOX/tls-curl-args"
+  assert_failure
+}
+
+@test "TLS readiness fails closed when the proxy serves an untrusted certificate" {
+  curl() { return 60; }
+  run v4LocalTlsVerify demo.test 8443 "$SANDBOX/rootCA.pem" 1
+  assert_status 1
+  [[ "$output" == *'expected trusted certificate'* ]]
 }
 
 @test "local HTTPS redirect retains a custom HTTPS port" {
   local root="$SANDBOX/tls"
   mkdir -p "$root/routes"
   v4LocalRoute "$root" demo demo.test joomlademo 8443
-  jq -e '.http.middlewares["octojoom-demo-https"].redirectScheme.port=="8443"' "$root/routes/demo.test.json"
+  jq -e '.http.middlewares["octojoom-demo-https"].redirectScheme.port=="8443"' "$root/routes/demo.test.yaml"
 }
 
 @test "TLS setup restores old certificates and metadata when hostname conflicts" {
@@ -167,7 +188,7 @@ setup() {
   mkdir -p "$root/certs" "$root/routes" "$SANDBOX/ca"
   printf '%s\n' old-cert >"$root/certs/demo.test.pem"
   printf '%s\n' old-key >"$root/certs/demo.test-key.pem"
-  printf '%s\n' old-route >"$root/routes/demo.test.json"
+  printf '%s\n' old-route >"$root/routes/demo.test.yaml"
   printf '%s\n' ca >"$SANDBOX/ca/rootCA.pem"
   printf '192.0.2.1 demo.test\n' >"$hosts"
   V4_REQUEST=$(jq --arg path "$hosts" '.hosts_file=$path | .install_trust=false' <<<"$V4_REQUEST")
@@ -179,12 +200,13 @@ setup() {
   v4Lock() { mkdir "$1"; }
   v4Unlock() { rmdir "$1"; }
   v4LocalProxyEnsure() { return 0; }
+  v4LocalTlsVerify() { return 0; }
   v4ApplyConfig() { printf '%s\n' "$1" >"$SANDBOX/last-meta.json"; }
   run v4TlsSetup
   assert_failure
   [ "$(cat "$root/certs/demo.test.pem")" = old-cert ]
   [ "$(cat "$root/certs/demo.test-key.pem")" = old-key ]
-  [ "$(cat "$root/routes/demo.test.json")" = old-route ]
+  [ "$(cat "$root/routes/demo.test.yaml")" = old-route ]
   jq -e '.tls.mode=="none"' "$SANDBOX/last-meta.json"
   [ ! -d "$root/.lock" ]
 }
@@ -202,11 +224,127 @@ setup() {
   v4Lock() { mkdir "$1"; }
   v4Unlock() { rmdir "$1"; }
   v4LocalProxyEnsure() { return 0; }
+  v4LocalTlsVerify() { return 0; }
   v4ApplyConfig() { printf '%s\n' "$1" >"$SANDBOX/last-meta.json"; }
   run v4TlsSetup
   assert_success
   jq -e '.tls.mode=="local" and .tls.update_hosts==false' "$SANDBOX/last-meta.json"
   [ ! -f "$root/hosts/demo.test.json" ]
+}
+
+# Exercise the container archive commands against a local fixture: container
+# execution is replaced, while tar and atomic-rename recovery run unchanged.
+prepare_tls_configuration_rollback() {
+  mkdir -p "$SANDBOX/ca"
+  printf '%s\n' ca >"$SANDBOX/ca/rootCA.pem"
+  # shellcheck disable=SC2016
+  printf '%s\n' '<?php' 'class JConfig {' ' public $live_site = "https://original.example";' ' public $cookie_domain = "original.example";' '}' >"$V4_DOCROOT/configuration.php"
+  chmod 640 "$V4_DOCROOT/configuration.php"
+  cp -p "$V4_DOCROOT/configuration.php" "$SANDBOX/original-configuration.php"
+  V4_REQUEST='{"site":"demo.test","yes":true,"install_trust":false,"update_hosts":false}'
+  mkcert() {
+    if [ "$1" = -CAROOT ]; then printf '%s\n' "$SANDBOX/ca"; return; fi
+    printf '%s\n' cert >"$2"
+    printf '%s\n' key >"$4"
+  }
+  v4Lock() { mkdir "$1"; }
+  v4Unlock() { rmdir "$1"; }
+  v4LocalProxyEnsure() { return 0; }
+  v4LocalProxyStopIfIdle() { return 0; }
+  v4LocalTlsVerify() { return 1; }
+  v4ApplyConfig() { printf '%s\n' "$1" >"$SANDBOX/last-meta.json"; }
+  v4Compose() {
+    local entrypoint="$8" argument code
+    shift 9
+    if [ "$entrypoint" = tar ]; then
+      local -a arguments=()
+      for argument in "$@"; do
+        if [ "$argument" = /var/www/html ]; then arguments+=("$V4_DOCROOT"); else arguments+=("$argument"); fi
+      done
+      tar "${arguments[@]}"
+    elif [ "$entrypoint" = sh ]; then
+      code="$3"
+      code="${code//\/var\/www\/html/$V4_DOCROOT}"
+      sh "$1" "$2" "$code"
+    else return 2; fi
+  }
+}
+
+@test "TLS verification failure restores exact Joomla configuration and removes newly saved mail settings" {
+  prepare_tls_configuration_rollback
+  local mode
+  mode=$(file_mode "$V4_DOCROOT/configuration.php")
+  v4RealignConfiguration() {
+    printf '%s\n' 'changed Joomla URL and proxy configuration' >"$V4_DOCROOT/configuration.php"
+    chmod 600 "$V4_DOCROOT/configuration.php"
+    printf '%s\n' '{"mailer":"smtp","smtphost":"original"}' >"$V4_DIR/.mail-settings.json"
+  }
+  run v4TlsSetup
+  assert_failure
+  cmp -s "$SANDBOX/original-configuration.php" "$V4_DOCROOT/configuration.php"
+  [ "$(file_mode "$V4_DOCROOT/configuration.php")" = "$mode" ]
+  [ ! -f "$V4_DIR/.mail-settings.json" ]
+  jq -e '.tls.mode=="none"' "$SANDBOX/last-meta.json"
+  [ ! -d "$VDM_SRC_PATH/local-tls/.lock" ]
+}
+
+@test "failed realignment restores existing Joomla configuration and mail sidecar bytes and mode" {
+  prepare_tls_configuration_rollback
+  printf '%s\n' '{"mailer":"smtp","smtphost":"smtp.original","smtppass":"original secret"}' >"$V4_DIR/.mail-settings.json"
+  chmod 600 "$V4_DIR/.mail-settings.json"
+  cp -p "$V4_DIR/.mail-settings.json" "$SANDBOX/original-mail-settings.json"
+  local mail_mode
+  mail_mode=$(file_mode "$V4_DIR/.mail-settings.json")
+  v4RealignConfiguration() {
+    printf '%s\n' 'partial configuration rewrite' >"$V4_DOCROOT/configuration.php"
+    printf '%s\n' '{"mailer":"smtp","smtphost":"changed"}' >"$V4_DIR/.mail-settings.json"
+    chmod 644 "$V4_DIR/.mail-settings.json"
+    return 1
+  }
+  run v4TlsSetup
+  assert_failure
+  cmp -s "$SANDBOX/original-configuration.php" "$V4_DOCROOT/configuration.php"
+  cmp -s "$SANDBOX/original-mail-settings.json" "$V4_DIR/.mail-settings.json"
+  [ "$(file_mode "$V4_DIR/.mail-settings.json")" = "$mail_mode" ]
+  [ ! -d "$VDM_SRC_PATH/local-tls/.lock" ]
+}
+
+@test "TLS reconfiguration failure restores the file saved before application restart" {
+  prepare_tls_configuration_rollback
+  local mode
+  mode=$(file_mode "$V4_DOCROOT/configuration.php")
+  v4ApplyConfig() {
+    printf '%s\n' 'entrypoint changed configuration' >"$V4_DOCROOT/configuration.php"
+    chmod 600 "$V4_DOCROOT/configuration.php"
+    return 1
+  }
+  v4RealignConfiguration() { touch "$SANDBOX/should-not-realign"; }
+  run v4TlsSetup
+  assert_failure
+  cmp -s "$SANDBOX/original-configuration.php" "$V4_DOCROOT/configuration.php"
+  [ "$(file_mode "$V4_DOCROOT/configuration.php")" = "$mode" ]
+  [ ! -e "$SANDBOX/should-not-realign" ]
+  [ ! -d "$VDM_SRC_PATH/local-tls/.lock" ]
+}
+
+@test "failed TLS configuration restoration retains a private recovery archive" {
+  prepare_tls_configuration_rollback
+  v4RealignConfiguration() { printf '%s\n' 'changed configuration' >"$V4_DOCROOT/configuration.php"; }
+  v4TlsRestoreConfiguration() { return 1; }
+  run v4TlsSetup
+  assert_failure
+  local -a recoveries=("$VDM_SRC_PATH/local-tls/".recovery.*)
+  [ "${#recoveries[@]}" -eq 1 ]
+  [ -f "${recoveries[0]}/joomla-configuration.tar" ]
+  [[ "$output" == *"Exact original files are retained in: ${recoveries[0]}"* ]]
+  [[ "$output" != *'original.example'* ]]
+  tar -xOf "${recoveries[0]}/joomla-configuration.tar" configuration.php >"$SANDBOX/recovered.php"
+  cmp -s "$SANDBOX/original-configuration.php" "$SANDBOX/recovered.php"
+  case "${OSTYPE:-}" in msys*|cygwin*) ;; *)
+    [ "$(file_mode "${recoveries[0]}")" = 700 ]
+    [ "$(file_mode "${recoveries[0]}/joomla-configuration.tar")" = 600 ] ;;
+  esac
+  [ ! -d "$VDM_SRC_PATH/local-tls/.lock" ]
 }
 
 @test "local proxy refuses to join an unrelated same-named network" {
@@ -237,7 +375,7 @@ setup() {
 @test "proxy cleanup keeps the proxy running while another route exists" {
   local root="$SANDBOX/tls"
   mkdir -p "$root/routes"
-  printf '{}\n' >"$root/routes/other.test.json"
+  printf '{}\n' >"$root/routes/other.test.yaml"
   docker() { touch "$SANDBOX/should-not-inspect"; return 1; }
   run v4LocalProxyStopIfIdle "$root"
   assert_success
@@ -247,7 +385,7 @@ setup() {
 @test "disabling the final TLS site deletes leaf keys and stops only its proxy" {
   local root="$VDM_SRC_PATH/local-tls"
   mkdir -p "$root/routes" "$root/certs" "$root/hosts"
-  printf '{}\n' >"$root/routes/demo.test.json"
+  printf '{}\n' >"$root/routes/demo.test.yaml"
   printf 'certificate\n' >"$root/certs/demo.test.pem"
   printf 'private-key\n' >"$root/certs/demo.test-key.pem"
   printf '{"file":"/etc/hosts"}\n' >"$root/hosts/demo.test.json"
@@ -264,7 +402,7 @@ setup() {
   run v4TlsDisable
   assert_success
   jq -e '.local_tls==false and .host_trust_retained==true' <<<"$output"
-  [ ! -f "$root/routes/demo.test.json" ]
+  [ ! -f "$root/routes/demo.test.yaml" ]
   [ ! -f "$root/certs/demo.test-key.pem" ]
   [ -f "$root/hosts/demo.test.json" ]
   [ "$(cat "$SANDBOX/stopped")" = octojoom-local-proxy ]

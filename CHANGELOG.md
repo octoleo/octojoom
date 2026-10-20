@@ -19,7 +19,7 @@
 
 ### Local development
 
-- Add mkcert local HTTPS using a dedicated loopback Traefik proxy, owned hostname entries and host-private certificate authorities.
+- Add mkcert local HTTPS using a dedicated loopback Traefik proxy, owned hostname entries and host-private certificate authorities. Verify the served certificate before reporting successful setup.
 - Add temporary sharing of one Joomla application through a Cloudflare tunnel, with explicit status and stop operations.
 - Add Mailpit capture and Joomla mail tests while preserving original mail settings.
 - Add project-scoped Node and Redis services, Joomla CLI/Composer/npm commands, explicit lifecycle hooks and offline preparation.

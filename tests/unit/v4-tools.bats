@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # Test fixtures use literal shell input and globals in dynamically loaded functions.
 # Bats executes each test independently.
-# shellcheck disable=SC2034,SC2317,SC2154,SC2016,SC2030,SC2031
+# shellcheck disable=SC2034,SC2317,SC2329,SC2154,SC2016,SC2030,SC2031
 load ../helpers/common
 bats_require_minimum_version 1.5.0
 
@@ -75,6 +75,35 @@ v4Stopped() {
   assert_success
   [ "$(jq -r .site <<< "$output")" = http://abc.test:49152 ]
   [ "$(jq -r .admin <<< "$output")" = http://abc.test:49152/administrator ]
+}
+
+@test "v4 tools: native Compose CRLF ports produce local site and companion URLs" {
+  v4LoadSite abc.test
+  V4_META=$(jq '.services.mail=true' <<< "$V4_META")
+  v4Compose() {
+    case "$2" in
+      joomlaabc) printf '127.0.0.1:49152\r\n' ;;
+      phpmyadminabc) printf '127.0.0.1:49153\r\n' ;;
+      mailpitabc) printf '127.0.0.1:49154\r\n' ;;
+    esac
+  }
+  run v4SiteUrls
+  assert_success
+  [ "$(jq -r .site <<< "$output")" = http://abc.test:49152 ]
+  [ "$(jq -r .database <<< "$output")" = http://127.0.0.1:49153 ]
+  [ "$(jq -r .mail <<< "$output")" = http://127.0.0.1:49154 ]
+  V4_META=$(jq '.profile="server"' <<< "$V4_META")
+  run v4SiteUrls
+  assert_success
+  [ "$(jq -r .database <<< "$output")" = http://127.0.0.1:49153 ]
+}
+
+@test "v4 tools: native Compose CRLF service listing accepts an exact custom service" {
+  v4LoadSite abc.test
+  v4Compose() { printf 'joomlaabc\r\nworkerabc\r\n'; }
+  run v4ServiceName workerabc
+  assert_success
+  [ "$output" = workerabc ]
 }
 
 @test "v4 tools: PostgreSQL database UI uses Adminer port 8080" {
@@ -286,13 +315,13 @@ v4Stopped() {
   [ -f "$recovery/.env" ]
 }
 
-@test "v4 tools: legacy deletion retains only referenced shared environment values" {
+@test "v4 tools: legacy deletion retains site credentials without unrelated shared secrets" {
   v4ToolsLoad() {
     v4LoadSite abc.test || return $?
     V4_ENV_FILE="$VDM_SRC_PATH/.env"
   }
   printf 'services:\n  web:\n    environment:\n      PASSWORD: ${VDM_ABC_DB_PASS}\n' > "$VDM_REPO_PATH/joomla/available/abc.test/docker-compose.yml"
-  printf 'VDM_ABC_DB_PASS="retained-value"\nVDM_OTHER_DB_PASS="unrelated-secret"\n' > "$VDM_SRC_PATH/.env"
+  printf 'VDM_ABC_DB="joomla"\nVDM_ABC_DB_USER="joomla"\nVDM_ABC_DB_PASS="retained-value"\nVDM_ABC_DB_ROOT="root-value"\nVDM_OTHER_DB_PASS="unrelated-secret"\n' > "$VDM_SRC_PATH/.env"
   V4_REQUEST='{"site":"abc.test","yes":true}'
   v4Compose() { return 0; }
   v4ShareRemove() { return 0; }
@@ -302,7 +331,8 @@ v4Stopped() {
   local recovery
   recovery=$(jq -r .recovery_directory <<< "$output")
   grep -q retained-value "$recovery/.env"
-  run ! grep -q unrelated-secret "$recovery/.env"
+  run grep -q unrelated-secret "$recovery/.env"
+  assert_failure
 }
 
 @test "v4 tools: explicit managed data deletion removes both project and configuration" {

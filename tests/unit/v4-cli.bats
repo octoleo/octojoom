@@ -203,6 +203,48 @@ v4_cli_fixture() {
   assert_command "--env-file $V4_ENV_FILE --file $V4_COMPOSE --file $V4_DIR/docker-compose.override.yml exec -T joomlaalpha printf %s a b"
 }
 
+@test "v4 Compose normalizes native service-name records for ps and config" {
+  v4_cli_fixture
+  v4LoadSite alpha.test
+  function docker() { printf 'joomlaalpha\r\nmariadbalpha\r\n'; }
+  run v4Compose ps --status running --services
+  assert_success
+  [ "$output" = $'joomlaalpha\nmariadbalpha' ]
+  run v4Compose config --services
+  assert_success
+  [ "$output" = $'joomlaalpha\nmariadbalpha' ]
+}
+
+@test "v4 Compose service-name normalization preserves failure and stderr" {
+  v4_cli_fixture
+  v4LoadSite alpha.test
+  local result=0
+  function docker() { printf 'joomlaalpha\r\n'; printf 'Docker failed\r\n' >&2; return 7; }
+  v4Compose ps --services > "$SANDBOX/service-names" 2> "$SANDBOX/service-error" || result=$?
+  [ "$result" -eq 7 ]
+  printf 'joomlaalpha\n' > "$SANDBOX/expected-names"
+  printf 'Docker failed\r\n' > "$SANDBOX/expected-error"
+  cmp "$SANDBOX/expected-names" "$SANDBOX/service-names"
+  cmp "$SANDBOX/expected-error" "$SANDBOX/service-error"
+}
+
+@test "v4 Compose preserves raw command log and non-service configuration bytes" {
+  v4_cli_fixture
+  v4LoadSite alpha.test
+  function docker() { printf '\r\nembedded\rreturn\000data\r\n'; }
+  printf '\r\nembedded\rreturn\000data\r\n' > "$SANDBOX/expected-stream"
+  v4Exec joomlaalpha printf --services > "$SANDBOX/actual-stream"
+  cmp "$SANDBOX/expected-stream" "$SANDBOX/actual-stream"
+  v4Compose logs joomlaalpha > "$SANDBOX/actual-stream"
+  cmp "$SANDBOX/expected-stream" "$SANDBOX/actual-stream"
+  v4Compose ps --format json > "$SANDBOX/actual-stream"
+  cmp "$SANDBOX/expected-stream" "$SANDBOX/actual-stream"
+  v4Compose config > "$SANDBOX/actual-stream"
+  cmp "$SANDBOX/expected-stream" "$SANDBOX/actual-stream"
+  v4Compose config -- --services > "$SANDBOX/actual-stream"
+  cmp "$SANDBOX/expected-stream" "$SANDBOX/actual-stream"
+}
+
 @test "v4 environment creation never enters the legacy create-file dialog" {
   local file="$SANDBOX/scoped/.env" value
   v4SetEnv "$file" 'VDM_ALPHA_DB_PASS="a $literal # value"'

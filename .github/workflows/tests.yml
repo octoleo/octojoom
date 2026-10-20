@@ -122,6 +122,13 @@ jobs:
           echo "OSTYPE=${OSTYPE}"
           sed --version 2>/dev/null | head -n 1 || echo "sed: BSD"
 
+      - name: Validate native Windows Compose host paths
+        if: runner.os == 'Windows'
+        env:
+          OCTOJOOM_NO_REAL_DOCKER: '1'
+          OCTOJOOM_REQUIRE_NATIVE_COMPOSE: '1'
+        run: bash tests/run.sh --filter 'native Windows Compose resolves' tests/unit/v4-runtime.bats
+
       - name: Run the test suite
         env:
           # Keep legacy daemon checks Linux-only; the Windows config check is separate.

@@ -9430,7 +9430,7 @@ function v4ComposeScopedDocker() {
 
 function v4Compose() {
   if ! { [ -f "${V4_COMPOSE:-}" ] && [ -f "${V4_ENV_FILE:-}" ]; }; then v4Error 'Load a site before running Compose.' 3; return 3; fi
-  local override="$V4_DIR/docker-compose.override.yml" env_path compose_path override_path
+  local override="$V4_DIR/docker-compose.override.yml" env_path compose_path override_path argument service_names=false
   env_path=$(v4DockerHostPath "$V4_ENV_FILE") || return $?
   compose_path=$(v4DockerHostPath "$V4_COMPOSE") || return $?
   local compose_args=(--env-file "$env_path" --file "$compose_path")
@@ -9439,7 +9439,22 @@ function v4Compose() {
     override_path=$(v4DockerHostPath "$override") || return $?
     compose_args+=(--file "$override_path")
   fi
-  v4ComposeScopedDocker "${compose_args[@]}" "$@"
+  # Accept native Windows CRLF in service-name lists consumed as later
+  # command arguments; arbitrary command streams stay intact.
+  case "${1:-}" in
+    ps|config)
+      for argument in "$@"; do
+        case "$argument" in
+          --) break ;;
+          --services) service_names=true ;;
+        esac
+      done ;;
+  esac
+  if [ "$service_names" = true ]; then
+    (set -o pipefail; v4ComposeScopedDocker "${compose_args[@]}" "$@" | sed $'s/\r$//')
+  else
+    v4ComposeScopedDocker "${compose_args[@]}" "$@"
+  fi
 }
 
 function v4Exec() {
@@ -11156,7 +11171,7 @@ function v4RestoreArchive() {
         if [ "$original_moved" = false ]; then v4LocalRemoveSite >/dev/null 2>&1 || status=1
         elif [ -n "$tls_snapshot" ]; then
           if [ ! -f "$tls_snapshot/hosts/${host}.json" ] && [ -f "$VDM_SRC_PATH/local-tls/hosts/${host}.json" ]; then v4HostsEntry remove "$host" || status=1; fi
-          for tls_item in "routes/${host}.json" "certs/${host}.pem" "certs/${host}-key.pem" "hosts/${host}.json"; do
+          for tls_item in "routes/${host}.yaml" "routes/${host}.json" "certs/${host}.pem" "certs/${host}-key.pem" "hosts/${host}.json"; do
             if [ -f "$tls_snapshot/$tls_item" ]; then cp -p "$tls_snapshot/$tls_item" "$VDM_SRC_PATH/local-tls/$tls_item" || status=1
             else rm -f "$VDM_SRC_PATH/local-tls/$tls_item" || status=1; fi
           done
@@ -11218,7 +11233,9 @@ function v4RestoreArchive() {
       fi
       tls_snapshot="$staging/previous-local-tls"
       (umask 077; mkdir -p "$tls_snapshot") || exit 1
-      for tls_item in "routes/${host}.json" "certs/${host}.pem" "certs/${host}-key.pem" "hosts/${host}.json"; do
+      # Keep a pre-release JSON route if present as well as the YAML route used
+      # by Traefik, so rollback preserves the destination's exact local state.
+      for tls_item in "routes/${host}.yaml" "routes/${host}.json" "certs/${host}.pem" "certs/${host}-key.pem" "hosts/${host}.json"; do
         if [ -f "$VDM_SRC_PATH/local-tls/$tls_item" ]; then
           mkdir -p "$tls_snapshot/$(dirname "$tls_item")" && cp -p "$VDM_SRC_PATH/local-tls/$tls_item" "$tls_snapshot/$tls_item" || exit 1
         fi
@@ -11722,7 +11739,7 @@ function v4LocalProxyEnsure() {
 # Stop only this installation's proxy when its final route has been removed.
 function v4LocalProxyStopIfIdle() {
   local root="$1" owner scope mounts route host_root
-  for route in "$root"/routes/*.json; do [ ! -e "$route" ] || return 0; done
+  for route in "$root"/routes/*.yaml; do [ ! -e "$route" ] || return 0; done
   if ! v4Docker inspect octojoom-local-proxy >/dev/null 2>&1; then return 0; fi
   owner=$(v4NetworkDockerScalar inspect --format '{{index .Config.Labels "io.octojoom.local-proxy"}}' octojoom-local-proxy) || return 1
   [ "$owner" = v4 ] || { v4Error 'Refusing to stop an unrelated local-proxy container.' 3; return 3; }
@@ -11739,20 +11756,58 @@ function v4LocalProxyStopIfIdle() {
 
 function v4LocalRoute() {
   local root="$1" key="$2" host="$3" frontend="$4" port="${5:-443}"
+  # The file provider ignores .json files. JSON is valid YAML, but the supported
+  # .yaml extension is required for Traefik to discover this configuration.
   jq -n --arg key "$key" --arg host "$host" --arg target "http://${frontend}:80" --arg port "$port" '{
     tls:{certificates:[{certFile:("/certs/"+$host+".pem"),keyFile:("/certs/"+$host+"-key.pem")}]},
     http:{routers:{
       ("octojoom-"+$key):{rule:("Host(`"+$host+"`)") ,entryPoints:["websecure"],service:("octojoom-"+$key),tls:{}},
       ("octojoom-"+$key+"-http"):{rule:("Host(`"+$host+"`)"),entryPoints:["web"],service:("octojoom-"+$key),middlewares:[("octojoom-"+$key+"-https")]}
     },services:{("octojoom-"+$key):{loadBalancer:{servers:[{url:$target}]}}},middlewares:{("octojoom-"+$key+"-https"):{redirectScheme:{scheme:"https",port:$port,permanent:false}}}}
-  }' >"$root/routes/${host}.json.tmp" || return 1
-  chmod 600 "$root/routes/${host}.json.tmp" && mv -f "$root/routes/${host}.json.tmp" "$root/routes/${host}.json"
+  }' >"$root/routes/${host}.yaml.tmp" || return 1
+  chmod 600 "$root/routes/${host}.yaml.tmp" && mv -f "$root/routes/${host}.yaml.tmp" "$root/routes/${host}.yaml"
+}
+
+function v4LocalTlsVerify() {
+  local host="$1" port="$2" ca="$3" timeout="${4:-20}" started="$SECONDS" native_ca
+  native_ca=$(v4DockerHostPath "$ca") || return $?
+  while [ "$((SECONDS-started))" -lt "$timeout" ]; do
+    # Verify SNI and the workstation CA against this loopback proxy, without
+    # depending on system DNS, system trust, or a configured outbound proxy.
+    if MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' curl --silent --show-error --noproxy '*' \
+      --connect-timeout 2 --max-time 3 --cacert "$native_ca" --resolve "${host}:${port}:127.0.0.1" \
+      "https://${host}:${port}/" >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  v4Error 'The local proxy did not serve the expected trusted certificate. TLS setup was rolled back; inspect the local-proxy logs.' 1
+  return 1
+}
+
+# Configuration may be owned by www-data. Stream its original bytes and Unix
+# metadata through the container instead of requiring host filesystem access.
+function v4TlsSaveConfiguration() {
+  local archive="$1"
+  (umask 077; v4Compose run --rm --no-deps -T -u root --entrypoint tar "$V4_WEB_SERVICE" \
+    --numeric-owner -cf - -C /var/www/html -- configuration.php >"$archive")
+}
+
+function v4TlsRestoreConfiguration() {
+  local archive="$1"
+  # The archive is created privately by v4TlsSaveConfiguration. Extract beside
+  # the destination, then rename, preserving the saved ownership and mode.
+  # shellcheck disable=SC2016
+  v4Compose run --rm --no-deps -T -u root --entrypoint sh "$V4_WEB_SERVICE" -eu -c '
+    restore=$(mktemp -d /var/www/html/.octojoom-tls-restore.XXXXXX)
+    trap '\''rm -rf -- "$restore"'\'' EXIT
+    tar --numeric-owner --same-owner --same-permissions -xf - -C "$restore"
+    mv -f -- "$restore/configuration.php" /var/www/html/configuration.php
+  ' <"$archive"
 }
 
 function v4NetworkSyncRoute() {
   local root="$VDM_SRC_PATH/local-tls" frontend="joomla${V4_KEY}" port
   [ "$(jq -r '.tls.mode' <<<"$V4_META")" = local ] || return 0
-  [ -f "$root/routes/${V4_HOST}.json" ] || return 0
+  [ -f "$root/routes/${V4_HOST}.yaml" ] || return 0
   [ "$(jq -r '.webserver' <<<"$V4_META")" != nginx ] || frontend="nginx${V4_KEY}"
   port=$(jq -r '.tls.https_port // 443' <<<"$V4_META") || return 1
   v4LocalRoute "$root" "$V4_KEY" "$V4_HOST" "$frontend" "$port"
@@ -11771,12 +11826,14 @@ function v4TlsSetup() {
   (
   local host root http https install_trust update_hosts old_meta metadata frontend caroot hosts_file
   local recovery='' applied=false hosts_added=false proxy_prepared=false status=0 item
+  local configuration_saved=false reconfiguration_started=false realignment_started=false mail_settings_present=false keep_recovery=false
   v4Require site || return $?
   v4Confirm || return $?
   host=$(v4Get site)
   v4LoadSite "$host" || return $?
   [ "$(jq -r '.profile // "server"' <<<"$V4_META")" = local ] || { v4Error 'Local certificates require a local-development site profile.' 2; return 2; }
   command -v mkcert >/dev/null 2>&1 || { v4Error 'Install mkcert first (macOS: brew install mkcert nss; Windows: choco install mkcert; Linux: mkcert plus your distribution NSS tools), then repeat TLS setup.' 3; return 3; }
+  command -v curl >/dev/null 2>&1 || { v4Error 'curl is required to verify the local TLS certificate.' 3; return 3; }
   http=$(v4Get http_port "$(jq -r '.tls.http_port // 80' <<<"$V4_META")")
   https=$(v4Get https_port "$(jq -r '.tls.https_port // 443' <<<"$V4_META")")
   if ! { [[ "$http" =~ ^[0-9]+$ && "$https" =~ ^[0-9]+$ ]] && [ "$http" -ge 1 ] && [ "$http" -le 65535 ] && [ "$https" -ge 1 ] && [ "$https" -le 65535 ] && [ "$http" != "$https" ]; }; then v4Error 'TLS ports must be distinct integers from 1 through 65535.' 2; return 2; fi
@@ -11802,7 +11859,7 @@ function v4TlsSetup() {
   v4Lock "$root/.lock" || return $?
   recovery=$(mktemp -d "$root/.recovery.XXXXXX") || { v4Unlock "$root/.lock"; return 1; }
   old_meta="$V4_META"
-  for item in "routes/${host}.json" "certs/${host}.pem" "certs/${host}-key.pem" "hosts/${host}.json"; do
+  for item in "routes/${host}.yaml" "certs/${host}.pem" "certs/${host}-key.pem" "hosts/${host}.json"; do
     if [ -f "$root/$item" ]; then
       if ! mkdir -p "$recovery/$(dirname "$item")" || ! cp -p "$root/$item" "$recovery/$item"; then
         rm -rf "$recovery"; v4Unlock "$root/.lock"; return 1;
@@ -11813,15 +11870,28 @@ function v4TlsSetup() {
     status=$?
     trap - EXIT
     if [ "$status" -ne 0 ]; then
-      for item in "routes/${host}.json" "certs/${host}.pem" "certs/${host}-key.pem" "hosts/${host}.json"; do
-        if [ -f "$recovery/$item" ]; then cp -p "$recovery/$item" "$root/$item" || status=1; else rm -f "$root/$item" || status=1; fi
+      for item in "routes/${host}.yaml" "certs/${host}.pem" "certs/${host}-key.pem" "hosts/${host}.json"; do
+        if [ -f "$recovery/$item" ]; then cp -p "$recovery/$item" "$root/$item" || { status=1; keep_recovery=true; }; else rm -f "$root/$item" || { status=1; keep_recovery=true; }; fi
       done
       if [ "$hosts_added" = true ]; then v4HostsEntry remove "$host" || status=1; fi
-      if [ "$applied" = true ]; then v4ApplyConfig "$old_meta" >&2 || { v4Error "TLS setup rollback failed; inspect the site configuration before continuing."; status=1; }; fi
+      if [ "$applied" = true ]; then v4ApplyConfig "$old_meta" >&2 || { v4Error "TLS setup rollback failed; inspect the site configuration before continuing."; status=1; keep_recovery=true; }; fi
+      if [ "$reconfiguration_started" = true ] && [ "$configuration_saved" = true ]; then
+        v4TlsRestoreConfiguration "$recovery/joomla-configuration.tar" >&2 || { status=1; keep_recovery=true; }
+      fi
+      if [ "$realignment_started" = true ]; then
+        if [ "$mail_settings_present" = true ]; then
+          cp -p -- "$recovery/mail-settings.json" "$V4_DIR/.mail-settings.json" || { status=1; keep_recovery=true; }
+        else
+          rm -f -- "$V4_DIR/.mail-settings.json" || { status=1; keep_recovery=true; }
+        fi
+      fi
       if [ "$proxy_prepared" = true ]; then v4LocalProxyStopIfIdle "$root" >&2 || status=1; fi
     fi
-    rm -f "$root/certs/${host}.pem.tmp" "$root/certs/${host}-key.pem.tmp" "$root/routes/${host}.json.tmp"
-    rm -rf "$recovery"
+    rm -f "$root/certs/${host}.pem.tmp" "$root/certs/${host}-key.pem.tmp" "$root/routes/${host}.yaml.tmp"
+    if [ "$keep_recovery" = true ]; then
+      v4Error "TLS rollback requires attention. Exact original files are retained in: $recovery" 1
+      status=1
+    else rm -rf "$recovery"; fi
     v4Unlock "$root/.lock" || status=1
     exit "$status"
   ' EXIT
@@ -11833,9 +11903,24 @@ function v4TlsSetup() {
   v4LocalProxyEnsure "$root" "$http" "$https" || return $?
   proxy_prepared=true
   metadata=$(jq --argjson http "$http" --argjson https "$https" --argjson hosts "$update_hosts" '.tls.mode="local" | .tls.http_port=$http | .tls.https_port=$https | .tls.update_hosts=$hosts' <<<"$V4_META") || return 1
+  # Save before restarting the application: its entrypoint can normalize file
+  # ownership before the explicit Joomla configuration realignment runs.
+  if [ -f "$V4_DOCROOT/configuration.php" ]; then
+    v4TlsSaveConfiguration "$recovery/joomla-configuration.tar" || return $?
+    configuration_saved=true
+    [ ! -L "$V4_DIR/.mail-settings.json" ] || { v4Error 'The saved mail-settings path must not be a symbolic link.' 3; return 3; }
+    if [ -f "$V4_DIR/.mail-settings.json" ]; then
+      cp -p -- "$V4_DIR/.mail-settings.json" "$recovery/mail-settings.json" || return 1
+      mail_settings_present=true
+    fi
+  fi
+  reconfiguration_started=true
   v4ApplyConfig "$metadata" >&2 || return $?
   applied=true
-  if [ -f "$V4_DOCROOT/configuration.php" ]; then v4RealignConfiguration || return $?; fi
+  if [ "$configuration_saved" = true ]; then
+    realignment_started=true
+    v4RealignConfiguration || return $?
+  fi
   frontend="joomla${V4_KEY}"
   [ "$(jq -r '.webserver' <<<"$metadata")" != nginx ] || frontend="nginx${V4_KEY}"
   if [ "$update_hosts" = true ]; then
@@ -11845,6 +11930,7 @@ function v4TlsSetup() {
     jq -n --arg file "$hosts_file" '{file:$file}' >"$root/hosts/${host}.json" && chmod 600 "$root/hosts/${host}.json" || return 1
   fi
   v4LocalRoute "$root" "$V4_KEY" "$host" "$frontend" "$https" || return $?
+  v4LocalTlsVerify "$host" "$https" "$caroot/rootCA.pem" || return $?
   v4Result "$(jq -n --arg host "$host" --arg port "$https" --argjson trusted "$install_trust" '{site:$host,url:("https://"+$host+(if $port=="443" then "" else ":"+$port end)),trust_installed:$trusted,certificate_scope:"this workstation"}')"
   )
 }
@@ -11852,13 +11938,13 @@ function v4TlsSetup() {
 function v4LocalRemoveSite() {
   (
   local root="$VDM_SRC_PATH/local-tls" status=0
-  if [ ! -f "$root/routes/${V4_HOST}.json" ] && [ ! -f "$root/hosts/${V4_HOST}.json" ] && [ "$(jq -r '.tls.mode' <<<"$V4_META")" != local ]; then return 0; fi
+  if [ ! -f "$root/routes/${V4_HOST}.yaml" ] && [ ! -f "$root/hosts/${V4_HOST}.json" ] && [ "$(jq -r '.tls.mode' <<<"$V4_META")" != local ]; then return 0; fi
   v4Lock "$root/.lock" || return $?
   trap 'status=$?; trap - EXIT; v4Unlock "$root/.lock" || status=1; exit "$status"' EXIT
   if [ -f "$root/hosts/${V4_HOST}.json" ] || [ "$(jq -r '.tls.update_hosts != false' <<<"$V4_META")" = true ]; then
     v4HostsEntry remove "$V4_HOST" || return $?
   fi
-  rm -f -- "$root/routes/${V4_HOST}.json" "$root/certs/${V4_HOST}.pem" "$root/certs/${V4_HOST}-key.pem" "$root/hosts/${V4_HOST}.json" || return 1
+  rm -f -- "$root/routes/${V4_HOST}.yaml" "$root/certs/${V4_HOST}.pem" "$root/certs/${V4_HOST}-key.pem" "$root/hosts/${V4_HOST}.json" || return 1
   v4LocalProxyStopIfIdle "$root"
   )
 }
@@ -11880,7 +11966,7 @@ function v4TlsDisable() {
     return 1
   fi
   # Keep the local hostname for plain HTTP. Only the HTTPS route and leaf keys go away.
-  if ! rm -f -- "$VDM_SRC_PATH/local-tls/routes/${V4_HOST}.json" "$VDM_SRC_PATH/local-tls/certs/${V4_HOST}.pem" "$VDM_SRC_PATH/local-tls/certs/${V4_HOST}-key.pem"; then
+  if ! rm -f -- "$VDM_SRC_PATH/local-tls/routes/${V4_HOST}.yaml" "$VDM_SRC_PATH/local-tls/certs/${V4_HOST}.pem" "$VDM_SRC_PATH/local-tls/certs/${V4_HOST}-key.pem"; then
     v4ApplyConfig "$old_meta" >&2 || true
     return 1
   fi
@@ -12219,6 +12305,7 @@ function v4ServiceName() {
     *)
       local service
       while IFS= read -r service; do
+        service="${service%$'\r'}"
         if [ "$role" = "$service" ]; then printf '%s\n' "$service"; return 0; fi
       done < <(v4Compose config --services 2>/dev/null)
       v4Error 'The requested service does not belong to this site.' 2
@@ -12288,6 +12375,7 @@ function v4SiteUrls() {
     else
       service=$(v4ServiceName frontend) || return $?
       binding=$(v4Compose port "$service" 80 2>/dev/null | head -n 1)
+      binding="${binding%$'\r'}"
       port="${binding##*:}"
       [[ "$port" =~ ^[0-9]+$ ]] || port=$(jq -r '.http_port // 0' <<< "$V4_META")
     fi
@@ -12300,11 +12388,13 @@ function v4SiteUrls() {
     fi
     service=$(v4ServiceName database-ui) || return $?
     binding=$(v4Compose port "$service" "$db_port" 2>/dev/null | head -n 1)
+    binding="${binding%$'\r'}"
     port="${binding##*:}"
     [[ "$port" =~ ^[0-9]+$ ]] && db_url="http://127.0.0.1:${port}"
     if service=$(v4ServiceName mail 2>/dev/null); then
       port=8025; [[ "$service" != mailcatcher* ]] || port=1080
       binding=$(v4Compose port "$service" "$port" 2>/dev/null | head -n 1)
+      binding="${binding%$'\r'}"
       port="${binding##*:}"
       [[ "$port" =~ ^[0-9]+$ ]] && mail_url="http://127.0.0.1:${port}"
     fi
@@ -12317,6 +12407,7 @@ function v4SiteUrls() {
     else
       service=$(v4ServiceName database-ui) || return $?
       binding=$(v4Compose port "$service" "$db_port" 2>/dev/null | head -n 1)
+      binding="${binding%$'\r'}"
       port="${binding##*:}"
       [[ "$port" =~ ^[0-9]+$ ]] && db_url="http://127.0.0.1:${port}"
     fi
@@ -13913,7 +14004,7 @@ function v4TuiRun() {
   else
     response=$(v4Main "$group" "$task" --config - --json <<< "$request") || status=$?
     if jq -e . >/dev/null 2>&1 <<< "$response"; then
-      response=$(jq -r 'if .ok then .data else .error end | if type=="string" then . else tojson end' <<< "$response")
+      response=$(jq -r 'if .ok then .data else {error:.error,details:.data} | with_entries(select(.value!=null)) end' <<< "$response")
     fi
     whiptail --msgbox "${response:-The operation returned no details. Exit status: $status}" 25 112 --scrolltext --title "$title" --backtitle "$BACK_TITLE"
   fi
@@ -14010,7 +14101,7 @@ function v4SitesMenu() {
   type -P jq >/dev/null 2>&1 || { showError 'Install jq to use the OctoJoom 4 site dashboard.'; return 3; }
   while true; do
     response=$(v4Main site list --json) || { showError "$response"; return 1; }
-    choices=(back 'Return to Joomla menu' batch 'Batch actions for multiple sites' create 'Create Joomla site' import 'Import an existing Joomla site' restore 'Restore a backup as a site' download 'Download Joomla source' diagnose 'Check for OctoJoom updates' update 'Install OctoJoom update')
+    choices=(back 'Return to Joomla menu' list 'List / filter site inventory' diagnose 'Diagnose host environment' batch 'Batch actions for multiple sites' create 'Create Joomla site' import 'Import an existing Joomla site' restore 'Restore a backup as a site' download 'Download Joomla source' checkupdate 'Check for OctoJoom updates' update 'Install OctoJoom update')
     while IFS=$'\t' read -r host description; do
       [ -n "$host" ] && choices+=("$host" "$description")
     done < <(jq -r '.data | (if type=="array" then . else .sites // [] end)[] | [.host // .site, ((.joomla_version // "Joomla") + " | " + (.status // "configured"))] | @tsv' <<< "$response")
@@ -14022,7 +14113,9 @@ function v4SitesMenu() {
       import) v4TuiAction site.import ;;
       restore) v4TuiAction backup.restore ;;
       download) v4TuiAction site.download ;;
-      diagnose) v4TuiAction update.check ;;
+      list) v4TuiAction site.list ;;
+      diagnose) v4TuiAction site.diagnose ;;
+      checkupdate) v4TuiAction update.check ;;
       update) v4TuiAction update.apply ;;
       *) v4SiteDashboard "$selection" ;;
     esac

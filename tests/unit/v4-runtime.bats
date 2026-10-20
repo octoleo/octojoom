@@ -162,14 +162,14 @@ HOOK
   jq -e '.services.postgresexample.volumes[0].target=="/var/lib/postgresql"' "$V4_COMPOSE"
 }
 
-@test "failed runtime recreate restores metadata and originally running service selection" {
+@test "failed runtime recreate restores metadata and service selection from native CRLF output" {
   v4GenerateCompose
   cp "$V4_COMPOSE" "$SANDBOX/compose-before"
   cp "$V4_DIR/project.json" "$SANDBOX/meta-before"
   hook_command docker <<'HOOK'
 case "$*" in
   *' config --format json'*) printf '{"services":{}}'; exit 0;;
-  *' ps '*) printf 'mariadbexample\njoomlaexample\n'; exit 0;;
+  *' ps '*) printf 'mariadbexample\r\njoomlaexample\r\n'; exit 0;;
   *' up '*)
     if [ ! -f "$STUB_DIR/first-up" ]; then touch "$STUB_DIR/first-up"; exit 1; fi
     printf '%s\n' "$*" > "$STUB_DIR/restored-up"
@@ -182,6 +182,7 @@ HOOK
   cmp "$SANDBOX/compose-before" "$V4_COMPOSE"
   cmp "$SANDBOX/meta-before" "$V4_DIR/project.json"
   grep -F 'mariadbexample joomlaexample' "$STUB_DIR/restored-up"
+  run ! grep -F $'\r' "$STUB_DIR/restored-up"
   [ ! -e "$V4_DIR/.operation.lock" ]
 }
 

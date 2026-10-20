@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 # shellcheck shell=bash
-# shellcheck disable=SC2034,SC2154
+# Dynamically loaded handlers invoke these test-local function overrides.
+# shellcheck disable=SC2034,SC2154,SC2317
 load ../helpers/common
 
 setup() { octojoom_setup; octojoom_config; }
@@ -65,4 +66,28 @@ setup() { octojoom_setup; octojoom_config; }
   run v4ActionSchema site.path
   assert_success
   [ "$(jq -c '.fields[]|select(.name=="target")|.enum' <<< "$output")" = '["project","docroot"]' ]
+}
+
+@test "v4 menu keeps failed batch details and retained recovery locations visible" {
+  v4Main() {
+    printf '%s\n' '{"ok":false,"error":{"message":"Inspect per-site results"},"data":{"results":[{"site":"alpha.test","ok":true},{"site":"beta.test","ok":false}],"recovery_archive":"/safe/recovery.tar.gz"}}'
+    return 1
+  }
+  whiptail() { printf '%s\n' "$@" > "$SANDBOX/display"; }
+  run v4TuiRun backup.create '{"all":true,"yes":true}' Backups
+  assert_status 1
+  grep -q 'Inspect per-site results' "$SANDBOX/display"
+  grep -q 'alpha.test' "$SANDBOX/display"
+  grep -q 'beta.test' "$SANDBOX/display"
+  grep -q '/safe/recovery.tar.gz' "$SANDBOX/display"
+}
+
+@test "v4 empty site inventory exposes host diagnosis and filtered listing" {
+  v4Main() { printf '%s\n' '{"ok":true,"data":[]}'; }
+  v4TuiAction() { printf '%s\n' "$1" >> "$SANDBOX/actions"; }
+  answers diagnose list checkupdate back
+  run v4SitesMenu
+  assert_success
+  assert_answers_used
+  [ "$(cat "$SANDBOX/actions")" = $'site.diagnose\nsite.list\nupdate.check' ]
 }

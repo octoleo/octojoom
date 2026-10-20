@@ -525,19 +525,22 @@ restore_dependencies() {
 @test "v4 failed replacement restores destination-local TLS route and key" {
   local archive tls_root="$VDM_SRC_PATH/local-tls"
   mkdir -p "$tls_root/routes" "$tls_root/certs" "$tls_root/hosts"
-  printf old-route > "$tls_root/routes/source.test.json"
+  printf old-route > "$tls_root/routes/source.test.yaml"
+  printf legacy-route > "$tls_root/routes/source.test.json"
   printf old-key > "$tls_root/certs/source.test-key.pem"
   archive=$(v4BackupCreate | jq -r '.file')
   restore_dependencies
   v4RealignConfiguration() {
-    printf wrong-route > "$VDM_SRC_PATH/local-tls/routes/source.test.json"
+    printf wrong-route > "$VDM_SRC_PATH/local-tls/routes/source.test.yaml"
+    printf changed-legacy-route > "$VDM_SRC_PATH/local-tls/routes/source.test.json"
     printf wrong-key > "$VDM_SRC_PATH/local-tls/certs/source.test-key.pem"
     return 1
   }
   V4_REQUEST=$(jq -n --arg input "$archive" '{input:$input,target_site:"source.test",target_key:"source",replace:true,yes:true}')
   run v4BackupRestore
   [ "$status" -ne 0 ]
-  [ "$(cat "$tls_root/routes/source.test.json")" = old-route ]
+  [ "$(cat "$tls_root/routes/source.test.yaml")" = old-route ]
+  [ "$(cat "$tls_root/routes/source.test.json")" = legacy-route ]
   [ "$(cat "$tls_root/certs/source.test-key.pem")" = old-key ]
   [ -f "$VDM_PROJECT_PATH/source/joomla/index.php" ]
 }
