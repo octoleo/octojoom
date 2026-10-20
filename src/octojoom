@@ -2004,7 +2004,7 @@ function joomla__TRuST__enable() {
       mkdir -p "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" || return $?
       # create the soft link
       [ -e "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ] || {
-        ln -s "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_CONTAINER}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" || return $?
+        v4CreateLink "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_CONTAINER}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" || return $?
       }
       # set some local variables
       local evn_file
@@ -2048,7 +2048,7 @@ function joomla__TRuST__enable() {
         container="${containered//\"/}"
         # create the soft link
         [ -e "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ] || {
-          ln -s "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" || return $?
+          v4CreateLink "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" || return $?
         }
         # check if image has its own env file also
         evn_file=''
@@ -2082,7 +2082,7 @@ function openssh__TRuST__enable() {
       mkdir -p "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" || return $?
       # create the soft lin
       [ -e "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" ] || {
-        ln -s "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_CONTAINER}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" || return $?
+        v4CreateLink "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_CONTAINER}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${VDM_CONTAINER}" || return $?
       }
       # set some local variables
       local evn_file
@@ -2126,7 +2126,7 @@ function openssh__TRuST__enable() {
         container="${containered//\"/}"
         # create the soft link
         [ -e "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ] || {
-          ln -s "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" || return $?
+          v4CreateLink "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" || return $?
         }
         # check if image has its own env file also
         evn_file=''
@@ -9033,6 +9033,14 @@ function v4Result() {
   fi
 }
 
+# Keep arbitrary JSON values off native process argument lists (Windows limits
+# the complete command line to 32 KiB). Arguments here remain inside Bash.
+function v4JsonSet() {
+  printf '%s\n' "$1" "$3" | jq -sc --arg key "$2" '
+    if length==2 and (.[0]|type)=="object" then .[0] + {($key):.[1]}
+    else error("one object and one value required") end'
+}
+
 # Fields are deliberately discoverable. Schema evolution requires a new version.
 function v4RequestSchema() {
   cat <<'JSON'
@@ -9048,7 +9056,7 @@ function v4ValidateRequest() {
     v4Error 'Configuration must be a JSON object with schema_version 1 and without control characters.' 2
     return 2
   fi
-  unknown=$(jq -r --argjson schema "$schema" 'keys[] as $key | select($schema.options | has($key) | not) | $key' <<< "$V4_REQUEST") || return 2
+  unknown=$(printf '%s\n' "$schema" "$V4_REQUEST" | jq -rs '.[0] as $schema | .[1] | keys[] as $key | select($schema.options | has($key) | not) | $key') || return 2
   if [ -n "$unknown" ]; then
     v4Error "Unknown configuration option names: ${unknown//$'\n'/, }. Run 'octojoom site schema' for the supported contract." 2
     return 2
@@ -9113,7 +9121,8 @@ function v4FormSchemas() {
   local schema registry
   schema=$(v4RequestSchema) || return 1
   registry=$(v4ActionSchemas) || return 1
-  jq -c --argjson schema "$schema" '
+  printf '%s\n' "$schema" "$registry" | jq -sc '
+    .[0] as $schema | .[1] |
     with_entries(.value |= (
     . as $action | .fields = [.fields[] | . as $name |
       select($schema.options[$name] != null) |
@@ -9134,7 +9143,7 @@ function v4FormSchemas() {
         elif $name == "mode" then ["clone","replace","fresh"]
         elif $name == "service" and $action.title=="Optional project service" then ["mail","redis","node"]
         else [] end)}]
-    ))' <<< "$registry"
+    ))'
 }
 
 function v4Parse() {
@@ -9164,7 +9173,8 @@ function v4Parse() {
         shift; continue ;;
       --container|--container=*)
         if [[ "$1" == *=* ]]; then value=${1#*=}; else [ "$#" -ge 2 ] || { v4Error '--container requires a site.' 2; return 2; }; shift; value=$1; fi
-        flags=$(jq -c --arg value "$value" '.site=$value' <<< "$flags") || return 2
+        value=$(printf '%s' "$value" | jq -Rs .) || return 2
+        flags=$(v4JsonSet "$flags" site "$value") || return 2
         shift; continue ;;
       --*)
         option=${1%%=*}; key=${option#--}; key=${key//-/_}
@@ -9187,18 +9197,22 @@ function v4Parse() {
             ;;
           integer)
             [[ "$value" =~ ^[0-9]+$ ]] || { v4Error "$option expects a non-negative integer." 2; return 2; }
-            flags=$(jq -c --arg key "$key" --arg value "$value" '.[$key]=($value|tonumber)' <<< "$flags") || return 2 ;;
+            value=$(printf '%s' "$value" | jq -Rs 'tonumber') || return 2
+            flags=$(v4JsonSet "$flags" "$key" "$value") || return 2 ;;
           object|array)
             jq -e --arg kind "$kind" 'type==$kind' <<< "$value" >/dev/null 2>&1 || { v4Error "$option expects a JSON $kind." 2; return 2; }
-            flags=$(jq -c --arg key "$key" --argjson value "$value" '.[$key]=$value' <<< "$flags") || return 2 ;;
+            flags=$(v4JsonSet "$flags" "$key" "$value") || return 2 ;;
           string\|array)
             if [[ "$value" == \[* ]]; then
               jq -e -s 'length==1 and (.[0]|type=="array" and all(.[]; type=="string"))' <<< "$value" >/dev/null 2>&1 || { v4Error "$option expects text or a JSON array of strings." 2; return 2; }
-              flags=$(jq -c --arg key "$key" --argjson value "$value" '.[$key]=$value' <<< "$flags") || return 2
+              flags=$(v4JsonSet "$flags" "$key" "$value") || return 2
             else
-              flags=$(jq -c --arg key "$key" --arg value "$value" '.[$key]=$value' <<< "$flags") || return 2
+              value=$(printf '%s' "$value" | jq -Rs .) || return 2
+              flags=$(v4JsonSet "$flags" "$key" "$value") || return 2
             fi ;;
-          *) flags=$(jq -c --arg key "$key" --arg value "$value" '.[$key]=$value' <<< "$flags") || return 2 ;;
+          *)
+            value=$(printf '%s' "$value" | jq -Rs .) || return 2
+            flags=$(v4JsonSet "$flags" "$key" "$value") || return 2 ;;
         esac
         shift; continue ;;
       -*) v4Error 'Unknown short option. Use the documented long options.' 2; return 2 ;;
@@ -9217,7 +9231,7 @@ function v4Parse() {
   fi
   file_json=$(v4NormalizeOptions "$file_json") || { v4Error 'The JSON configuration contains conflicting option aliases.' 2; return 2; }
   flags=$(v4NormalizeOptions "$flags") || { v4Error 'The command flags contain conflicting option aliases.' 2; return 2; }
-  V4_REQUEST=$(jq -cn --argjson file "$file_json" --argjson flags "$flags" '$file + $flags | .schema_version //= 1') || return 2
+  V4_REQUEST=$(printf '%s\n' "$file_json" "$flags" | jq -sc '.[0] + .[1] | .schema_version //= 1') || return 2
   V4_JSON=$(v4Get json false)
   v4ValidateRequest || return $?
   if [ "${#positionals[@]}" -gt 2 ]; then v4Error 'Expected an action group and action; place tool arguments after --.' 2; return 2; fi
@@ -9611,11 +9625,11 @@ function v4Main() {
       site:schema)
         data=$(v4RequestSchema)
         if declare -F v4ActionSchemas >/dev/null; then
-          data=$(jq -cn --argjson schema "$data" --argjson actions "$(v4ActionSchemas)" '$schema + {action_schemas:$actions}') || status=1
+          data=$(printf '%s\n' "$data" "$(v4ActionSchemas)" | jq -sc '.[0] + {action_schemas:.[1]}') || status=1
           if [ "$status" -eq 0 ] && declare -F v4ActionSchema >/dev/null; then
             local forms
             forms=$(v4FormSchemas) || status=1
-            if [ "$status" -eq 0 ]; then data=$(jq -cn --argjson schema "$data" --argjson forms "$forms" '$schema + {form_schemas:$forms}') || status=1; fi
+            if [ "$status" -eq 0 ]; then data=$(printf '%s\n' "$data" "$forms" | jq -sc '.[0] + {form_schemas:.[1]}') || status=1; fi
           fi
         fi
         ;;
@@ -9663,7 +9677,9 @@ function v4Main() {
   fi
   if [ "$status" -ne 0 ]; then error="${V4_ERROR:-The operation failed. Inspect stderr for details.}"; fi
   if [ "$V4_JSON" = true ]; then
-    jq -cn --arg action "$action" --argjson status "$status" --argjson data "$data" --arg error "$error" '{schema_version:1,ok:($status==0),action:$action,data:$data,error:(if $status==0 then null else {code:$status,message:$error} end)}'
+    { printf '%s\n' "$data"; printf '%s' "$error" | jq -Rs .; } |
+      jq -sc --arg action "$action" --argjson status "$status" '.[0] as $data | .[1] as $error |
+        {schema_version:1,ok:($status==0),action:$action,data:$data,error:(if $status==0 then null else {code:$status,message:$error} end)}'
   elif [ "$data" != null ]; then
     if jq -e 'type=="object" and (has("stdout") or has("stderr"))' <<< "$data" >/dev/null; then
       jq -jr '.stdout // empty' <<< "$data"
@@ -9687,7 +9703,7 @@ function v4OptionKey() {
 }
 
 function v4NormalizeOptions() {
-  local object="$1" key canonical value
+  local object="$1" key canonical
   while IFS= read -r key; do
     canonical=$(v4OptionKey "$key")
     if [ "$canonical" != "$key" ]; then
@@ -9696,8 +9712,7 @@ function v4NormalizeOptions() {
           v4Error "Conflicting aliases for ${canonical//_/-}." 2; return 2;
         }
       fi
-      value=$(jq -c --arg key "$key" '.[$key]' <<< "$object") || return 2
-      object=$(jq -c --arg key "$key" --arg canonical "$canonical" --argjson value "$value" 'del(.[$key]) | .[$canonical]=$value' <<< "$object") || return 2
+      object=$(jq -c --arg key "$key" --arg canonical "$canonical" '.[$canonical]=.[$key] | del(.[$key])' <<< "$object") || return 2
     fi
   done < <(jq -r 'keys[]' <<< "$object")
   printf '%s\n' "$object"
@@ -9737,6 +9752,37 @@ function v4ShouldHandle() {
 # shellcheck disable=SC2034,SC2030,SC2031
 # Joomla runtime configuration. Compose JSON is YAML-compatible; keep user
 # customizations in docker-compose.override.yml so regeneration is lossless.
+function v4CreateLink() {
+  local target="$1" destination="$2" status=0
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    v4Error 'Refusing to replace an existing enabled-site path.' 3
+    return 3
+  fi
+  case "${OSTYPE:-}" in
+    msys*) MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ln -s -- "$target" "$destination" || status=$? ;;
+    cygwin*) CYGWIN="${CYGWIN:+$CYGWIN }winsymlinks:nativestrict" ln -s -- "$target" "$destination" || status=$? ;;
+    *) ln -s -- "$target" "$destination" || status=$? ;;
+  esac
+  if [ "$status" -ne 0 ] || [ ! -L "$destination" ]; then
+    case "${OSTYPE:-}" in
+      msys*|cygwin*) v4Error 'Native Windows symbolic links are required. Enable Windows Developer Mode or use an elevated terminal; no directory-copy fallback is permitted.' 3 ;;
+      *) v4Error 'Could not create the enabled-site symbolic link.' 3 ;;
+    esac
+    return 3
+  fi
+}
+
+function v4CheckLinkSupport() {
+  case "${OSTYPE:-}" in msys*|cygwin*) ;; *) return 0 ;; esac
+  local directory="${1:-$VDM_REPO_PATH}" staging status=0
+  mkdir -p "$directory" || return 1
+  staging=$(mktemp -d "$directory/.link-check.XXXXXX") || return 1
+  mkdir "$staging/target" || { rmdir "$staging"; return 1; }
+  v4CreateLink "$staging/target" "$staging/link" || status=$?
+  rm -rf "$staging" || status=1
+  return "$status"
+}
+
 function v4DockerHostPath() {
   case "${OSTYPE:-}" in
     msys*|cygwin*)
@@ -9901,7 +9947,8 @@ function v4GenerateCompose() {
   network=$(jq -r '.network // empty' <<< "$V4_META")
   network="${network:-${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}}"
   host_project=$(v4DockerHostPath "$(jq -r '.project_dir' <<< "$V4_META")") || return $?
-  json=$(jq -n --argjson m "$V4_META" --arg network "$network" --arg host_project "$host_project" '
+  json=$(jq --arg network "$network" --arg host_project "$host_project" '
+    . as $m |
     def env($suffix): "${VDM_" + $m.env_key + "_" + $suffix + "}";
     ($m.key) as $k | ($m.database.engine+$k) as $db | ("joomla"+$k) as $web |
     (if $m.webserver == "nginx" then "nginx"+$k else $web end) as $http |
@@ -9938,7 +9985,7 @@ function v4GenerateCompose() {
     end |
     if $m.database.engine=="postgres" then .services[("adminer"+$k)]={image:"adminer:5",container_name:("adminer"+$k),restart:"unless-stopped",networks:["default"],environment:{ADMINER_DEFAULT_SERVER:$db},ports:[{target:8080,published:"0",host_ip:"127.0.0.1"}]}
     else .services[("phpmyadmin"+$k)]={image:"phpmyadmin:5",container_name:("phpmyadmin"+$k),restart:"unless-stopped",networks:["default"],environment:{PMA_HOST:$db,PMA_PORT:"3306",UPLOAD_LIMIT:"256M"},ports:[{target:80,published:"0",host_ip:"127.0.0.1"}]} end
-  ') || return 1
+  ' <<< "$V4_META") || return 1
   if declare -F v4NetworkCompose >/dev/null; then json=$(v4NetworkCompose "$json") || return $?; fi
   temporary=$(mktemp "${output}.tmp.XXXXXX") || return 1
   if ! printf '%s\n' "$json" > "$temporary" || ! chmod 600 "$temporary" || ! mv -f "$temporary" "$output"; then
@@ -10039,16 +10086,18 @@ function v4RuntimeNewMetadata() {
   install=$(v4Get install true); name=$(v4Get database_name joomla); user=$(v4Get database_user joomla)
   image=$(v4Get image "$(v4RuntimeImage "$version" "$php" "$webserver")")
   if ! { [[ "$port" =~ ^[0-9]+$ ]] && [[ "$install" = true || "$install" = false ]]; }; then v4Error 'http_port must be numeric and install must be boolean.' 2; return 2; fi
-  jq -n --arg host "$host" --arg key "$key" --arg env "$env_key" --arg project "$VDM_PROJECT_PATH/$key" --arg docroot "$docroot" \
+  jq --arg host "$host" --arg key "$key" --arg env "$env_key" --arg project "$VDM_PROJECT_PATH/$key" --arg docroot "$docroot" \
     --arg image "$image" --arg version "$version" --arg php "$php" --arg webserver "$webserver" --arg profile "$profile" \
     --arg engine "$engine" --arg db_version "$db_version" --arg name "$name" --arg user "$user" --argjson port "$port" --argjson install "$install" \
     --arg tls "$(v4Get tls_mode none)" --arg resolver "$(v4Get tls_resolver vdmresolver)" \
     --arg network "$(v4Get network "${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}")" \
-    --argjson hooks "$(jq -c '.hooks // {}' <<< "$V4_REQUEST")" \
-    --argjson services "$(jq -c '{mail:(.mail // false),redis:(.redis // false),node:(.node // false)} + (if has("mail_port") then {mail_port:.mail_port} else {} end) + (if has("node_image") then {node_image:.node_image} else {} end)' <<< "$V4_REQUEST")" \
-    '{schema_version:1,host:$host,key:$key,env_key:$env,project_dir:$project,docroot:$docroot,image:$image,joomla_version:$version,php_version:$php,
+    '. as $request | {schema_version:1,host:$host,key:$key,env_key:$env,project_dir:$project,docroot:$docroot,image:$image,joomla_version:$version,php_version:$php,
       webserver:$webserver,profile:$profile,http_port:$port,install:$install,database:{engine:$engine,version:$db_version,name:$name,user:$user},
-      tls:{mode:$tls,resolver:$resolver},network:$network,services:$services,hooks:$hooks,php_settings:{}}'
+      tls:{mode:$tls,resolver:$resolver},network:$network,
+      services:({mail:($request.mail // false),redis:($request.redis // false),node:($request.node // false)} +
+        (if $request|has("mail_port") then {mail_port:$request.mail_port} else {} end) +
+        (if $request|has("node_image") then {node_image:$request.node_image} else {} end)),
+      hooks:($request.hooks // {}),php_settings:{}}' <<< "$V4_REQUEST"
 }
 
 function v4RuntimeCreateEnv() {
@@ -10096,6 +10145,7 @@ function v4SiteCreate() {
       v4Error 'A source package requires an HTTPS URL and its SHA-256 checksum.' 2; return 2;
     fi
   fi
+  if [ "$start" = true ]; then v4CheckLinkSupport || return $?; fi
   env_source=$(mktemp "${TMPDIR:-/tmp}/octojoom-env.XXXXXX") || return 1
   if ! v4RuntimeCreateEnv "$meta" "$env_source"; then rm -f "$env_source"; return 2; fi
   if ! v4RuntimeValidateImage "$meta"; then rm -f "$env_source"; return 2; fi
@@ -10127,7 +10177,7 @@ function v4SiteCreate() {
     if [ "$(jq -r '.install' <<< "$meta")" = true ]; then v4RealignConfiguration || return $?; fi
     if declare -F v4RunHook >/dev/null; then v4RunHook post-start || return $?; fi
     mkdir -p "$VDM_REPO_PATH/joomla/enabled" || return 1
-    if [ ! -L "$VDM_REPO_PATH/joomla/enabled/$host" ]; then ln -s "$V4_DIR" "$VDM_REPO_PATH/joomla/enabled/$host" || return 1; fi
+    if [ ! -L "$VDM_REPO_PATH/joomla/enabled/$host" ]; then v4CreateLink "$V4_DIR" "$VDM_REPO_PATH/joomla/enabled/$host" || return $?; fi
   fi
   v4Result "$(jq -n --arg site "$host" --arg credentials "$V4_ENV_FILE" --argjson running "$start" '{site:$site,prepared:true,running:$running,credentials_file:$credentials}')"
 }
@@ -10357,15 +10407,15 @@ function v4RealignConfiguration() {
     ! migrationReadEnvValue "$V4_ENV_FILE" "${env_prefix}_DB_PASS" password; then
       v4Error 'The scoped database environment is incomplete.' 2; return 2
   fi
-  settings=$(jq -n --arg host "$V4_DB_SERVICE" --arg db "$name" --arg user "$user" --arg password "$password" \
-    --arg engine "$V4_DB_ENGINE" --argjson meta "$V4_META" --arg clear "$(v4Get clear_url true)" --arg label "$(v4Get dev_label false)" '
-    {host:$host,db:$db,user:$user,password:$password,dbtype:(if $engine=="postgres" then "pgsql" else "mysqli" end),
+  settings=$(jq --arg host "$V4_DB_SERVICE" --arg db "$name" --arg user "$user" --arg password "$password" \
+    --arg engine "$V4_DB_ENGINE" --arg clear "$(v4Get clear_url true)" --arg label "$(v4Get dev_label false)" '
+    . as $meta | {host:$host,db:$db,user:$user,password:$password,dbtype:(if $engine=="postgres" then "pgsql" else "mysqli" end),
       log_path:"/var/www/html/administrator/logs",tmp_path:"/var/www/html/tmp"} +
     (if $clear=="true" then {live_site:"",cookie_domain:""} else {} end) +
     (if $meta.profile=="local" then {force_ssl:0} else {} end) +
     (if $meta.profile=="local" or $meta.tls.mode!="none" then {behind_loadbalancer:true} else {} end) +
     (if $meta.services.mail then {mailer:"smtp",smtphost:("mailpit"+$meta.key),smtpport:1025,smtpauth:false,smtpsecure:"",smtpuser:"",smtppass:""} else {} end) +
-    {_development_label:($label=="true")}') || return 1
+    {_development_label:($label=="true")}' <<< "$V4_META") || return 1
   code=$(cat <<'PHP'
 $path="/var/www/html/configuration.php";
 try {
@@ -10712,7 +10762,7 @@ function v4DbExport() {
           results=$(jq -c --arg site "$host" '. + [{site:$site,ok:false}]' <<< "$results") || exit 1
         fi
       done <<< "$sites"
-      v4Result "$(jq -cn --argjson results "$results" '{results:$results}')"
+      v4Result "$(jq -c '{results:.}' <<< "$results")"
       exit "$status"
     fi
     v4Require site || exit $?
@@ -10818,7 +10868,7 @@ function v4DbConsole() {
       postgres) result=$(printf '%s\n' "$statement" | v4Exec "$V4_DB_SERVICE" sh -c 'export PGPASSWORD="$POSTGRES_PASSWORD"; exec psql --host=127.0.0.1 --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" --csv --set=ON_ERROR_STOP=on') || return $? ;;
       *) return 2 ;;
     esac
-    v4Result "$(jq -cn --arg site "$V4_HOST" --arg output "$result" '{site:$site,output:$output}')"
+    v4Result "$(printf '%s' "$result" | jq -Rsc --arg site "$V4_HOST" '{site:$site,output:.}')"
     return $?
   fi
   if [ "$(v4Get json false)" = true ]; then v4Error 'The interactive SQL console cannot use JSON output.' 2; return 2; fi
@@ -10885,7 +10935,12 @@ function v4PackageHashMap() {
     [ -s "$list" ] || exit 2
     if command -v sha256sum >/dev/null 2>&1; then xargs -0 sha256sum -- < "$list" > "$hashes" || exit 1
     else xargs -0 shasum -a 256 -- < "$list" > "$hashes" || exit 1; fi
-    jq -Rsc 'split("\n") | map(select(length>0) | capture("^(?<value>[a-f0-9]{64})  \\./(?<key>.*)$")) | from_entries' "$hashes"
+    # GNU checksum output has a mode column: space for text, * for binary.
+    # Git Bash defaults to binary mode. Both hash identical file bytes here;
+    # normalize native CRLF and reject unknown lines instead of dropping them.
+    jq -Rsc 'split("\n") | map(select(length>0) | sub("\r$"; "") |
+      if test("^[a-f0-9]{64} [ *]\\./.+$") then capture("^(?<value>[a-f0-9]{64}) [ *]\\./(?<key>.*)$")
+      else error("Unsupported checksum output") end) | from_entries' "$hashes"
   )
 }
 
@@ -10996,8 +11051,8 @@ function v4BackupBuild() {
     v4DatabaseWriteDump "$package/database.sql.gz" || exit $?
     if [ "$scope" != database ]; then v4PackageProject "$package" "$scope" || exit $?; fi
     created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    jq -cn --arg created "$created" --arg label "$label" --arg scope "$scope" --argjson site "$V4_META" \
-      '{schema_version:1,format:"octojoom-logical",created:$created,label:$label,scope:$scope,site:$site}' > "$package/manifest.json" || exit 1
+    jq -c --arg created "$created" --arg label "$label" --arg scope "$scope" \
+      '{schema_version:1,format:"octojoom-logical",created:$created,label:$label,scope:$scope,site:.}' <<< "$V4_META" > "$package/manifest.json" || exit 1
     v4PackageChecksums "$package" && v4PackageVerify "$package" || exit $?
     v4Resume || exit $?
     resume=false
@@ -11029,7 +11084,7 @@ function v4BackupCreate() {
         if item=$(V4_RESULT_FILE='' V4_REQUEST="$request" v4BackupCreate </dev/null); then results=$(jq -c --argjson item "$item" '.+[$item]' <<< "$results")
         else status=1; results=$(jq -c --arg site "$host" '.+[{site:$site,ok:false}]' <<< "$results"); fi
       done <<< "$sites"
-      v4Result "$(jq -cn --argjson results "$results" '{results:$results}')"
+      v4Result "$(jq -c '{results:.}' <<< "$results")"
       exit "$status"
     fi
     v4Require site || exit $?
@@ -11059,7 +11114,7 @@ function v4BackupList() {
     if v4Has site; then [[ "$name" == "$(v4Get site)"-* ]] || continue; fi
     result=$(jq -c --arg file "$file" --arg name "$name" '.+[{name:$name,file:$file}]' <<< "$result") || return 1
   done < <(find "$root" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.tgz' -o -name '*.zip' -o -name '*.sql' -o -name '*.sql.gz' \) -print0)
-  v4Result "$(jq -cn --argjson backups "$result" '{backups:($backups|sort_by(.name))}')"
+  v4Result "$(jq -c '{backups:sort_by(.name)}' <<< "$result")"
 }
 
 function v4BackupDelete() {
@@ -11164,6 +11219,7 @@ function v4RestoreArchive() {
     local requested_tls local_tls_required=false old_request="$V4_REQUEST" temp_request status_json old_running='' operation_lock='' operation_locked=false service original_stopped=false imported_hooks target_hooks='{}' hook_status=0 tls_item tls_snapshot='' previous_tls='none'
     local -a original_services=()
     v4Confirm || exit $?
+    if [ "$(v4Get activate true)" = true ]; then v4CheckLinkSupport "$VDM_REPO_PATH" || exit $?; fi
     staging=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/octojoom-restore.XXXXXX") || exit 1
     trap '
       status=$?
@@ -11229,7 +11285,7 @@ function v4RestoreArchive() {
       if ! v4Has profile; then metadata=$(jq -c --arg profile "$(jq -r '.profile' <<< "$V4_META")" '.profile=$profile' <<< "$metadata") || exit 2; fi
       if ! v4Has http_port; then metadata=$(jq -c --argjson port "$(jq '.http_port // 0' <<< "$V4_META")" '.http_port=$port' <<< "$metadata") || exit 2; fi
       if ! v4Has tls_mode; then
-        metadata=$(jq -c --argjson tls "$(jq -c '.tls' <<< "$V4_META")" '.tls=$tls' <<< "$metadata") || exit 2
+        metadata=$(printf '%s\n%s\n' "$metadata" "$V4_META" | jq -sc '.[0].tls=.[1].tls | .[0]') || exit 2
       fi
       tls_snapshot="$staging/previous-local-tls"
       (umask 077; mkdir -p "$tls_snapshot") || exit 1
@@ -11240,7 +11296,7 @@ function v4RestoreArchive() {
           mkdir -p "$tls_snapshot/$(dirname "$tls_item")" && cp -p "$VDM_SRC_PATH/local-tls/$tls_item" "$tls_snapshot/$tls_item" || exit 1
         fi
       done
-      if [ "$(v4Get trust_hooks false)" != true ]; then metadata=$(jq -c --argjson hooks "$target_hooks" '.hooks=$hooks' <<< "$metadata") || exit 2; fi
+      if [ "$(v4Get trust_hooks false)" != true ]; then metadata=$(printf '%s\n%s\n' "$metadata" "$target_hooks" | jq -sc '.[0].hooks=.[1] | .[0]') || exit 2; fi
       v4RunHook pre-restore || exit $?
       backup_root=$(v4BackupRoot) || exit $?
       recovery="$backup_root/$host-before-restore-$(date -u +%Y%m%dT%H%M%SZ)-${RANDOM}.tar.gz"
@@ -11318,7 +11374,9 @@ function v4RestoreArchive() {
     if [ "$(v4Get activate true)" = false ]; then v4Compose stop >/dev/null || exit 1; fi
     mkdir -p "$VDM_REPO_PATH/joomla/enabled" || exit 1
     if [ "$(v4Get activate true)" = true ]; then
-      [ -e "$VDM_REPO_PATH/joomla/enabled/$host" ] || ln -s "$target_dir" "$VDM_REPO_PATH/joomla/enabled/$host" || exit 1
+      if [ ! -e "$VDM_REPO_PATH/joomla/enabled/$host" ] && [ ! -L "$VDM_REPO_PATH/joomla/enabled/$host" ]; then
+        v4CreateLink "$target_dir" "$VDM_REPO_PATH/joomla/enabled/$host" || exit 1
+      fi
     else
       [ ! -L "$VDM_REPO_PATH/joomla/enabled/$host" ] || rm "$VDM_REPO_PATH/joomla/enabled/$host" || exit 1
     fi
@@ -11367,9 +11425,9 @@ function v4SnapshotList() {
     case "$file" in *.zip) manifest=$(unzip -p "$file" manifest.json 2>/dev/null || unzip -p "$file" ./manifest.json 2>/dev/null) ;;
       *) manifest=$(tar -xOzf "$file" ./manifest.json 2>/dev/null || tar -xOzf "$file" manifest.json 2>/dev/null) ;; esac
     jq -e '.scope=="database" and .format=="octojoom-logical"' <<< "$manifest" >/dev/null 2>&1 || continue
-    result=$(jq -c --arg file "$file" --argjson metadata "$manifest" '.+[{file:$file,label:$metadata.label,created:$metadata.created,site:$metadata.site.host,engine:$metadata.site.database.engine}]' <<< "$result") || return 1
+    result=$(printf '%s\n%s\n' "$result" "$manifest" | jq -sc --arg file "$file" '.[0]+[{file:$file,label:.[1].label,created:.[1].created,site:.[1].site.host,engine:.[1].site.database.engine}]') || return 1
   done < <(find "$root" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.tgz' -o -name '*.zip' \) -print0)
-  v4Result "$(jq -cn --argjson snapshots "$result" '{snapshots:($snapshots|sort_by(.created))}')"
+  v4Result "$(jq -c '{snapshots:sort_by(.created)}' <<< "$result")"
 }
 
 # shellcheck disable=SC2030,SC2031
@@ -11408,7 +11466,7 @@ function v4DbSwitch() {
       fresh)
         v4Require target_site target_key || exit $?
         [ "$(v4Get target_site)" != "$source" ] || { v4Error 'A fresh database family requires a separate new Joomla site.' 2; exit 2; }
-        request=$(jq -c --argjson original "$original" '.site=.target_site | .key=.target_key | .env_key=(.target_env_key // (.target_key|ascii_upcase|gsub("-";"_"))) | .image=($original.image) | .joomla_version=$original.joomla_version | .php_version=$original.php_version | .webserver=$original.webserver | .docroot=$original.docroot | .profile=$original.profile | .tls_mode="none" | del(.target_site,.target_key,.target_env_key)' <<< "$V4_REQUEST")
+        request=$(printf '%s\n%s\n' "$V4_REQUEST" "$original" | jq -sc '.[1] as $original | .[0] | .site=.target_site | .key=.target_key | .env_key=(.target_env_key // (.target_key|ascii_upcase|gsub("-";"_"))) | .image=($original.image) | .joomla_version=$original.joomla_version | .php_version=$original.php_version | .webserver=$original.webserver | .docroot=$original.docroot | .profile=$original.profile | .tls_mode="none" | del(.target_site,.target_key,.target_env_key)')
         V4_REQUEST="$request" v4SiteCreate
         ;;
       clone)
@@ -11439,6 +11497,7 @@ function v4SiteImport() {
     local input sql stage='' status request target created=false published=false directory='' project='' target_tls hook_status=0
     v4Require input database_input target_site target_key || exit $?
     v4Confirm || exit $?
+    if [ "$(v4Get activate true)" = true ]; then v4CheckLinkSupport "$VDM_REPO_PATH" || exit $?; fi
     input=$(v4Get input); sql=$(v4Get database_input)
     if ! { [ -f "$sql" ] && [ ! -L "$sql" ]; }; then v4Error 'A regular SQL dump is required.' 2; exit 2; fi
     case "$sql" in *.sql|*.mysql) ;; *.sql.gz|*.mysql.gz) gzip -t "$sql" || exit 2 ;; *) v4Error 'The database input must be SQL or SQL.gz.' 2; exit 2 ;; esac
@@ -11482,7 +11541,12 @@ function v4SiteImport() {
     published=true
     v4RunHook post-import || hook_status=$?
     if [ "$(v4Get activate true)" = false ]; then v4Compose stop >/dev/null || exit 1
-    else mkdir -p "$VDM_REPO_PATH/joomla/enabled" && ln -s "$V4_DIR" "$VDM_REPO_PATH/joomla/enabled/$target" || exit 1; fi
+    else
+      mkdir -p "$VDM_REPO_PATH/joomla/enabled" || exit 1
+      if [ ! -e "$VDM_REPO_PATH/joomla/enabled/$target" ] && [ ! -L "$VDM_REPO_PATH/joomla/enabled/$target" ]; then
+        v4CreateLink "$V4_DIR" "$VDM_REPO_PATH/joomla/enabled/$target" || exit 1
+      fi
+    fi
     v4Result "$(jq -cn --arg site "$target" '{site:$site,imported:true,source_preserved:true}')"
     [ "$hook_status" -eq 0 ] || { v4Error 'The site was imported and retained, but its post-import hook failed.'; exit "$hook_status"; }
   )
@@ -11536,7 +11600,7 @@ function v4SiteMigrate() {
           exit 1
         }
         jq -e '.ok==true' <<< "$result" >/dev/null || { v4Error 'The destination did not report a successful import.'; exit 1; }
-        v4Result "$(jq -cn --arg remote "$remote" --arg file "$archive" --arg remote_file "$remote_archive" --argjson destination "$result" '{direction:"push",remote:$remote,archive:$file,remote_archive:$remote_file,destination:$destination.data,source_preserved:true}')"
+        v4Result "$(jq -c --arg remote "$remote" --arg file "$archive" --arg remote_file "$remote_archive" '{direction:"push",remote:$remote,archive:$file,remote_archive:$remote_file,destination:.data,source_preserved:true}' <<< "$result")"
         ;;
       pull)
         create_args=(backup create --site "$site" --scope full --format tar.gz --json --no-interaction)
@@ -11568,7 +11632,7 @@ function v4BackupCleanup() {
     case "$file" in *.zip) manifest=$(unzip -p "$file" manifest.json 2>/dev/null || unzip -p "$file" ./manifest.json 2>/dev/null) ;;
       *) manifest=$(tar -xOzf "$file" ./manifest.json 2>/dev/null || tar -xOzf "$file" manifest.json 2>/dev/null) ;; esac
     jq -e --arg site "$site" '.format=="octojoom-logical" and .site.host==$site and (.created|test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))' <<< "$manifest" >/dev/null 2>&1 || continue
-    records=$(jq -c --arg file "$file" --argjson manifest "$manifest" '.+[{file:$file,created:$manifest.created}]' <<< "$records") || return 1
+    records=$(jq -c --arg file "$file" --arg created "$(jq -r '.created' <<< "$manifest")" '.+[{file:$file,created:$created}]' <<< "$records") || return 1
   done < <(find "$root" -maxdepth 1 -type f -name "$site-*" \( -name '*.tar.gz' -o -name '*.tgz' -o -name '*.zip' \) -print0)
   files=$(jq -r --argjson keep "$keep" 'sort_by(.created,.file)|reverse|.[$keep:]|.[].file' <<< "$records") || return 1
   while IFS= read -r file; do
@@ -11576,7 +11640,7 @@ function v4BackupCleanup() {
     if [ "$dry_run" != true ]; then rm -- "$file" || return 1; fi
     result=$(jq -c --arg file "$file" '.+[$file]' <<< "$result") || return 1
   done <<< "$files"
-  v4Result "$(jq -cn --arg site "$site" --argjson dry_run "$dry_run" --argjson files "$result" '{site:$site,dry_run:$dry_run,files:$files}')"
+  v4Result "$(jq -c --arg site "$site" --argjson dry_run "$dry_run" '{site:$site,dry_run:$dry_run,files:.}' <<< "$result")"
 }
 
 function v4DatabaseBatchSites() {
@@ -12142,9 +12206,19 @@ function v4MailTest() {
     define("_JEXEC",1);define("JPATH_BASE","/var/www/html");require JPATH_BASE."/includes/defines.php";require JPATH_BASE."/includes/framework.php";
     require_once JPATH_CONFIGURATION."/configuration.php";$config=new Joomla\Registry\Registry(new JConfig);
     if($config->get("mailer")!=="smtp" || $config->get("smtphost")!==$argv[1] || (int)$config->get("smtpport")!==1025){fwrite(STDERR,"Joomla mail configuration no longer points at this sites capture service. Re-enable mail capture first.\n");exit(3);}
-    $mailer=interface_exists(Joomla\CMS\Mail\MailerFactoryInterface::class)?Joomla\CMS\Factory::getContainer()->get(Joomla\CMS\Mail\MailerFactoryInterface::class)->createMailer($config):Joomla\CMS\Factory::getMailer();
-    $mailer->setSender("octojoom@example.test","OctoJoom");$mailer->addRecipient("capture@example.test");$mailer->setSubject("OctoJoom mail capture test");$mailer->setBody("This message verifies this Joomla sites configured mail transport.");
-    try {if($mailer->send()===false){throw new RuntimeException("Mailer returned failure");}}catch(Throwable $error){fwrite(STDERR,"Joomla mailer rejected the test message: ".$error->getMessage()."\n");exit(1);}
+    try {
+      // Match Joomla cli/joomla.php bootstrap without dispatching a CLI command.
+      // Mail::Send consults the application configuration before SMTP delivery.
+      $container=Joomla\CMS\Factory::getContainer();
+      $container->alias("session","session.cli")->alias("JSession","session.cli")
+        ->alias(Joomla\CMS\Session\Session::class,"session.cli")
+        ->alias(Joomla\Session\Session::class,"session.cli")
+        ->alias(Joomla\Session\SessionInterface::class,"session.cli");
+      Joomla\CMS\Factory::$application=$container->get(Joomla\Console\Application::class);
+      $mailer=interface_exists(Joomla\CMS\Mail\MailerFactoryInterface::class)?$container->get(Joomla\CMS\Mail\MailerFactoryInterface::class)->createMailer($config):Joomla\CMS\Factory::getMailer();
+      $mailer->setSender("octojoom@example.test","OctoJoom");$mailer->addRecipient("capture@example.test");$mailer->setSubject("OctoJoom mail capture test");$mailer->setBody("This message verifies this Joomla sites configured mail transport.");
+      if($mailer->send()===false){throw new RuntimeException("Mailer returned failure");}
+    }catch(Throwable $error){fwrite(STDERR,"Joomla mailer rejected the test message: ".$error->getMessage()."\n");exit(1);}
   ' "mailpit${V4_KEY}" >&2 || return $?
   v4Result '{"test_message_sent":true,"recipient":"capture@example.test"}'
 }
@@ -12455,11 +12529,11 @@ function v4SiteFacts() {
     site_name=$(getJoomlaConfigValue "$V4_DOCROOT/configuration.php" sitename 2>/dev/null) || site_name=''
   fi
   urls=$(v4SiteUrls) || return $?
-  jq -nc --arg host "$V4_HOST" --arg key "$V4_KEY" --arg title "$site_name" --arg joomla "$version" \
+  printf '%s' "$site_name" | jq -Rsc --arg host "$V4_HOST" --arg key "$V4_KEY" --arg joomla "$version" \
     --arg php "$php" --arg database "$database" --arg engine "$V4_DB_ENGINE" --arg project "$V4_PROJECT" \
     --arg docroot "$V4_DOCROOT" --arg compose "$V4_COMPOSE" --arg webserver "$(jq -r '.webserver // "apache"' <<< "$V4_META")" --argjson enabled "$enabled" --argjson web "$web" \
     --argjson db "$db" --argjson frontend "$frontend" --argjson urls "$urls" \
-    '{host:$host,key:$key,title:$title,joomla_version:$joomla,php_version:$php,status:$web.status,webserver:$webserver,project_dir:$project,docroot:$docroot,database:{engine:$engine,version:$database,state:$db},web:$web,frontend:$frontend,enabled:$enabled,paths:{project:$project,docroot:$docroot,compose:$compose},urls:$urls}'
+    '{host:$host,key:$key,title:.,joomla_version:$joomla,php_version:$php,status:$web.status,webserver:$webserver,project_dir:$project,docroot:$docroot,database:{engine:$engine,version:$database,state:$db},web:$web,frontend:$frontend,enabled:$enabled,paths:{project:$project,docroot:$docroot,compose:$compose},urls:$urls}'
 }
 
 function v4SiteInfo() {
@@ -12483,19 +12557,19 @@ function v4SiteList() {
       if [ -n "$filter" ] && ! jq -e --arg prefix "$filter" '.joomla_version | startswith($prefix)' <<< "$facts" >/dev/null; then continue; fi
       if [ "$state" = running ] && ! jq -e '.web.running' <<< "$facts" >/dev/null; then continue; fi
       if [ "$state" = stopped ] && jq -e '.web.running' <<< "$facts" >/dev/null; then continue; fi
-      sites=$(jq -c --argjson site "$facts" '. + [$site]' <<< "$sites") || return 1
+      sites=$(printf '%s\n' "$sites" "$facts" | jq -sc '.[0] + [.[1]]') || return 1
     else
       rc=1
       errors=$(jq -c --arg site "$host" '. + [{site:$site,error:"Unable to inspect project"}]' <<< "$errors") || return 1
     fi
   done
-  v4Result "$(jq -nc --argjson sites "$sites" --argjson errors "$errors" '{sites:$sites,errors:$errors}')"
+  v4Result "$(printf '%s\n' "$sites" "$errors" | jq -sc '{sites:.[0],errors:.[1]}')"
   return "$rc"
 }
 
 function v4Lifecycle() {
   (
-    local action="$1" lock marker timeout
+    local action="$1" lock marker timeout enable
     v4ToolsLoad || exit $?
     timeout=$(v4Get timeout 120)
     if ! { [[ "$timeout" =~ ^[0-9]+$ ]] && [ "$timeout" -gt 0 ] && [ "$timeout" -le 3600 ]; }; then v4Error 'Timeout must be between 1 and 3600 seconds.' 2; exit $?; fi
@@ -12505,13 +12579,18 @@ function v4Lifecycle() {
     marker="$VDM_REPO_PATH/joomla/enabled/$V4_HOST"
     case "$action" in
       start)
+        enable=$(v4Get enable true)
+        if [ "$enable" = true ] && [ ! -L "$marker" ]; then
+          [ ! -e "$marker" ] || { v4Error 'The enabled-site path is not a managed link.' 1; exit $?; }
+          mkdir -p "${marker%/*}" || exit 1
+          v4CheckLinkSupport "${marker%/*}" || exit $?
+        fi
         v4RunHook pre-start || exit $?
         v4Compose up -d || exit $?
         v4WaitReady "$timeout" || exit $?
         v4RunHook post-start || exit $?
-        if [ "$(v4Get enable true)" = true ]; then
-          mkdir -p "${marker%/*}" || exit 1
-          if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then ln -s "$V4_DIR" "$marker" || exit 1; fi
+        if [ "$enable" = true ]; then
+          if [ ! -L "$marker" ]; then v4CreateLink "$V4_DIR" "$marker" || exit $?; fi
         fi
         ;;
       stop)
@@ -12874,7 +12953,7 @@ function v4HookConfigure() {
       jq -e 'type=="array" and length>0 and length<=32 and all(.[]; type=="array" and length>0 and length<=128 and (.[0]|type=="string" and length>0) and all(.[];type=="string" and (contains("\u0000")|not)))' <<< "$commands" >/dev/null || {
         v4Error 'commands must be a nonempty JSON array of argument arrays.' 2; exit $?;
       }
-      metadata=$(jq -c --arg event "$event" --argjson commands "$commands" '.hooks[$event]=$commands' <<< "$V4_META") || exit 1
+      metadata=$(printf '%s\n' "$V4_META" "$commands" | jq -sc --arg event "$event" '.[1] as $commands | .[0] | .hooks[$event]=$commands') || exit 1
     fi
     v4ValidateHooks "$(jq -c '.hooks' <<< "$metadata")" || exit $?
     v4SaveMetadata "$metadata" || exit $?
@@ -12895,7 +12974,7 @@ function v4RunHook() {
     argv=()
     while IFS= read -r encoded; do
       # jq base64 preserves spaces/newlines and avoids shell word splitting.
-      argument=$(jq -jrn --arg encoded "$encoded" '$encoded|@base64d' && printf '.') || return 2
+      argument=$(printf '%s' "$encoded" | jq -jRs '@base64d' && printf '.') || return 2
       argument="${argument%.}"
       argv+=("$argument")
     done < <(jq -r --arg event "$event" --argjson index "$index" '.hooks[$event][$index][] | @base64' <<< "$V4_META")
@@ -12968,7 +13047,7 @@ function v4SiteDiagnose() {
       checks=$(jq -c --arg status "$status" --arg detail "$detail" '. + [{check:"site-route",status:$status,detail:$detail}]' <<< "$checks") || return 1
     fi
   fi
-  v4Result "$(jq -nc --argjson checks "$checks" '{checks:$checks}')"
+  v4Result "$(jq -c '{checks:.}' <<< "$checks")"
   return "$rc"
 }
 
@@ -13003,11 +13082,12 @@ function v4UpdateCheck() {
 function v4ToolsBatch() {
   (
     local handler="$1" original="$V4_REQUEST" output="${V4_RESULT_FILE:-}" errors="${V4_ERROR_FILE:-}"
-    local directory site temporary result status message overall=0 results='[]'
+    local directory site temporary status overall=0
     shift
     v4Has site && { v4Error 'Select either --site or --all, not both.' 2; exit $?; }
     temporary=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/octojoom-batch.XXXXXX") || exit 1
     trap 'rm -rf -- "$temporary"' EXIT
+    : > "$temporary/results"
     for directory in "$VDM_REPO_PATH"/joomla/available/*; do
       if ! { [ -d "$directory" ] && [ ! -L "$directory" ] && [ -f "$directory/docker-compose.yml" ]; }; then continue; fi
       site="${directory##*/}"
@@ -13017,18 +13097,17 @@ function v4ToolsBatch() {
       status=0
       "$handler" "$@" > "$temporary/stdout" || status=$?
       [ ! -s "$temporary/stdout" ] || cat "$temporary/stdout" >&2
-      result=null
-      [ ! -s "$V4_RESULT_FILE" ] || result=$(cat "$V4_RESULT_FILE")
-      message=''
-      if [ "$status" -ne 0 ]; then
-        if [ -s "$V4_ERROR_FILE" ]; then message=$(cat "$V4_ERROR_FILE")
-        else message="The site operation exited with status ${status}."; fi
+      [ -s "$V4_RESULT_FILE" ] || printf 'null\n' > "$V4_RESULT_FILE"
+      if [ "$status" -ne 0 ] && [ ! -s "$V4_ERROR_FILE" ]; then
+        printf 'The site operation exited with status %s.' "$status" > "$V4_ERROR_FILE"
       fi
-      results=$(jq -c --arg site "$site" --argjson status "$status" --argjson data "$result" --arg error "$message" '. + [{site:$site,ok:($status==0),exit_code:$status,data:$data,error:(if $status==0 then null else $error end)}]' <<< "$results") || exit 1
+      [ -f "$V4_ERROR_FILE" ] || : > "$V4_ERROR_FILE"
+      jq -nc --arg site "$site" --argjson status "$status" --slurpfile data "$V4_RESULT_FILE" --rawfile error "$V4_ERROR_FILE" \
+        '{site:$site,ok:($status==0),exit_code:$status,data:$data[0],error:(if $status==0 then null else $error end)}' >> "$temporary/results" || exit 1
       [ "$status" -eq 0 ] || overall=1
     done
     V4_REQUEST="$original"; V4_RESULT_FILE="$output"; V4_ERROR_FILE="$errors"
-    v4Result "$(jq -nc --argjson results "$results" '{results:$results,succeeded:([$results[]|select(.ok)]|length),failed:([$results[]|select(.ok|not)]|length)}')"
+    v4Result "$(jq -sc '{results:.,succeeded:([.[]|select(.ok)]|length),failed:([.[]|select(.ok|not)]|length)}' "$temporary/results")"
     [ "$overall" -eq 0 ] || v4Error 'One or more site operations failed; inspect the per-site results.' 1
     exit "$overall"
   )
@@ -13980,9 +14059,22 @@ function v4TuiEditField() {
     object|array)
       jq -e --arg kind "$kind" 'type==$kind' <<< "$value" >/dev/null 2>&1 || { showError "Enter a valid JSON ${kind}."; return 2; }
       ;;
-    *) jq -c --arg name "$name" --arg value "$value" '.[$name]=$value' <<< "$request"; return ;;
+    *) value=$(printf '%s' "$value" | jq -Rs .) || return 2; v4JsonSet "$request" "$name" "$value"; return ;;
   esac
-  jq -c --arg name "$name" --argjson value "$value" '.[$name]=$value' <<< "$request"
+  v4JsonSet "$request" "$name" "$value"
+}
+
+# Large structured results travel through a private file, avoiding native
+# Windows argument limits while retaining readable, scrollable menu output.
+function v4TuiDisplay() {
+  (
+    local response="$1" title="$2" file
+    file=$(mktemp "${TMPDIR:-/tmp}/octojoom-result.XXXXXX") || return 1
+    trap 'rm -f -- "$file"' EXIT
+    chmod 600 "$file" || return 1
+    printf '%s\n' "$response" > "$file" || return 1
+    whiptail --textbox "$file" 25 112 --scrolltext --title "$title" --backtitle "$BACK_TITLE"
+  )
 }
 
 # Preserve a real terminal for interactive tools; JSON requests travel in a
@@ -14006,7 +14098,7 @@ function v4TuiRun() {
     if jq -e . >/dev/null 2>&1 <<< "$response"; then
       response=$(jq -r 'if .ok then .data else {error:.error,details:.data} | with_entries(select(.value!=null)) end' <<< "$response")
     fi
-    whiptail --msgbox "${response:-The operation returned no details. Exit status: $status}" 25 112 --scrolltext --title "$title" --backtitle "$BACK_TITLE"
+    v4TuiDisplay "${response:-The operation returned no details. Exit status: $status}" "$title"
   fi
   return "$status"
 }
@@ -14020,8 +14112,8 @@ function v4TuiAction() {
     schema=$(jq -c '.fields |= map(select(.name!="all" and .name!="sites"))' <<< "$schema") || return 1
   fi
   title=$(jq -r '.title' <<< "$schema")
-  request=$(jq -cn --arg site "$site" --argjson schema "$schema" '{schema_version:1} + (reduce $schema.fields[] as $field ({}; if $field.default!=null then .[$field.name]=$field.default else . end)) + (if $site!="" and any($schema.fields[]; .name=="site") then {site:$site} else {} end)') || return 1
-  if [ -n "${3:-}" ]; then request=$(jq -cn --argjson request "$request" --argjson preset "$3" '$request+$preset') || return 2; fi
+  request=$(jq -c --arg site "$site" '. as $schema | {schema_version:1} + (reduce $schema.fields[] as $field ({}; if $field.default!=null then .[$field.name]=$field.default else . end)) + (if $site!="" and any($schema.fields[]; .name=="site") then {site:$site} else {} end)' <<< "$schema") || return 1
+  if [ -n "${3:-}" ]; then request=$(printf '%s\n' "$request" "$3" | jq -sc '.[0]+.[1]') || return 2; fi
   case "$action" in
     site.info|share.status|mail.status)
       if [ -n "$site" ]; then v4TuiRun "$action" "$request" "$title"; return $?; fi
@@ -14041,7 +14133,7 @@ function v4TuiAction() {
     case "$selection" in
       back) return 0 ;;
       run)
-        missing=$(jq -r --argjson request "$request" '([.fields[] | select(.required and (($request[.name] // .default // "") == "")) | .name] + [(.conditions // [])[] | select(all(.when|to_entries[]; $request[.key]==.value)) | .required[] | select(($request[.] // "")=="")]) | unique | join(", ")' <<< "$schema")
+        missing=$(printf '%s\n' "$schema" "$request" | jq -sr '.[1] as $request | .[0] | ([.fields[] | select(.required and (($request[.name] // .default // "") == "")) | .name] + [(.conditions // [])[] | select(all(.when|to_entries[]; $request[.key]==.value)) | .required[] | select(($request[.] // "")=="")]) | unique | join(", ")')
         if [ -n "$missing" ]; then showError "Complete these required settings: $missing"; continue; fi
         target=$(jq -r 'if .all==true then "ALL Joomla sites" elif ((.sites // [])|length)>0 then (.sites|join(", ")) else (.site // .target_site // "the configured target") end' <<< "$request")
         if ! whiptail --yesno "Run ${title} for ${target}?\n\nReview the settings above before continuing. Changes use the same command as the terminal interface." 12 100 --title "$title" --backtitle "$BACK_TITLE" --defaultno; then continue; fi

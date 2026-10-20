@@ -68,6 +68,14 @@ v4Stopped() {
   assert_status 2
 }
 
+@test "v4 tools: inventory transports large facts without native argument limits" {
+  v4SiteFacts() { jq -nc --arg host "$V4_HOST" '{host:$host,title:("x" * 40000),joomla_version:"5.4.9",web:{running:false}}'; }
+  V4_REQUEST='{}'
+  run v4SiteList
+  assert_success
+  [ "$(jq '.sites[0].title|length' <<< "$output")" -eq 40000 ]
+}
+
 @test "v4 tools: local site URL reflects allocated port" {
   v4LoadSite abc.test
   v4Compose() { [ "$1" != port ] || printf '127.0.0.1:49152\n'; }
@@ -257,6 +265,31 @@ v4Stopped() {
   [ ! -L "$VDM_REPO_PATH/joomla/enabled/abc.test" ]
 }
 
+@test "v4 tools: start creates an actual enabled-site link" {
+  v4Compose() { return 0; }
+  v4WaitReady() { return 0; }
+  run v4SiteStart
+  assert_success
+  [ -L "$VDM_REPO_PATH/joomla/enabled/abc.test" ]
+  [ -f "$VDM_REPO_PATH/joomla/enabled/abc.test/project.json" ]
+}
+
+@test "v4 tools: missing native link support fails before starting containers" {
+  v4CheckLinkSupport() { return 3; }
+  v4Compose() { touch "$STUB_DIR/unexpected-start"; }
+  run v4SiteStart
+  assert_status 3
+  [ ! -e "$STUB_DIR/unexpected-start" ]
+}
+
+@test "v4 tools: start refuses a copied enabled directory before changing containers" {
+  mkdir -p "$VDM_REPO_PATH/joomla/enabled/abc.test"
+  v4Compose() { touch "$STUB_DIR/unexpected-start"; }
+  run v4SiteStart
+  assert_status 1
+  [ ! -e "$STUB_DIR/unexpected-start" ]
+}
+
 @test "v4 tools: nginx readiness checks the HTTP frontend too" {
   v4LoadSite abc.test
   V4_META=$(jq '.webserver="nginx"' <<< "$V4_META")
@@ -292,6 +325,21 @@ v4Stopped() {
   [ "$(jq .succeeded "$STUB_DIR/batch.json")" -eq 1 ]
   [ "$(jq .failed "$STUB_DIR/batch.json")" -eq 1 ]
   [ "$(jq -r '.results[1].error' "$STUB_DIR/batch.json")" = 'The site operation exited with status 1.' ]
+}
+
+@test "v4 tools: batch results and errors exceed native argument limits losslessly" {
+  V4_REQUEST='{"all":true}'
+  v4TestAction() {
+    jq -nc '{stdout:("x" * 40000)}' > "$V4_RESULT_FILE"
+    printf '%040000d' 0 > "$V4_ERROR_FILE"
+    return 17
+  }
+  V4_RESULT_FILE="$STUB_DIR/batch.json"
+  run v4ToolsBatch v4TestAction
+  assert_failure
+  [ "$(jq '.results[0].data.stdout|length' "$STUB_DIR/batch.json")" -eq 40000 ]
+  [ "$(jq '.results[0].error|length' "$STUB_DIR/batch.json")" -eq 40000 ]
+  [ "$(jq '.results[0].exit_code' "$STUB_DIR/batch.json")" -eq 17 ]
 }
 
 @test "v4 tools: delete requires explicit confirmation" {
@@ -364,6 +412,16 @@ v4Stopped() {
   [ "$(jq .exit_code <<< "$output")" -eq 17 ]
 }
 
+@test "v4 tools: large command output retains all trailing newlines" {
+  v4TestCommand() { printf '%040000d\n\n' 0; printf '%040000d\n\n\n' 1 >&2; }
+  run v4ToolRun v4TestCommand
+  assert_success
+  [ "$(jq '.stdout|length' <<< "$output")" -eq 40002 ]
+  [ "$(jq '.stderr|length' <<< "$output")" -eq 40003 ]
+  [ "$(jq '.stdout|endswith("\n\n")' <<< "$output")" = true ]
+  [ "$(jq '.stderr|endswith("\n\n\n")' <<< "$output")" = true ]
+}
+
 @test "v4 tools: interactive shell rejects JSON before execution" {
   V4_REQUEST='{"site":"abc.test","json":true}'
   run v4SiteShell
@@ -381,6 +439,17 @@ v4Stopped() {
   run v4HookConfigure
   assert_success
   [ "$(jq -r '.hooks["post-import-db"][0][2]' "$VDM_REPO_PATH/joomla/available/abc.test/project.json")" = cache:clean ]
+}
+
+@test "v4 tools: hook configuration and decoding avoid native argument limits" {
+  V4_REQUEST=$(jq -nc '{site:"abc.test",event:"post-start",commands:[["printf","%s",("x" * 40000)]]}')
+  run v4HookConfigure
+  assert_success
+  v4LoadSite abc.test
+  v4HookExec() { printf '%s' "$3" > "$STUB_DIR/hook-argument"; }
+  run v4RunHook post-start
+  assert_success
+  [ "$(wc -c < "$STUB_DIR/hook-argument" | tr -d '[:space:]')" -eq 40000 ]
 }
 
 @test "v4 tools: shared hooks validator permits explicit supported events only" {

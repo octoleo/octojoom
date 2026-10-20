@@ -179,7 +179,7 @@ octojoom -h
    octojoom -h
    ```
 
-> ⚠️ **Important:** Ensure Docker Desktop is running before launching Octojoom.
+> ⚠️ **Important:** Run Docker Desktop with Linux containers. Enable Windows Developer Mode or use an elevated terminal so Octojoom can create native symbolic links for enabled sites.
 
 </details>
 

@@ -116,6 +116,17 @@ jobs:
           docker compose version
           if ($LASTEXITCODE -ne 0) { throw 'Native Docker Compose CLI is unavailable.' }
 
+      - name: Require native Windows symbolic links
+        if: runner.os == 'Windows'
+        run: |
+          export MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict"
+          link_probe=$(mktemp -d)
+          trap 'rm -rf "$link_probe"' EXIT
+          mkdir "$link_probe/target"
+          ln -s "$link_probe/target" "$link_probe/link"
+          test -L "$link_probe/link"
+          printf 'MSYS=%s\n' "$MSYS" >> "$GITHUB_ENV"
+
       - name: Show the tools under test
         run: |
           bash --version | head -n 1

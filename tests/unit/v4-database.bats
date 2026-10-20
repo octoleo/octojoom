@@ -121,7 +121,8 @@ restore_dependencies() {
 @test "v4 archive validation rejects symlinks and duplicate paths" {
   mkdir "$SANDBOX/unsafe"
   printf x > "$SANDBOX/unsafe/file"
-  ln -s /etc/passwd "$SANDBOX/unsafe/link"
+  printf private > "$SANDBOX/outside-secret"
+  ln -s "$SANDBOX/outside-secret" "$SANDBOX/unsafe/link"
   tar -czf "$SANDBOX/symlink.tar.gz" -C "$SANDBOX/unsafe" .
   run v4ArchiveValidate "$SANDBOX/symlink.tar.gz"
   [ "$status" -ne 0 ]
@@ -197,7 +198,8 @@ restore_dependencies() {
 }
 
 @test "v4 full archive excludes raw database and unrelated environment secrets" {
-  ln -s /tmp/never-follow "$V4_PROJECT/db/database.sock"
+  printf 'never follow the raw database link' > "$SANDBOX/database-link-target"
+  ln -s "$SANDBOX/database-link-target" "$V4_PROJECT/db/database.sock"
   run v4BackupCreate
   [ "$status" -eq 0 ]
   local archive
@@ -587,4 +589,52 @@ restore_dependencies() {
   [ "$(grep -c '^VDM_PROJECT_PATH=' "$SANDBOX/new.env")" -eq 1 ]
   migrationReadEnvValue "$SANDBOX/new.env" VDM_PROJECT_PATH value
   [ "$value" = "$VDM_PROJECT_PATH" ]
+}
+
+@test "v4 package checksums accept native binary-mode markers and CRLF" {
+  package_fixture "$SANDBOX/package"
+  mkdir "$SANDBOX/hash-bin"
+  local sha
+  sha=$(type -P sha256sum)
+  [ -n "$sha" ] || skip 'sha256sum is unavailable'
+  cat > "$SANDBOX/hash-bin/sha256sum" <<'HASH'
+#!/usr/bin/env bash
+set -o pipefail
+"$OCTOJOOM_REAL_SHA" "$@" | awk '{ sub(/\r$/, ""); sub(/  \.\//, " *./"); printf "%s\r\n", $0 }'
+HASH
+  chmod +x "$SANDBOX/hash-bin/sha256sum"
+  export OCTOJOOM_REAL_SHA="$sha"
+  PATH="$SANDBOX/hash-bin:$PATH" v4PackageChecksums "$SANDBOX/package"
+  PATH="$SANDBOX/hash-bin:$PATH" run v4PackageVerify "$SANDBOX/package"
+  [ "$status" -eq 0 ]
+  [ "$(jq length "$SANDBOX/package/checksums.json")" -eq 2 ]
+}
+
+@test "v4 package checksums reject malformed digest output instead of omitting files" {
+  package_fixture "$SANDBOX/package"
+  mkdir "$SANDBOX/hash-bin"
+  printf '#!/usr/bin/env bash\nprintf "invalid checksum output\\n"\n' > "$SANDBOX/hash-bin/sha256sum"
+  chmod +x "$SANDBOX/hash-bin/sha256sum"
+  PATH="$SANDBOX/hash-bin:$PATH" run v4PackageChecksums "$SANDBOX/package"
+  [ "$status" -ne 0 ]
+}
+
+@test "v4 SQL console transports large query results through stdin" {
+  v4Exec() { awk 'BEGIN { for (i=0; i<65536; i++) printf "x" }'; }
+  V4_REQUEST='{"site":"source.test","command":"SELECT large_value FROM example","json":true}'
+  run v4DbConsole
+  [ "$status" -eq 0 ]
+  [ "$(jq '.output|length' <<< "$output")" -eq 65536 ]
+}
+
+@test "v4 archive manifests support metadata beyond native Windows argument limits" {
+  jq '.annotation=("x" * 65536)' "$V4_DIR/project.json" > "$SANDBOX/large-metadata.json"
+  mv "$SANDBOX/large-metadata.json" "$V4_DIR/project.json"
+  run v4BackupCreate
+  [ "$status" -eq 0 ]
+  local archive
+  archive=$(jq -r '.file' <<< "$output")
+  mkdir "$SANDBOX/large-package"
+  v4ArchiveExtract "$archive" "$SANDBOX/large-package"
+  [ "$(jq '.site.annotation|length' "$SANDBOX/large-package/manifest.json")" -eq 65536 ]
 }

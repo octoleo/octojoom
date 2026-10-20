@@ -51,7 +51,7 @@ setup() { octojoom_setup; octojoom_config; }
     cat > "$SANDBOX/request"
     printf '%s\n' '{"ok":true,"data":{"stdout":"1"},"error":null}'
   }
-  whiptail() { printf '%s\n' "$@" > "$SANDBOX/display"; }
+  whiptail() { [ "$1" = --textbox ]; cat "$2" > "$SANDBOX/display"; }
   run v4TuiRun database.console '{"site":"alpha.test","command":"SELECT 1"}' SQL
   assert_success
   grep -qx -- '--json' "$SANDBOX/invocation"
@@ -73,7 +73,7 @@ setup() { octojoom_setup; octojoom_config; }
     printf '%s\n' '{"ok":false,"error":{"message":"Inspect per-site results"},"data":{"results":[{"site":"alpha.test","ok":true},{"site":"beta.test","ok":false}],"recovery_archive":"/safe/recovery.tar.gz"}}'
     return 1
   }
-  whiptail() { printf '%s\n' "$@" > "$SANDBOX/display"; }
+  whiptail() { [ "$1" = --textbox ]; cat "$2" > "$SANDBOX/display"; }
   run v4TuiRun backup.create '{"all":true,"yes":true}' Backups
   assert_status 1
   grep -q 'Inspect per-site results' "$SANDBOX/display"
@@ -90,4 +90,23 @@ setup() { octojoom_setup; octojoom_config; }
   assert_success
   assert_answers_used
   [ "$(cat "$SANDBOX/actions")" = $'site.diagnose\nsite.list\nupdate.check' ]
+}
+
+@test "v4 menu displays large results from a private file and removes it afterward" {
+  local response
+  printf -v response '%70000s' ''
+  response=${response// /x}
+  whiptail() {
+    [ "$1" = --textbox ]
+    [ -f "$2" ]
+    if ! is_windows; then [ "$(file_mode "$2")" = 600 ]; fi
+    printf '%s\n' "$2" > "$SANDBOX/result-path"
+    cat "$2" > "$SANDBOX/display"
+    local argument
+    for argument in "$@"; do [ "${#argument}" -lt 1024 ]; done
+  }
+  run v4TuiDisplay "$response" 'Large result'
+  assert_success
+  [ "$(cat "$SANDBOX/display")" = "$response" ]
+  [ ! -e "$(cat "$SANDBOX/result-path")" ]
 }

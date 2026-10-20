@@ -23,6 +23,22 @@ v4_cli_fixture() {
   jq -cn --arg project "$VDM_PROJECT_PATH/alpha" '{schema_version:1,host:"alpha.test",key:"alpha",env_key:"ALPHA",project_dir:$project,docroot:"joomla",image:"joomla:6.0-php8.3-apache",joomla_version:"6.0",php_version:"8.3",webserver:"apache",profile:"local",database:{engine:"mariadb",version:"11.4",name:"joomla",user:"joomla"},tls:{mode:"none",resolver:"vdmresolver"},services:{mail:false,redis:false,node:false},hooks:{}}' > "$V4_DIR/project.json"
 }
 
+v4_cli_limit_native_arguments() {
+  V4_TEST_REAL_JQ=$(type -P jq)
+  export V4_TEST_REAL_JQ
+  mkdir -p "$SANDBOX/limited-native"
+  cat > "$SANDBOX/limited-native/jq" <<'SH'
+#!/usr/bin/env bash
+bytes=0
+for argument in "$@"; do bytes=$((bytes + ${#argument} + 1)); done
+if [ "$bytes" -gt 16000 ]; then printf 'Native command-line size exceeded\n' >&2; exit 86; fi
+exec "$V4_TEST_REAL_JQ" "$@"
+SH
+  chmod +x "$SANDBOX/limited-native/jq"
+  PATH="$SANDBOX/limited-native:$PATH"
+  export PATH
+}
+
 @test "v4 schema is discoverable without Docker or dialogs" {
   run v4Main site schema --json
   assert_success
@@ -200,7 +216,7 @@ v4_cli_fixture() {
   v4LoadSite alpha.test
   printf '%s\n' 'services: {}' > "$V4_DIR/docker-compose.override.yml"
   v4Compose exec -T joomlaalpha printf '%s' 'a b'
-  assert_command "--env-file $V4_ENV_FILE --file $V4_COMPOSE --file $V4_DIR/docker-compose.override.yml exec -T joomlaalpha printf %s a b"
+  assert_command "--env-file $(v4DockerHostPath "$V4_ENV_FILE") --file $(v4DockerHostPath "$V4_COMPOSE") --file $(v4DockerHostPath "$V4_DIR/docker-compose.override.yml") exec -T joomlaalpha printf %s a b"
 }
 
 @test "v4 Compose normalizes native service-name records for ps and config" {
@@ -362,11 +378,30 @@ YAML
 }
 
 @test "v4 publishes desktop form descriptors from the TUI contract" {
+  v4_cli_limit_native_arguments
   run v4Main site schema --json
   assert_success
   [ "$(jq -r '.data.form_schemas["site.path"].fields[] | select(.name=="target") | .enum | join(",")' <<< "$output")" = project,docroot ]
   [ "$(jq -r '.data.form_schemas["site.create"].fields[] | select(.name=="admin_password") | .secret' <<< "$output")" = true ]
   [ "$(jq -r '.data.action_schemas["site.create"].conditions[0].required[0]' <<< "$output")" = admin_email ]
+}
+
+@test "v4 large requests aliases and results stay off native argument lists" {
+  v4_cli_limit_native_arguments
+  local large
+  large=$(jq -rn '"value with spaces $() " * 3000')
+  printf '%s' "$large" | jq -Rs '{schema_version:1,db_name:.,json:true}' > "$SANDBOX/large-request.json"
+  function v4SiteCreate() { v4Result "$V4_REQUEST"; }
+  run v4Main site create --config "$SANDBOX/large-request.json"
+  assert_success
+  [ "$(jq -r .data.database_name <<< "$output")" = "$large" ]
+  [ "$(jq -r '.data|has("db_name")' <<< "$output")" = false ]
+  v4Parse site create --site-name "$large" --php-settings '{"extra":true}'
+  [ "$(v4Get site_name)" = "$large" ]
+  [ "$(v4Get php_settings)" = '{"extra":true}' ]
+  large=$(printf '%s' "$large" | jq -Rsc '{extra:.}')
+  v4Parse site create --php-settings "$large"
+  [ "$(v4Get php_settings)" = "$large" ]
 }
 
 @test "v4 validates explicit and persisted hook maps with the shared validator" {
@@ -387,13 +422,18 @@ YAML
   mkdir -p "$SANDBOX/physical"
   physical_target=$(cd "$SANDBOX/physical" && pwd -P)
   ln -s "$SANDBOX/physical" "$SANDBOX/alias"
+  [ -L "$SANDBOX/alias" ]
   V4_REQUEST=$(jq -cn --arg repo "$SANDBOX/alias/new repo" --arg project "$SANDBOX/alias/new projects" --arg backup "$SANDBOX/alias/new backups" '{repo_path:$repo,project_path:$project,backup_path:$backup}')
   v4Init
   [ "$VDM_REPO_PATH" = "$physical_target/new repo" ]
   [ "$VDM_PROJECT_PATH" = "$physical_target/new projects" ]
   [ "$VDM_BACKUP_PATH" = "$physical_target/new backups" ]
   [ ! -e "$VDM_REPO_PATH" ]
+  # Native Windows links require an existing target when they are created.
+  mkdir "$SANDBOX/missing-target"
   ln -s "$SANDBOX/missing-target" "$SANDBOX/dangling"
+  [ -L "$SANDBOX/dangling" ]
+  rmdir "$SANDBOX/missing-target"
   run v4CanonicalRoot "$SANDBOX/dangling/new"
   assert_status 2
 }
@@ -439,6 +479,9 @@ SH
 
 @test "v4 initializes platform before legacy privilege helpers run" {
   local original_ostype="$OSTYPE"
+  # This isolates platform initialization from jq's actual host-native boundary.
+  # Spoofing macOS on Windows must not turn off jq.exe's MSYS handling.
+  function v4Get() { printf '%s' "${2:-}"; }
   OSTYPE=msys v4Init
   [ "$OS_NUMBER" -eq 3 ]
   OSTYPE=darwin v4Init

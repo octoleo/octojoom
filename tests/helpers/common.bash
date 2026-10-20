@@ -85,6 +85,11 @@ octojoom_globals() {
 
 octojoom_setup() {
   bats_require_minimum_version 1.5.0
+  # Native links are essential to these fixtures; MSYS must not copy the target.
+  case "${OSTYPE:-}" in
+    msys*) export MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ;;
+    cygwin*) export CYGWIN="${CYGWIN:+$CYGWIN }winsymlinks:nativestrict" ;;
+  esac
   SANDBOX="${BATS_TEST_TMPDIR}/sandbox"
   mkdir -p "$SANDBOX"
   # Match production path normalization, including macOS /var -> /private/var.

@@ -531,3 +531,103 @@ PHP
   [ "$status" -eq 2 ]
   cmp -s "$SANDBOX/original.php" "$SANDBOX/configuration.php"
 }
+
+# The Joomla mailer needs Factory::getApplication() even when no CLI command is
+# dispatched. Exercise that dependency with real PHP and the selected site config.
+prepare_joomla_mail_application() {
+  local php_binary="${V4_TEST_PHP:-php}"
+  command -v "$php_binary" >/dev/null || skip 'PHP CLI is required for the mail application bootstrap test'
+  export V4_TEST_PHP="$php_binary"
+  V4_META=$(jq '.services.mail=true' <<<"$V4_META")
+  mkdir -p "$V4_DOCROOT/includes"
+  printf '%s\n' '<?php define("JPATH_CONFIGURATION", JPATH_BASE);' >"$V4_DOCROOT/includes/defines.php"
+  cat >"$V4_DOCROOT/configuration.php" <<'PHP'
+<?php
+class JConfig {
+    public $mailer = 'smtp';
+    public $smtphost = 'mailpitdemo';
+    public $smtpport = 1025;
+    public $mailonline = true;
+}
+PHP
+  cat >"$V4_DOCROOT/includes/framework.php" <<'PHP'
+<?php
+namespace Joomla\Registry {
+    class Registry {
+        public function __construct(private object $config) {}
+        public function get($key, $default = null) { return $this->config->$key ?? $default; }
+    }
+}
+namespace Joomla\CMS {
+    class Factory {
+        public static $application;
+        public static function getContainer() { return new \MailContainer; }
+        public static function getApplication() {
+            if (!self::$application) { throw new \RuntimeException('Failed to start application'); }
+            return self::$application;
+        }
+    }
+}
+namespace Joomla\Console {
+    class Application {
+        public function get($key, $default = null) { return (new \JConfig)->$key ?? $default; }
+        public function execute() { throw new \RuntimeException('Must not dispatch a CLI command'); }
+    }
+}
+namespace Joomla\CMS\Mail { interface MailerFactoryInterface {} }
+namespace {
+    class MailContainer {
+        private array $aliases = [];
+        public function alias($name, $service) { $this->aliases[$name] = $service; return $this; }
+        public function get($name) {
+            if ($name === \Joomla\Console\Application::class) {
+                if (($this->aliases[\Joomla\Session\SessionInterface::class] ?? null) !== 'session.cli') {
+                    throw new \RuntimeException('CLI session service was not configured');
+                }
+                return new \Joomla\Console\Application;
+            }
+            if ($name === \Joomla\CMS\Mail\MailerFactoryInterface::class) { return $this; }
+            throw new \RuntimeException('Unexpected service');
+        }
+        public function createMailer($config) { return new TestSiteMailer($config); }
+    }
+    class TestSiteMailer {
+        private string $recipient;
+        public function __construct(private object $config) {}
+        public function setSender($sender, $name) {}
+        public function addRecipient($recipient) { $this->recipient = $recipient; }
+        public function setSubject($subject) {}
+        public function setBody($body) {}
+        public function send() {
+            if (!\Joomla\CMS\Factory::getApplication()->get('mailonline', 1)) { throw new \RuntimeException('Mail offline'); }
+            file_put_contents(JPATH_BASE.'/sent.json', json_encode(['transport' => $this->config->get('smtphost'), 'recipient' => $this->recipient]));
+            return true;
+        }
+    }
+}
+PHP
+  v4Compose() {
+    local code="$6" native_path
+    native_path=$(v4DockerHostPath "$V4_DOCROOT")
+    code="${code//\/var\/www\/html/$native_path}"
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$V4_TEST_PHP" -r "$code" "$7"
+  }
+}
+
+@test "mail test boots Joomla CLI application before using the configured site mailer" {
+  prepare_joomla_mail_application
+  run v4MailTest
+  assert_success
+  jq -e '.test_message_sent==true' <<<"$output"
+  jq -e '.transport=="mailpitdemo" and .recipient=="capture@example.test"' "$V4_DOCROOT/sent.json"
+}
+
+@test "mail test refuses delivery after site SMTP settings point outside capture" {
+  prepare_joomla_mail_application
+  sed 's/mailpitdemo/smtp.external.example/' "$V4_DOCROOT/configuration.php" >"$SANDBOX/replaced.php"
+  mv "$SANDBOX/replaced.php" "$V4_DOCROOT/configuration.php"
+  run v4MailTest
+  assert_status 3
+  [[ "$output" == *'no longer points at this sites capture service'* ]]
+  [ ! -f "$V4_DOCROOT/sent.json" ]
+}

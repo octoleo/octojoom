@@ -415,3 +415,44 @@ HOOK
   MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$native_docker" compose --file "$file" --env-file "$env_file" config --format json > "$SANDBOX/resolved-compose.json"
   jq -e --arg expected "$expected" '.services.joomlaexample.volumes[] | select(.target=="/var/www/html") | (.source|gsub("\\\\";"/")|ascii_downcase)==($expected|ascii_downcase) and .target=="/var/www/html"' "$SANDBOX/resolved-compose.json"
 }
+
+@test "managed links are real symbolic links and refuse existing destinations" {
+  mkdir "$SANDBOX/link-target"
+  run v4CreateLink "$SANDBOX/link-target" "$SANDBOX/managed-link"
+  assert_success
+  [ -L "$SANDBOX/managed-link" ]
+  [ "$(readlink "$SANDBOX/managed-link")" = "$SANDBOX/link-target" ]
+  printf original > "$SANDBOX/occupied-link"
+  run v4CreateLink "$SANDBOX/link-target" "$SANDBOX/occupied-link"
+  assert_status 3
+  [ "$(cat "$SANDBOX/occupied-link")" = original ]
+}
+
+@test "Windows link failure preserves options and never falls back to a directory copy" {
+  ln() { printf '%s' "$MSYS" > "$SANDBOX/link-options"; return 1; }
+  MSYS='existing-option' OSTYPE=msys run v4CreateLink "$V4_DIR" "$SANDBOX/managed-link"
+  assert_status 3
+  [[ "$output" == *'Developer Mode'* ]]
+  [ "$(cat "$SANDBOX/link-options")" = 'existing-option winsymlinks:nativestrict' ]
+  [ ! -e "$SANDBOX/managed-link" ]
+}
+
+@test "create checks native link support before image changes or site publication" {
+  V4_REQUEST='{"activate":true}'
+  v4RuntimeNewMetadata() { printf '%s\n' "$V4_META"; }
+  v4CheckLinkSupport() { return 3; }
+  v4RuntimeValidateImage() { touch "$SANDBOX/image-touched"; }
+  v4ProvisionMetadata() { touch "$SANDBOX/site-published"; }
+  run v4SiteCreate
+  assert_status 3
+  [ ! -e "$SANDBOX/image-touched" ]
+  [ ! -e "$SANDBOX/site-published" ]
+}
+
+@test "large hook metadata streams into runtime generation without native argv limits" {
+  V4_REQUEST=$(jq -cn '{site:"large.test",key:"large",joomla_version:"5.4.9",php_version:"8.3",install:false,hooks:{"post-start":[["printf",("x"*70000)]]}}')
+  V4_META=$(v4RuntimeNewMetadata)
+  jq -e '.hooks["post-start"][0][1]|length==70000' <<< "$V4_META"
+  v4GenerateCompose
+  jq -e '.services.joomlalarge.image=="joomla:5.4.9-php8.3-apache"' "$V4_COMPOSE"
+}
