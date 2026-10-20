@@ -10,7 +10,7 @@ setup() { octojoom_setup; octojoom_config; }
   local group action registry
   registry=$(v4ActionSchemas)
   while IFS=$'\t' read -r group action; do
-    case "$group.$action" in site.schema|site.help) continue ;; esac
+    case "$group.$action" in site.schema|site.help|completion.bash) continue ;; esac
     run v4Handler "$group" "$action"
     assert_success
     declare -F "$output" >/dev/null

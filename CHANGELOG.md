@@ -6,6 +6,7 @@
 
 - Add a per-site dashboard and batch menu that invoke the same handlers as terminal commands.
 - Add a versioned noninteractive request/result contract with typed flags, JSON files/stdin, literal tool arguments, action-specific validation, discoverable forms and stable application error codes.
+- Add Bash Tab completion for command discovery, action options and project selection using the shared command schema.
 - Report actual runtime versions, service state, paths and URLs; add logs, diagnostics, opening site services and project directories.
 - Create Apache or Nginx/FPM projects with configurable document roots, PHP settings and local/server profiles. Switch PHP without upgrading installed Joomla; retain prior configuration if recreation fails.
 - Add verified standalone Joomla source downloads and managed file-permission repair.
@@ -22,6 +23,7 @@
 - Add mkcert local HTTPS using a dedicated loopback Traefik proxy, owned hostname entries and host-private certificate authorities. Verify the served certificate before reporting successful setup.
 - Add temporary sharing of one Joomla application through a Cloudflare tunnel, with explicit status and stop operations.
 - Add Mailpit capture and Joomla mail tests while preserving original mail settings.
+- Add per-site database viewer enable/disable and phpMyAdmin/Adminer switching. Keep local HTTPS database and mail hostnames aligned automatically, with private loopback access when local TLS is not enabled.
 - Add project-scoped Node and Redis services, Joomla CLI/Composer/npm commands, explicit lifecycle hooks and offline preparation.
 - Add noninteractive update checks and staged OctoJoom updates with recovery copies.
 

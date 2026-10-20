@@ -21,7 +21,7 @@ setup() {
   v4LoadSite() { [ "$1" = "$V4_HOST" ]; }
   v4Confirm() { [ "$(v4Get yes false)" = true ]; }
   v4Require() { local key; for key in "$@"; do [ -n "$(v4Get "$key" '')" ] || return 2; done; }
-  v4Get() { jq -r --arg key "$1" --arg default "${2:-}" 'if has($key) then .[$key]|tostring else $default end' <<<"$V4_REQUEST"; }
+  v4Get() { jq -r --arg key "$1" --arg default "${2:-}" 'if $key=="install_trust" and has("trust") then .trust|tostring elif has($key) then .[$key]|tostring else $default end' <<<"$V4_REQUEST"; }
   v4Error() { printf '%s\n' "$1" >&2; return "${2:-1}"; }
   v4Result() { printf '%s\n' "$1"; }
 }
@@ -48,6 +48,65 @@ setup() {
   run v4NetworkCompose '{"services":{"joomlademo":{},"nginxdemo":{}},"networks":{}}'
   assert_success
   jq -e '.services.nginxdemo.networks.octojoom_local=={} and (.services.joomlademo|has("networks")|not)' <<<"$output"
+}
+
+@test "local TLS attaches only selected viewer and sets its aligned absolute URL" {
+  V4_META=$(jq '.tls={mode:"local",companions:true,https_port:8443} | .services.mail=true' <<<"$V4_META")
+  run v4NetworkCompose '{"services":{"joomlademo":{},"phpmyadmindemo":{"networks":["default"],"environment":{"PMA_HOST":"mariadbdemo"}},"mariadbdemo":{}},"networks":{}}'
+  assert_success
+  jq -e '.services.phpmyadmindemo.environment.PMA_ABSOLUTE_URI=="https://demodb.test:8443/" and .services.phpmyadmindemo.environment.PMA_HOST=="mariadbdemo" and .services.phpmyadmindemo.networks.octojoom_local=={} and .services.mailpitdemo.networks.octojoom_local=={} and (.services.mariadbdemo|has("networks")|not)' <<<"$output"
+}
+
+@test "companion TLS routes retain hostnames across viewer switches and disappear when disabled" {
+  local root="$SANDBOX/tls"
+  mkdir -p "$root/routes"
+  V4_META=$(jq '.tls={mode:"local",companions:true} | .services.mail=true' <<<"$V4_META")
+  v4LocalRoute "$root" demo demo.test joomlademo 8443
+  jq -e '.http.routers["octojoom-demo-database"].rule=="Host(`demodb.test`)" and .http.services["octojoom-demo-database"].loadBalancer.servers[0].url=="http://phpmyadmindemo:80" and .http.routers["octojoom-demo-mail"].rule=="Host(`demomail.test`)"' "$root/routes/demo.test.yaml"
+  V4_META=$(jq '.services.database_viewer="adminer"' <<<"$V4_META")
+  v4LocalRoute "$root" demo demo.test joomlademo 8443
+  jq -e '.http.routers["octojoom-demo-database"].rule=="Host(`demodb.test`)" and .http.services["octojoom-demo-database"].loadBalancer.servers[0].url=="http://adminerdemo:8080" and .http.middlewares["octojoom-demo-database-https"].redirectScheme.port=="8443"' "$root/routes/demo.test.yaml"
+  V4_META=$(jq '.services.database_ui=false | .services.mail=false' <<<"$V4_META")
+  v4LocalRoute "$root" demo demo.test joomlademo 8443
+  jq -e '(.http.routers|keys)==["octojoom-demo","octojoom-demo-http"]' "$root/routes/demo.test.yaml"
+}
+
+@test "database viewer commands apply provider selection and preserve metadata on failed activation" {
+  V4_REQUEST='{"site":"demo.test","yes":true,"service":"database-ui","provider":"adminer"}'
+  v4ApplyConfig() { printf '%s\n' "$1" >"$SANDBOX/next.json"; }
+  run v4ServiceConfigure
+  assert_success
+  jq -e '.provider=="adminer" and .enabled==true' <<<"$output"
+  jq -e '.services.database_ui==true and .services.database_viewer=="adminer"' "$SANDBOX/next.json"
+  v4ApplyConfig() { return 9; }
+  run v4ServiceConfigure
+  assert_status 9
+  jq -e '.services|has("database_viewer")|not' <<<"$V4_META"
+}
+
+@test "database viewer commands reject unsupported database and unrelated provider options" {
+  V4_META=$(jq '.database.engine="postgres"' <<<"$V4_META")
+  V4_REQUEST='{"site":"demo.test","yes":true,"service":"database-ui","provider":"phpmyadmin"}'
+  v4ApplyConfig() { touch "$SANDBOX/should-not-apply"; }
+  run v4ServiceConfigure
+  assert_status 2
+  [[ "$output" == *'does not support PostgreSQL'* ]]
+  V4_REQUEST='{"site":"demo.test","yes":true,"service":"redis","provider":"adminer"}'
+  run v4ServiceConfigure
+  assert_status 2
+  [[ "$output" == *'only valid for the database-ui service'* ]]
+  [ ! -e "$SANDBOX/should-not-apply" ]
+}
+
+@test "legacy companion certificate upgrade preserves unmanaged hosts and skips trust installation" {
+  V4_META=$(jq '.tls={mode:"local",update_hosts:false}' <<<"$V4_META")
+  V4_REQUEST='{"site":"demo.test","yes":true,"service":"database-ui","provider":"adminer"}'
+  local original="$V4_REQUEST"
+  v4TlsSetup() { printf '%s\n' "$V4_REQUEST" >"$SANDBOX/tls-request.json"; }
+  v4LoadSite() { V4_META=$(jq '.tls.companions=true' <<<"$V4_META"); }
+  v4EnsureCompanionTls
+  jq -e '.update_hosts==false and .trust==false and (has("install_trust")|not)' "$SANDBOX/tls-request.json"
+  [ "$V4_REQUEST" = "$original" ]
 }
 
 @test "Node bind sources cross the host path boundary without rewriting container paths" {
@@ -241,6 +300,7 @@ prepare_tls_configuration_rollback() {
   printf '%s\n' '<?php' 'class JConfig {' ' public $live_site = "https://original.example";' ' public $cookie_domain = "original.example";' '}' >"$V4_DOCROOT/configuration.php"
   chmod 640 "$V4_DOCROOT/configuration.php"
   cp -p "$V4_DOCROOT/configuration.php" "$SANDBOX/original-configuration.php"
+  printf '{}\n' >"$V4_DIR/docker-compose.yml"
   V4_REQUEST='{"site":"demo.test","yes":true,"install_trust":false,"update_hosts":false}'
   mkcert() {
     if [ "$1" = -CAROOT ]; then printf '%s\n' "$SANDBOX/ca"; return; fi
@@ -254,6 +314,7 @@ prepare_tls_configuration_rollback() {
   v4LocalTlsVerify() { return 1; }
   v4ApplyConfig() { printf '%s\n' "$1" >"$SANDBOX/last-meta.json"; }
   v4Compose() {
+    if [ "$1" = ps ]; then return 0; fi
     local entrypoint="$8" argument code
     shift 9
     if [ "$entrypoint" = tar ]; then
@@ -347,6 +408,196 @@ prepare_tls_configuration_rollback() {
   [ ! -d "$VDM_SRC_PATH/local-tls/.lock" ]
 }
 
+@test "TLS setup covers disabled companion names in one leaf and owns their host entries" {
+  prepare_tls_configuration_rollback
+  printf '127.0.0.1 localhost\n' >"$SANDBOX/hosts"
+  V4_REQUEST=$(jq --arg file "$SANDBOX/hosts" '.update_hosts=true | .hosts_file=$file' <<<"$V4_REQUEST")
+  v4ApplyConfig() { V4_META="$1"; }
+  v4RealignConfiguration() { return 0; }
+  v4LocalTlsVerify() { return 0; }
+  mkcert() {
+    if [ "$1" = -CAROOT ]; then printf '%s\n' "$SANDBOX/ca"; return; fi
+    printf '%s\n' "$@" >"$SANDBOX/certificate-arguments"
+    printf '%s\n' cert >"$2"
+    printf '%s\n' key >"$4"
+  }
+  run v4TlsSetup
+  assert_success
+  grep -qx demodb.test "$SANDBOX/certificate-arguments"
+  grep -qx demomail.test "$SANDBOX/certificate-arguments"
+  grep -q '# octojoom-v4:demo.test:demodb.test$' "$SANDBOX/hosts"
+  grep -q '# octojoom-v4:demo.test:demomail.test$' "$SANDBOX/hosts"
+  jq -e '.companions==["demodb.test","demomail.test"]' "$VDM_SRC_PATH/local-tls/hosts/demo.test.json"
+  jq -e '.http.routers|has("octojoom-demo-database") and (has("octojoom-demo-mail")|not)' "$VDM_SRC_PATH/local-tls/routes/demo.test.yaml"
+}
+
+@test "companion collision with another primary site fails before certificates or trust change" {
+  mkdir -p "$VDM_REPO_PATH/joomla/available/demodb.test"
+  mkcert() { touch "$SANDBOX/should-not-create-certificate"; }
+  run v4TlsSetup
+  assert_status 3
+  [[ "$output" == *"another site's primary hostname"* ]]
+  [ ! -e "$SANDBOX/should-not-create-certificate" ]
+  [ ! -d "$VDM_SRC_PATH/local-tls" ]
+}
+
+@test "new primary sites cannot claim another site's reserved companion hostname" {
+  mkdir -p "$VDM_SRC_PATH/local-tls/hosts"
+  printf '{"file":"/etc/hosts","companions":["demodb.test","demomail.test"]}\n' >"$VDM_SRC_PATH/local-tls/hosts/demo.test.json"
+  run v4NetworkCheckPrimaryHost demodb.test
+  assert_status 3
+  run v4NetworkCheckPrimaryHost DEMODB.Test
+  assert_status 3
+  run v4NetworkCheckPrimaryHost independent.test
+  assert_success
+}
+
+@test "companion collision checks treat primary names and proxy Host rules case-insensitively" {
+  mkdir -p "$VDM_REPO_PATH/joomla/available/DEMODB.Test"
+  run v4LocalCheckCompanionHosts
+  assert_status 3
+  [[ "$output" == *"another site's primary hostname"* ]]
+  rmdir "$VDM_REPO_PATH/joomla/available/DEMODB.Test"
+  mkdir -p "$VDM_SRC_PATH/local-tls/routes"
+  # shellcheck disable=SC2016
+  printf '%s\n' '{"http":{"routers":{"other":{"rule":"Host(`DEMOMAIL.Test`)"}}}}' >"$VDM_SRC_PATH/local-tls/routes/other.test.yaml"
+  run v4LocalCheckCompanionHosts
+  assert_status 3
+  [[ "$output" == *'another local proxy route'* ]]
+  run v4NetworkCheckPrimaryHost demomail.test
+  assert_status 3
+}
+
+@test "new primary sites cannot duplicate an existing primary with different letter case" {
+  run v4NetworkCheckPrimaryHost DEMO.Test
+  assert_status 3
+  [[ "$output" == *'DNS names are case-insensitive'* ]]
+}
+
+@test "hosts rollback reconciles companion ownership across different host files" {
+  printf '127.0.0.1 localhost\n' >"$SANDBOX/old-hosts"
+  printf '127.0.0.1 localhost\n127.0.0.1 unrelated.test # octojoom-v4:other.test:unrelated.test\n' >"$SANDBOX/new-hosts"
+  jq -n --arg file "$SANDBOX/old-hosts" '{file:$file}' >"$SANDBOX/previous.json"
+  jq -n --arg file "$SANDBOX/new-hosts" '{file:$file,companions:["demodb.test","demomail.test"]}' >"$SANDBOX/current.json"
+  V4_REQUEST=$(jq --arg file "$SANDBOX/new-hosts" '.hosts_file=$file' <<<"$V4_REQUEST")
+  v4HostsEntry add demo.test demo.test
+  v4HostsEntry add demodb.test demo.test
+  v4HostsEntry add demomail.test demo.test
+  v4HostsRestoreRecord "$SANDBOX/previous.json" "$SANDBOX/current.json" demo.test
+  grep -q '# octojoom-v4:demo.test$' "$SANDBOX/old-hosts"
+  run grep -q 'demo.test' "$SANDBOX/new-hosts"
+  assert_failure
+  grep -q '# octojoom-v4:other.test:unrelated.test$' "$SANDBOX/new-hosts"
+}
+
+@test "failed viewer migration restores prior TLS assets hosts and selected provider together" {
+  prepare_tls_configuration_rollback
+  local root="$VDM_SRC_PATH/local-tls"
+  mkdir -p "$root/routes" "$root/certs" "$root/hosts"
+  printf '{"old_route":true}\n' >"$root/routes/demo.test.yaml"
+  printf 'original leaf\n' >"$root/certs/demo.test.pem"
+  printf 'original private key\n' >"$root/certs/demo.test-key.pem"
+  printf '127.0.0.1 localhost\n127.0.0.1 demo.test # octojoom-v4:demo.test\n' >"$SANDBOX/hosts"
+  jq -n --arg file "$SANDBOX/hosts" '{file:$file}' >"$root/hosts/demo.test.json"
+  V4_META=$(jq '.tls={mode:"local",update_hosts:true}' <<<"$V4_META")
+  touch "$SANDBOX/original-stopped-viewer"
+  V4_REQUEST='{"site":"demo.test","yes":true,"service":"database-ui","provider":"adminer"}'
+  v4ApplyConfig() { [ "${V4_DEFER_STOPPED_CLEANUP:-}" = true ] || return 7; V4_META="$1"; printf '%s\n' "$1" >"$SANDBOX/last-meta.json"; }
+  v4RuntimeRemoveStoppedServices() { rm "$SANDBOX/original-stopped-viewer"; }
+  v4RealignConfiguration() { return 0; }
+  run v4ServiceConfigure
+  assert_failure
+  jq -e '.tls.mode=="local" and .tls.companions!=true and (.services|has("database_viewer")|not)' "$SANDBOX/last-meta.json"
+  jq -e '.old_route==true' "$root/routes/demo.test.yaml"
+  [ "$(cat "$root/certs/demo.test.pem")" = 'original leaf' ]
+  [ "$(cat "$root/certs/demo.test-key.pem")" = 'original private key' ]
+  grep -q '# octojoom-v4:demo.test$' "$SANDBOX/hosts"
+  run grep -E 'demodb|demomail' "$SANDBOX/hosts"
+  assert_failure
+  jq -e 'has("companions")|not' "$root/hosts/demo.test.json"
+  [ -f "$SANDBOX/original-stopped-viewer" ]
+}
+
+@test "stopped viewer cleanup waits until the outer TLS migration commits" {
+  prepare_tls_configuration_rollback
+  V4_META=$(jq '.tls={mode:"local",update_hosts:false}' <<<"$V4_META")
+  V4_REQUEST='{"site":"demo.test","yes":true,"service":"database-ui","provider":"adminer"}'
+  v4ApplyConfig() { [ "${V4_DEFER_STOPPED_CLEANUP:-}" = true ] || return 7; V4_META="$1"; }
+  v4RealignConfiguration() { return 0; }
+  v4LocalTlsVerify() { touch "$SANDBOX/verified"; }
+  v4RuntimeRemoveStoppedServices() {
+    [ -f "$SANDBOX/verified" ] && [ -f "$1" ] || return 8
+    jq -e '.services.database_viewer=="adminer"' <<<"$V4_META" >/dev/null || return 8
+    touch "$SANDBOX/cleanup-committed"
+  }
+  run v4ServiceConfigure
+  assert_success
+  [ -f "$SANDBOX/cleanup-committed" ]
+  [ ! -d "$VDM_REPO_PATH/joomla/.provision.lock" ]
+}
+
+@test "TLS setup holds the same namespace reservation as site creation until completion" {
+  v4TlsSetupReserved() {
+    [ -d "$VDM_REPO_PATH/joomla/.provision.lock" ] || return 8
+    v4Lock "$VDM_REPO_PATH/joomla/.provision.lock"
+  }
+  run v4TlsSetup
+  assert_status 4
+  [ ! -d "$VDM_REPO_PATH/joomla/.provision.lock" ]
+}
+
+prepare_tls_hosts_file_move() {
+  prepare_tls_configuration_rollback
+  mkdir -p "$VDM_SRC_PATH/local-tls/hosts"
+  printf '127.0.0.1 localhost\n127.0.0.1 demo.test # octojoom-v4:demo.test\n127.0.0.1 demodb.test # octojoom-v4:demo.test:demodb.test\n127.0.0.1 demomail.test # octojoom-v4:demo.test:demomail.test\n' >"$SANDBOX/hosts-a"
+  printf '127.0.0.1 localhost\n127.0.0.1 otherdb.test # octojoom-v4:other.test:otherdb.test\n127.0.0.1 demo.test # octojoom-v4:demo.test\n' >"$SANDBOX/hosts-b"
+  v4HostsFilterOwned owned demo.test <"$SANDBOX/hosts-a" >"$SANDBOX/owned-a"
+  v4HostsFilterOwned owned demo.test <"$SANDBOX/hosts-b" >"$SANDBOX/owned-b"
+  jq -n --arg file "$SANDBOX/hosts-a" '{file:$file,companions:["demodb.test","demomail.test"]}' >"$VDM_SRC_PATH/local-tls/hosts/demo.test.json"
+  V4_META=$(jq '.tls={mode:"local",companions:true,update_hosts:true}' <<<"$V4_META")
+  V4_REQUEST=$(jq --arg file "$SANDBOX/hosts-b" '.hosts_file=$file | .update_hosts=true' <<<"$V4_REQUEST")
+  v4ApplyConfig() { V4_META="$1"; }
+  v4RealignConfiguration() { return 0; }
+}
+
+@test "changing the managed hosts file moves only the selected site's mappings" {
+  prepare_tls_hosts_file_move
+  v4LocalTlsVerify() { return 0; }
+  run v4TlsSetup
+  assert_success
+  run grep -q 'octojoom-v4:demo.test' "$SANDBOX/hosts-a"
+  assert_failure
+  grep -q '# octojoom-v4:demo.test:demodb.test$' "$SANDBOX/hosts-b"
+  grep -q '# octojoom-v4:demo.test:demomail.test$' "$SANDBOX/hosts-b"
+  grep -q '# octojoom-v4:other.test:otherdb.test$' "$SANDBOX/hosts-b"
+  jq -e --arg file "$SANDBOX/hosts-b" '.file==$file' "$VDM_SRC_PATH/local-tls/hosts/demo.test.json"
+}
+
+@test "failed hosts file move restores both original owned mappings and preserves unrelated edits" {
+  prepare_tls_hosts_file_move
+  v4LocalTlsVerify() { printf '192.0.2.8 added-while-running.example\n' >>"$SANDBOX/hosts-b"; return 1; }
+  run v4TlsSetup
+  assert_failure
+  v4HostsFilterOwned owned demo.test <"$SANDBOX/hosts-a" >"$SANDBOX/restored-a"
+  v4HostsFilterOwned owned demo.test <"$SANDBOX/hosts-b" >"$SANDBOX/restored-b"
+  cmp -s "$SANDBOX/owned-a" "$SANDBOX/restored-a"
+  cmp -s "$SANDBOX/owned-b" "$SANDBOX/restored-b"
+  grep -q 'added-while-running.example' "$SANDBOX/hosts-b"
+  grep -q '# octojoom-v4:other.test:otherdb.test$' "$SANDBOX/hosts-b"
+  jq -e --arg file "$SANDBOX/hosts-a" '.file==$file' "$VDM_SRC_PATH/local-tls/hosts/demo.test.json"
+}
+
+@test "mail enable submits capture and legacy TLS migration as one transaction" {
+  V4_META=$(jq '.tls={mode:"local",update_hosts:false}' <<<"$V4_META")
+  v4MailSettings() { printf '{"mailer":"smtp","smtphost":"original.smtp"}\n'; }
+  v4TlsSetup() { printf '%s\n' "$1" >"$SANDBOX/migration-meta.json"; }
+  v4ApplyConfig() { touch "$SANDBOX/should-not-apply-again"; }
+  run v4MailConfigure
+  assert_success
+  jq -e '.services.mail==true' "$SANDBOX/migration-meta.json"
+  [ ! -e "$SANDBOX/should-not-apply-again" ]
+}
+
 @test "local proxy refuses to join an unrelated same-named network" {
   docker() {
     case "$1 $2" in
@@ -388,7 +639,8 @@ prepare_tls_configuration_rollback() {
   printf '{}\n' >"$root/routes/demo.test.yaml"
   printf 'certificate\n' >"$root/certs/demo.test.pem"
   printf 'private-key\n' >"$root/certs/demo.test-key.pem"
-  printf '{"file":"/etc/hosts"}\n' >"$root/hosts/demo.test.json"
+  printf '127.0.0.1 demo.test # octojoom-v4:demo.test\n127.0.0.1 demodb.test # octojoom-v4:demo.test:demodb.test\n127.0.0.1 demomail.test # octojoom-v4:demo.test:demomail.test\n127.0.0.1 otherdb.test # octojoom-v4:other.test:otherdb.test\n' >"$SANDBOX/hosts"
+  jq -n --arg file "$SANDBOX/hosts" '{file:$file,companions:["demodb.test","demomail.test"]}' >"$root/hosts/demo.test.json"
   V4_META=$(jq '.tls.mode="local"' <<<"$V4_META")
   v4Lock() { mkdir "$1"; }
   v4Unlock() { rmdir "$1"; }
@@ -405,6 +657,10 @@ prepare_tls_configuration_rollback() {
   [ ! -f "$root/routes/demo.test.yaml" ]
   [ ! -f "$root/certs/demo.test-key.pem" ]
   [ -f "$root/hosts/demo.test.json" ]
+  grep -q '# octojoom-v4:demo.test$' "$SANDBOX/hosts"
+  grep -q '# octojoom-v4:other.test:otherdb.test$' "$SANDBOX/hosts"
+  run grep -E 'demodb|demomail' "$SANDBOX/hosts"
+  assert_failure
   [ "$(cat "$SANDBOX/stopped")" = octojoom-local-proxy ]
   [ ! -d "$root/.lock" ]
 }
@@ -451,13 +707,16 @@ prepare_tls_configuration_rollback() {
   local settings="$SANDBOX/mail.json"
   printf '%s\n' '{"mailer":"smtp","smtphost":"smtp.example.test","smtpport":465,"smtpauth":true,"smtpsecure":"ssl","smtpuser":"alice","smtppass":"secret"}' >"$settings"
   cp "$settings" "$settings.original"
+  V4_META=$(jq '.services.mail_port=8125' <<<"$V4_META")
   v4MailSettings() { if [ "$1" = read ]; then cat "$SANDBOX/mail.json"; else cat >"$SANDBOX/mail.json"; fi; }
   v4ApplyConfig() { V4_META="$1"; }
   v4MailConfigure >"$SANDBOX/result"
+  jq -e '.services.mail_port==8125' <<<"$V4_META"
   jq -e '.smtphost=="mailpitdemo" and .smtppass==""' "$settings"
   cmp -s "$settings.original" "$V4_DIR/.mail-settings.json"
   V4_REQUEST='{"site":"demo.test","yes":true,"enabled":false}'
   v4MailConfigure >"$SANDBOX/result"
+  jq -e '.services.mail_port==8125' <<<"$V4_META"
   cmp -s "$settings.original" "$settings"
   [ ! -e "$V4_DIR/.mail-settings.json" ]
 }
@@ -471,11 +730,23 @@ prepare_tls_configuration_rollback() {
 }
 
 @test "disabling mail without preserved settings refuses to remove capture" {
+  V4_META=$(jq '.services.mail=true' <<<"$V4_META")
   V4_REQUEST='{"site":"demo.test","yes":true,"enabled":false}'
   v4MailSettings() { printf '%s\n' '{"mailer":"smtp","smtphost":"mailpitdemo"}'; }
   v4ApplyConfig() { touch "$SANDBOX/should-not-apply"; }
   run v4MailConfigure
   assert_status 3
+  [ ! -e "$SANDBOX/should-not-apply" ]
+}
+
+@test "repeated mail disable leaves existing user SMTP settings untouched" {
+  V4_REQUEST='{"site":"demo.test","yes":true,"enabled":false}'
+  v4MailSettings() { touch "$SANDBOX/should-not-read-or-write-settings"; return 1; }
+  v4ApplyConfig() { touch "$SANDBOX/should-not-apply"; return 1; }
+  run v4MailConfigure
+  assert_success
+  jq -e '.capture_enabled==false' <<<"$output"
+  [ ! -e "$SANDBOX/should-not-read-or-write-settings" ]
   [ ! -e "$SANDBOX/should-not-apply" ]
 }
 

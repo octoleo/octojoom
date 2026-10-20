@@ -56,6 +56,8 @@ It provides both:
 
 Use the Joomla **Sites** dashboard to select a project and manage its runtime, database, backups, local HTTPS, mail and developer tools. Every action also has a noninteractive command with validated JSON input/output for automation and future desktop clients. See the [command guide](docs/COMMANDS.md) and [release scope](docs/V4-IMPLEMENTATION.md) and [Joomla addon capability mapping](docs/ADDON-PARITY.md).
 
+Enable Bash Tab completion with `source <(octojoom completion bash)`. See [completion setup and command discovery](docs/COMMANDS.md#bash-tab-completion).
+
 ### ✨ Key Features
 - 🚀 Quick Joomla + OpenSSH Docker deployment
 - ⚙️ Automatic `.env` management for persistent settings

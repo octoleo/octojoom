@@ -37,6 +37,7 @@ regression scripts. It does **not** run the real-container integration scripts.
 | Suite | What the tests check |
 | --- | --- |
 | `v4-cli.bats` | Flags and JSON requests, aliases, literal argument arrays, schema and action validation, ambiguous batch targets, no-prompt execution, JSON results and exit status, metadata, locks, scoped Compose environment, and Windows argument/CRLF handling |
+| `v4-completion.bats` | Bash command/action discovery, action-specific options, enum and path values, site names, literal quoting, and read-only completion without operation dispatch |
 | `v4-tui.bats` | Every advertised operation has a handler and menu schema; required and conditional fields, explicit false defaults, secret fields, SQL command results, failure details, recovery paths, and empty-inventory actions remain available |
 | `v4-runtime.bats` | Apache/Nginx and all three database configurations, scoped credentials, PHP settings, installed-Joomla version pinning, failed runtime-change recovery, source download verification, override preservation, and Windows host/container path boundaries |
 | `v4-database.bats` | SQL exports and selection, snapshots, full and ZIP archives, checksum/path validation, partial-import recovery, independent restores, replacement rollback, retention, hook trust, and one-archive migration orchestration |
@@ -52,7 +53,9 @@ regression scripts. It does **not** run the real-container integration scripts.
 CI runs the portable suite on Ubuntu, macOS, and Windows. On Linux, available
 Docker Compose also validates generated configuration. The Windows job requires
 the native Docker CLI and Compose v2 and runs a separate `docker compose config`
-check for generated Windows bind paths. It does not start a Docker daemon or
+check for generated Windows bind paths. Large JSON request, result and archive
+regressions also run before the full Windows suite to catch native transport
+failures early. It does not start a Docker daemon or
 containers. This verifies the native configuration boundary, **not Docker
 Desktop runtime behavior**. macOS coverage is the portable suite, not a live
 Docker Desktop deployment.
@@ -95,7 +98,7 @@ existing `octojoom-local-proxy` container or `octojoom_local` network.
 
 | Scenario | Real behavior exercised |
 | --- | --- |
-| `lifecycle` | Fresh Joomla installation with MariaDB; shared backup/recovery checks below; PHP 8.2 to 8.3 while retaining the installed Joomla release; Apache to Nginx/FPM; Joomla API authentication responses; local HTTPS; mail capture; Joomla CLI, Composer, Node/npm and Redis; permission repair; temporary public review URL; MariaDB to MySQL replacement |
+| `lifecycle` | Fresh Joomla installation with MariaDB; shared backup/recovery checks below; PHP 8.2 to 8.3 while retaining the installed Joomla release; Apache to Nginx/FPM; Joomla API authentication responses; local HTTPS; mail capture; Joomla CLI, Composer, Node/npm and Redis; per-site database viewer enable/disable and phpMyAdmin/Adminer switching; permission repair; temporary public review URL; MariaDB to MySQL replacement |
 | `mysql` | Fresh Joomla installation with MySQL; shared backup/recovery checks; MySQL to MariaDB replacement with retained recovery archive and previous storage |
 | `postgres` | Fresh Joomla installation with PostgreSQL; shared backup/recovery checks; refusal of unsupported PostgreSQL-to-MySQL data conversion before creating a destination |
 | `migration` | Fresh Joomla/MariaDB installation; actual SSH and rsync push and pull between separate OctoJoom homes; one verified logical archive per transfer; destination identity/path changes; source preservation and independent restored sites |
@@ -120,6 +123,10 @@ Lifecycle adds these service checks:
   The test does not install system/browser trust or change the system hosts file.
 - Joomla's actual mailer delivers a message into the private Mailpit inbox;
   disabling capture restores the original mail settings, including secrets.
+- Database viewer changes retain the selected site's SQL data and leave a second
+  site's viewer and database unchanged. phpMyAdmin and Adminer serve the same
+  local HTTPS hostname; disabling the viewer removes its container and route.
+  Mail capture uses its own local HTTPS hostname and removes that route when disabled.
 - Verified Composer runs in the selected PHP runtime. An on-demand Node container
   builds a project fixture and exits. Redis answers PING without a published
   host port. Permission repair restores `www-data` access and protects

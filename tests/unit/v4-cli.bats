@@ -404,6 +404,50 @@ YAML
   [ "$(v4Get php_settings)" = "$large" ]
 }
 
+@test "v4 large JSON stays in Bash and out of subprocess environments" {
+  v4_cli_fixture
+  local request metadata
+  request=$(jq -cn '{site:"alpha.test",settings:{annotation:("x" * 70000)}}')
+  metadata=$(jq -c '.annotation=("m" * 70000)' "$V4_DIR/project.json")
+  printf '%s\n' "$metadata" > "$V4_DIR/project.json"
+  # Reproduce both inherited export attributes and a large request at entry.
+  # Do not start a child until the boundary has cleared those attributes.
+  export V4_META=previous V4_REQUEST="$request" V4_ERROR="$request"
+  v4LoadSite alpha.test
+  [ "$V4_META" = "$metadata" ]
+  [ "$V4_REQUEST" = "$request" ]
+  [ "$V4_ERROR" = "$request" ]
+  # The subshell specifically verifies inheritance without environment exports.
+  # shellcheck disable=SC2235
+  ( [ "$V4_META" = "$metadata" ] && [ "$V4_REQUEST" = "$request" ] )
+  printf '%s\n' probe | xargs bash -c '
+    test "${V4_META+x}${V4_REQUEST+x}${V4_ERROR+x}" = "" &&
+    test "$V4_HOST" = alpha.test && test "$1" = probe
+  ' octojoom-environment-test
+  # Function-prefix assignments acquire export attributes too. Validation
+  # must leave the full request readable without passing it to child tools.
+  function v4_cli_check_request_boundary() {
+    v4Require site || return $?
+    [ "${#V4_REQUEST}" -gt 70000 ] || return 1
+    bash -c 'test "${V4_REQUEST+x}${V4_META+x}${V4_ERROR+x}" = ""'
+  }
+  V4_REQUEST="$request" v4_cli_check_request_boundary
+}
+
+@test "v4 structured results stream payloads larger than native pipe buffers" {
+  local result
+  result=$(jq -cn '{stdout:(("literal $() " * 12000)+"\n\n"),exit_code:0}')
+  printf '%s\n' "$result" > "$SANDBOX/expected-result.json"
+  v4Result "$result" > "$SANDBOX/streamed-result.json"
+  cmp "$SANDBOX/expected-result.json" "$SANDBOX/streamed-result.json"
+  V4_RESULT_FILE="$SANDBOX/result-file.json"
+  v4Result "$result"
+  cmp "$SANDBOX/expected-result.json" "$V4_RESULT_FILE"
+  run v4Result "$result"$'\n{}'
+  assert_failure
+  cmp "$SANDBOX/expected-result.json" "$V4_RESULT_FILE"
+}
+
 @test "v4 validates explicit and persisted hook maps with the shared validator" {
   V4_REQUEST='{"hooks":{"post-start":[["php","-v"]]},"trust_hooks":false}'
   v4ValidateRequest

@@ -89,7 +89,7 @@ cleanup() {
     [ ! -s "${RESULT}" ] || cat "${RESULT}" >&2
     [ ! -s "${ERROR_OUTPUT}" ] || tail -80 "${ERROR_OUTPUT}" >&2
     for key in "${RESOURCE_KEYS[@]}"; do
-      for service in joomla nginx mariadb mysql postgres; do
+      for service in joomla nginx mariadb mysql postgres phpmyadmin adminer mailpit redis; do
         if timeout 10s "${DOCKER_BIN}" inspect --format '{{.Name}} {{json .State}}' "${service}${key}" >&2 2>/dev/null; then
           timeout 10s "${DOCKER_BIN}" logs --tail 40 "${service}${key}" >&2 2>&1
         fi
@@ -211,6 +211,54 @@ http() {
   curl -sS --retry 15 --retry-connrefused --retry-delay 1 --retry-max-time 45 --max-time 10 \
     -H "Host: ${host}" -o "${WORK}/http-body" -w '%{http_code}' "http://127.0.0.1:${port}${path}" >"${WORK}/http-status"
   cat "${WORK}/http-body"
+}
+
+# Resolve only this fixture's companion domain, with the private CA explicitly
+# trusted. Both the reported URL and the served application must match the site.
+companion_get() {
+  local host="$1" path="$2" output="$3" started=$SECONDS
+  while (( SECONDS - started < 30 )); do
+    if curl -fsS --noproxy '*' --connect-timeout 3 --max-time 5 --cacert "${CAROOT}/rootCA.pem" \
+      --resolve "${host}:${TLS_HTTPS_PORT}:127.0.0.1" "https://${host}:${TLS_HTTPS_PORT}${path}" \
+      >"${output}" 2>"${WORK}/companion-errors"; then return 0; fi
+    sleep 1
+  done
+  cat "${WORK}/companion-errors" >&2
+  fail "The selected companion endpoint did not become ready: ${host}"
+}
+
+assert_companion_disabled() {
+  local host="$1" status started=$SECONDS
+  while (( SECONDS - started < 30 )); do
+    if status=$(curl -sS --noproxy '*' --connect-timeout 3 --max-time 5 --cacert "${CAROOT}/rootCA.pem" \
+      --resolve "${host}:${TLS_HTTPS_PORT}:127.0.0.1" -o /dev/null -w '%{http_code}' "https://${host}:${TLS_HTTPS_PORT}/" \
+      2>"${WORK}/companion-errors") && [ "${status}" = 404 ]; then return 0; fi
+    sleep 1
+  done
+  cat "${WORK}/companion-errors" >&2
+  fail "Disabled companion retained a local HTTPS route: ${host}"
+}
+
+assert_viewer_isolated() {
+  companion_get "${TARGET_SITE}" / "${WORK}/viewer-site-homepage.html"
+  grep -qi '<html' "${WORK}/viewer-site-homepage.html" || fail 'Changing the database viewer stopped the Joomla HTTPS frontend.'
+  [ "$(sql "${TARGET_KEY}" 'SELECT value FROM octojoom_integration_marker WHERE id=1')" = target-only ] || fail 'Changing a database viewer changed its Joomla data.'
+  [ "$(sql "${SOURCE_KEY}" 'SELECT value FROM octojoom_integration_marker WHERE id=1')" = source-changed ] || fail 'Changing a database viewer affected another site database.'
+  [ "$("${DOCKER_BIN}" inspect --format '{{.Id}}' "phpmyadmin${SOURCE_KEY}")" = "${SOURCE_VIEWER_ID}" ] || fail 'Changing a database viewer recreated another site viewer.'
+  api site info "$(request_for_site "${SOURCE_SITE}")"
+  jq -e --arg url "${SOURCE_VIEWER_URL}" '.data.urls.database == $url and .data.database_ui.enabled == true and .data.database_ui.provider == "phpmyadmin"' "${RESULT}" >/dev/null || fail 'Changing a database viewer altered another site settings or URL.'
+}
+
+assert_database_viewer() {
+  local provider="$1" url="https://${DATABASE_HOST}:${TLS_HTTPS_PORT}"
+  api site info "$(request_for_site "${TARGET_SITE}")"
+  jq -e --arg provider "${provider}" --arg service "${provider}${TARGET_KEY}" --arg host "${DATABASE_HOST}" --arg url "${url}" \
+    '.data.database_ui.enabled == true and .data.database_ui.provider == $provider and .data.database_ui.service == $service and
+     .data.database_ui.host == $host and .data.database_ui.state.running == true and .data.database_ui.url == $url and .data.urls.database == $url' \
+    "${RESULT}" >/dev/null || fail 'Database viewer facts do not match the selected provider and site domain.'
+  companion_get "${DATABASE_HOST}" / "${WORK}/database-viewer.html"
+  grep -qi "${provider}" "${WORK}/database-viewer.html" || fail 'The database domain did not serve the selected viewer login page.'
+  assert_viewer_isolated
 }
 
 assert_installed() {
@@ -396,9 +444,29 @@ PY
     -D "${WORK}/redirect-headers" -o /dev/null "http://${TARGET_SITE}:${TLS_HTTP_PORT}/"
   grep -Fqi "location: https://${TARGET_SITE}:${TLS_HTTPS_PORT}/" "${WORK}/redirect-headers" || fail 'Local HTTP did not redirect to the configured HTTPS port.'
   grep -Fq "# octojoom-v4:${TARGET_SITE}" "${WORK}/hosts" || fail 'TLS setup did not register the selected hostname in its supplied hosts file.'
-  api tls disable "$(jq -cn --arg site "${TARGET_SITE}" --arg hosts "${WORK}/hosts" '{site:$site,hosts_file:$hosts,yes:true}')"
-  assert_installed "${TARGET_KEY}" nginx "${ENGINE}" "${PHP_TARGET_VERSION}"
   pass 'Local TLS uses a valid workstation certificate, preserves Host routing and redirects to its selected HTTPS port'
+
+  DATABASE_HOST="${TARGET_SITE%%.*}db.${TARGET_SITE#*.}"
+  MAIL_HOST="${TARGET_SITE%%.*}mail.${TARGET_SITE#*.}"
+  SOURCE_VIEWER_ID=$("${DOCKER_BIN}" inspect --format '{{.Id}}' "phpmyadmin${SOURCE_KEY}")
+  api site info "$(request_for_site "${SOURCE_SITE}")"
+  SOURCE_VIEWER_URL=$(jq -er '.data.urls.database | select(length > 0)' "${RESULT}")
+  assert_database_viewer phpmyadmin
+  api service configure "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,service:"database-ui",enabled:true,provider:"adminer",yes:true}')"
+  if "${DOCKER_BIN}" inspect "phpmyadmin${TARGET_KEY}" >/dev/null 2>&1; then fail 'Switching to Adminer left the previous phpMyAdmin container behind.'; fi
+  assert_database_viewer adminer
+  api service configure "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,service:"database-ui",enabled:false,yes:true}')"
+  api site info "$(request_for_site "${TARGET_SITE}")"
+  jq -e '.data.database_ui.enabled == false and .data.database_ui.state.running == false and .data.database_ui.state.status == "disabled" and (.data.urls.database // "") == ""' \
+    "${RESULT}" >/dev/null || fail 'Disabled database viewer still reports an active service or URL.'
+  for provider in phpmyadmin adminer; do
+    if "${DOCKER_BIN}" inspect "${provider}${TARGET_KEY}" >/dev/null 2>&1; then fail 'Disabling the database viewer left its container behind.'; fi
+  done
+  assert_companion_disabled "${DATABASE_HOST}"
+  assert_viewer_isolated
+  api service configure "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,service:"database-ui",enabled:true,provider:"phpmyadmin",yes:true}')"
+  assert_database_viewer phpmyadmin
+  pass 'Database viewers switch providers, disable and reenable on the selected site domain without changing Joomla data or another site'
 
   # Capture a message sent by Joomla's real mailer, then check that disabling
   # capture returns the exact original configuration, including SMTP secrets.
@@ -408,17 +476,26 @@ PY
   api mail configure "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,enabled:true,mail_port:0,yes:true}')"
   api mail status "$(request_for_site "${TARGET_SITE}")"
   inbox=$(jq -er '.data.inbox' "${RESULT}")
-  [[ "${inbox}" =~ ^http://127\.0\.0\.1:[0-9]+$ ]] || fail 'Mail inbox is not exposed exclusively on a local port.'
+  [ "${inbox}" = "https://${MAIL_HOST}:${TLS_HTTPS_PORT}" ] || fail 'Mail inbox URL does not use the selected site companion domain and HTTPS port.'
+  companion_get "${MAIL_HOST}" / "${WORK}/mail-inbox.html"
+  grep -qi mailpit "${WORK}/mail-inbox.html" || fail 'The mail domain did not serve the selected site inbox.'
   api mail test "$(request_for_site "${TARGET_SITE}")"
-  curl -fsS --max-time 15 "${inbox}/api/v1/messages" >"${WORK}/mail-messages.json"
+  companion_get "${MAIL_HOST}" /api/v1/messages "${WORK}/mail-messages.json"
   jq -e '.messages | length == 1 and .[0].Subject == "OctoJoom mail capture test"' "${WORK}/mail-messages.json" >/dev/null || fail 'The configured capture service did not receive the Joomla message.'
   message_id=$(jq -r '.messages[0].ID' "${WORK}/mail-messages.json")
   [[ "${message_id}" =~ ^[A-Za-z0-9-]+$ ]] || fail 'Mail capture returned an invalid message ID.'
-  curl -fsS --max-time 15 "${inbox}/api/v1/message/${message_id}" >"${WORK}/mail-message.json"
+  companion_get "${MAIL_HOST}" "/api/v1/message/${message_id}" "${WORK}/mail-message.json"
   jq -e '.Text | contains("This message verifies this Joomla sites configured mail transport.")' "${WORK}/mail-message.json" >/dev/null || fail 'Captured message body does not match Joomla mailer output.'
   api mail configure "$(jq -cn --arg site "${TARGET_SITE}" '{site:$site,enabled:false,yes:true}')"
   [ "$(timeout 15s "${DOCKER_BIN}" exec "joomla${TARGET_KEY}" php -r "${mail_digest_code}")" = "${original_mail_digest}" ] || fail 'Disabling capture did not restore the original mail configuration.'
-  pass 'Joomla delivers mail to its private inbox and restores original settings when capture is disabled'
+  if "${DOCKER_BIN}" inspect "mailpit${TARGET_KEY}" >/dev/null 2>&1; then fail 'Disabling mail capture left its container behind.'; fi
+  assert_companion_disabled "${MAIL_HOST}"
+  pass 'Joomla delivers mail to its site-domain inbox and restores original settings when capture is disabled'
+
+  api tls disable "$(jq -cn --arg site "${TARGET_SITE}" --arg hosts "${WORK}/hosts" '{site:$site,hosts_file:$hosts,yes:true}')"
+  assert_installed "${TARGET_KEY}" nginx "${ENGINE}" "${PHP_TARGET_VERSION}"
+  api site info "$(request_for_site "${TARGET_SITE}")"
+  jq -e '.data.urls.database | test("^http://127\\.0\\.0\\.1:[0-9]+$")' "${RESULT}" >/dev/null || fail 'Disabling TLS did not restore the private database viewer URL.'
 
   api site joomla "$(request_for_site "${TARGET_SITE}")" -- --version
   jq -e --arg version "${JOOMLA_VERSION}" '.data.exit_code == 0 and (.data.stdout | contains($version))' "${RESULT}" >/dev/null || fail 'Joomla CLI did not execute in the installed release.'

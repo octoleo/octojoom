@@ -117,12 +117,98 @@ v4Stopped() {
 @test "v4 tools: PostgreSQL database UI uses Adminer port 8080" {
   v4LoadSite abc.test
   V4_DB_ENGINE=postgres
+  V4_META=$(jq '.database.engine="postgres"' <<< "$V4_META")
   v4Compose() {
     if [ "$1" = port ] && [ "$2" = adminerabc ] && [ "$3" = 8080 ]; then printf '127.0.0.1:49153\n'; fi
   }
   run v4SiteUrls
   assert_success
   [ "$(jq -r .database <<< "$output")" = http://127.0.0.1:49153 ]
+}
+
+@test "v4 tools: Adminer selection on MariaDB resolves its service and port" {
+  v4LoadSite abc.test
+  V4_META=$(jq '.services.database_viewer="adminer"' <<< "$V4_META")
+  v4Compose() {
+    if [ "$1" = port ] && [ "$2" = adminerabc ] && [ "$3" = 8080 ]; then printf '127.0.0.1:49155\r\n'; fi
+  }
+  run v4ServiceName database-ui
+  assert_success
+  [ "$output" = adminerabc ]
+  run v4SiteUrls
+  assert_success
+  [ "$(jq -r .database <<< "$output")" = http://127.0.0.1:49155 ]
+}
+
+@test "v4 tools: disabled viewer info has no URL and never inspects its container" {
+  local metadata="$VDM_REPO_PATH/joomla/available/abc.test/project.json"
+  jq '.services.database_ui=false | .services.database_viewer="adminer"' "$metadata" > "$metadata.tmp"
+  mv "$metadata.tmp" "$metadata"
+  v4ContainerState() {
+    case "$1" in adminer*|phpmyadmin*) touch "$STUB_DIR/unexpected-viewer"; return 99 ;; esac
+    printf '{"status":"exited","running":false,"health":null}\n'
+  }
+  v4Compose() {
+    case "${2:-}" in adminer*|phpmyadmin*) touch "$STUB_DIR/unexpected-viewer"; return 99 ;; esac
+  }
+  run v4SiteInfo
+  assert_success
+  [ "$(jq -r '.database_ui.enabled' <<< "$output")" = false ]
+  [ "$(jq -r '.database_ui.provider' <<< "$output")" = adminer ]
+  [ "$(jq -r '.database_ui.state.status' <<< "$output")" = disabled ]
+  [ "$(jq -r '.database_ui.url' <<< "$output")" = '' ]
+  [ "$(jq -r '.urls.database' <<< "$output")" = '' ]
+  [ ! -e "$STUB_DIR/unexpected-viewer" ]
+}
+
+@test "v4 tools: disabled viewer open logs and exec fail with an actionable message" {
+  local metadata="$VDM_REPO_PATH/joomla/available/abc.test/project.json"
+  jq '.services.database_ui=false' "$metadata" > "$metadata.tmp"
+  mv "$metadata.tmp" "$metadata"
+  v4Compose() { touch "$STUB_DIR/unexpected-viewer"; return 99; }
+  V4_REQUEST='{"site":"abc.test","target":"database","print":true}'
+  run v4SiteOpen
+  assert_status 2
+  [[ "$output" == *'database viewer is disabled'* ]]
+  V4_REQUEST='{"site":"abc.test","service":"database-ui"}'
+  run v4SiteLogs
+  assert_status 2
+  [[ "$output" == *'database viewer is disabled'* ]]
+  V4_ARGS=(php -v)
+  run v4SiteExec
+  assert_status 2
+  [[ "$output" == *'database viewer is disabled'* ]]
+  [ ! -e "$STUB_DIR/unexpected-viewer" ]
+}
+
+@test "v4 tools: TLS companion URLs follow site identity and remain stable across viewer changes" {
+  v4LoadSite abc.test
+  V4_HOST=renamed.test
+  V4_META=$(jq '.host="renamed.test" | .tls={mode:"local",https_port:8443,companions:true} | .services.mail=true' <<< "$V4_META")
+  v4Compose() { touch "$STUB_DIR/unexpected-port-lookup"; return 99; }
+  run v4SiteUrls
+  assert_success
+  [ "$(jq -r .database <<< "$output")" = https://renameddb.test:8443 ]
+  [ "$(jq -r .mail <<< "$output")" = https://renamedmail.test:8443 ]
+  V4_META=$(jq '.services.database_viewer="adminer"' <<< "$V4_META")
+  run v4SiteUrls
+  assert_success
+  [ "$(jq -r .database <<< "$output")" = https://renameddb.test:8443 ]
+  [ ! -e "$STUB_DIR/unexpected-port-lookup" ]
+}
+
+@test "v4 tools: enabled viewer info reports provider service and live state" {
+  local metadata="$VDM_REPO_PATH/joomla/available/abc.test/project.json"
+  jq '.services.database_viewer="adminer"' "$metadata" > "$metadata.tmp"
+  mv "$metadata.tmp" "$metadata"
+  v4Stopped
+  run v4SiteInfo
+  assert_success
+  [ "$(jq -r '.database_ui.enabled' <<< "$output")" = true ]
+  [ "$(jq -r '.database_ui.provider' <<< "$output")" = adminer ]
+  [ "$(jq -r '.database_ui.service' <<< "$output")" = adminerabc ]
+  [ "$(jq -r '.database_ui.state.status' <<< "$output")" = exited ]
+  [ "$(jq -r '.database_ui.host' <<< "$output")" = abcdb.test ]
 }
 
 @test "v4 tools: legacy mail resolves to Mailcatcher" {
@@ -312,6 +398,29 @@ v4Stopped() {
   [[ "$output" == *redisabc* ]]
 }
 
+@test "v4 tools: readiness waits for the selected enabled database viewer" {
+  v4LoadSite abc.test
+  V4_META=$(jq '.services.database_viewer="adminer"' <<< "$V4_META")
+  v4ContainerState() {
+    if [ "$1" = adminerabc ]; then printf '{"status":"running","running":true,"health":"unhealthy"}\n'; else printf '{"status":"running","running":true,"health":"healthy"}\n'; fi
+  }
+  run v4WaitReady 1
+  assert_failure
+  [[ "$output" == *adminerabc* ]]
+}
+
+@test "v4 tools: readiness does not inspect a disabled database viewer" {
+  v4LoadSite abc.test
+  V4_META=$(jq '.services.database_ui=false' <<< "$V4_META")
+  v4ContainerState() {
+    case "$1" in phpmyadmin*|adminer*) touch "$STUB_DIR/unexpected-viewer"; return 99 ;; esac
+    printf '{"status":"running","running":true,"health":"healthy"}\n'
+  }
+  run v4WaitReady 1
+  assert_success
+  [ ! -e "$STUB_DIR/unexpected-viewer" ]
+}
+
 @test "v4 tools: batch operations retain successful and failed per-site results" {
   v4ToolsFixture xyz 6.1.4
   V4_REQUEST='{"all":true}'
@@ -401,6 +510,44 @@ v4Stopped() {
   run v4SiteExec
   assert_success
   [ "$(jq -r '.stdout|fromjson|last' <<< "$output")" = 'a space; $(touch unsafe)' ]
+  [ "$(jq -r '.stdout|fromjson|.[index("--workdir")+1]' <<< "$output")" = /var/www/html ]
+}
+
+@test "v4 tools: Redis commands use the service working directory by default" {
+  local metadata="$VDM_REPO_PATH/joomla/available/abc.test/project.json"
+  jq '.services.redis=true' "$metadata" > "$metadata.tmp"
+  mv "$metadata.tmp" "$metadata"
+  V4_REQUEST='{"site":"abc.test","service":"redis"}'
+  V4_ARGS=(redis-cli ping)
+  v4Compose() { jq -nc '$ARGS.positional' --args -- "$@"; }
+  run v4SiteExec
+  assert_success
+  [ "$(jq -c '.stdout|fromjson' <<< "$output")" = '["exec","-T","redisabc","redis-cli","ping"]' ]
+}
+
+@test "v4 tools: companion commands respect an explicit absolute working directory" {
+  V4_REQUEST='{"site":"abc.test","service":"db","workdir":"/tmp"}'
+  V4_ARGS=(pwd)
+  v4Compose() { jq -nc '$ARGS.positional' --args -- "$@"; }
+  run v4SiteExec
+  assert_success
+  [ "$(jq -c '.stdout|fromjson' <<< "$output")" = '["exec","-T","--workdir","/tmp","mariadbabc","pwd"]' ]
+  V4_REQUEST='{"site":"abc.test","service":"db","workdir":"relative"}'
+  run v4SiteExec
+  assert_status 2
+  V4_REQUEST='{"site":"abc.test","service":"db","workdir":""}'
+  run v4SiteExec
+  assert_status 2
+}
+
+@test "v4 tools: shared shell working directory defaults only the Joomla runtime" {
+  v4LoadSite abc.test
+  run v4CommandWorkdir "$V4_WEB_SERVICE"
+  assert_success
+  [ "$output" = /var/www/html ]
+  run v4CommandWorkdir "$V4_DB_SERVICE"
+  assert_success
+  [ -z "$output" ]
 }
 
 @test "v4 tools: command exit status and diagnostics survive structured output" {

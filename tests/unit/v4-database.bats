@@ -2,7 +2,8 @@
 # shellcheck shell=bash
 # Fixture literals and dynamically loaded function overrides are intentional.
 # shellcheck disable=SC1090,SC2016
-# shellcheck disable=SC2034,SC2154,SC2317
+# Bats tests and their function overrides intentionally isolate invocation globals.
+# shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317
 load ../helpers/common
 
 setup() {
@@ -212,7 +213,7 @@ restore_dependencies() {
   [ ! -e "$SANDBOX/extracted/project/db" ]
   grep -q 'project-secret' "$SANDBOX/extracted/compose/.env"
   run ! grep -q 'unrelated-secret' "$SANDBOX/extracted/compose/.env"
-  [ "$(file_mode "$archive")" = 600 ]
+  if ! is_windows; then [ "$(file_mode "$archive")" = 600 ]; fi
   grep -qx joomlasource "$SANDBOX/running"
 }
 
@@ -492,8 +493,63 @@ restore_dependencies() {
   [ "$status" -eq 0 ]
   [ "$(wc -l < "$SANDBOX/transfers" | tr -d ' ')" -eq 1 ]
   grep -q 'backup restore --target-site destination.test --target-key destination' "$SANDBOX/remote-command"
+  run ! grep -q -- '--replace' "$SANDBOX/remote-command"
   v4ArchiveValidate "$SANDBOX/remote/project.tar.gz"
   [ -f "$VDM_PROJECT_PATH/source/joomla/index.php" ]
+  V4_REQUEST=$(jq --arg hosts "$SANDBOX/hosts" '.replace=true | .timeout=240 | .clear_url=false | .development_label=true | .trust=false | .http_port=8080 | .https_port=8443 | .update_hosts=false | .hosts_file=$hosts' <<< "$V4_REQUEST")
+  run v4SiteMigrate
+  [ "$status" -eq 0 ]
+  grep -q -- '--replace true' "$SANDBOX/remote-command"
+  grep -q -- '--yes' "$SANDBOX/remote-command"
+  grep -q -- '--timeout 240' "$SANDBOX/remote-command"
+  grep -q -- '--clear-url false' "$SANDBOX/remote-command"
+  grep -q -- '--development-label true' "$SANDBOX/remote-command"
+  grep -q -- '--trust false' "$SANDBOX/remote-command"
+  grep -q -- '--http-port 8080' "$SANDBOX/remote-command"
+  grep -q -- '--https-port 8443' "$SANDBOX/remote-command"
+  grep -q -- '--update-hosts false' "$SANDBOX/remote-command"
+  grep -q -- "--hosts-file $SANDBOX/hosts" "$SANDBOX/remote-command"
+}
+
+@test "v4 public migration request accepts explicit replacement and TLS controls" {
+  v4SiteMigrate() { v4Result "$V4_REQUEST"; }
+  run v4Main site migrate --site source.test --remote user@example.test --target-site destination.test --target-key destination --direction push --replace --yes --trust=false --http-port 8080 --https-port 8443 --update-hosts=false --hosts-file "$SANDBOX/hosts" --json
+  [ "$status" -eq 0 ]
+  jq -e '.ok==true and .data.replace==true and .data.yes==true and .data.trust==false and .data.http_port==8080 and .data.https_port==8443 and .data.update_hosts==false' <<< "$output"
+}
+
+@test "v4 pull migration restores into the explicitly selected local roots" {
+  local archive source_project="$V4_PROJECT" destination_repo="$SANDBOX/received repo" destination_projects="$SANDBOX/received projects"
+  archive=$(v4BackupCreate | jq -r '.file')
+  cp "$archive" "$SANDBOX/remote-source.tar.gz"
+  restore_dependencies
+  v4RemoteCommand() {
+    printf '%s\n' "$*" > "$SANDBOX/remote-command"
+    jq -cn --arg file "$SANDBOX/remote-source.tar.gz" --arg digest "$(v4Digest "$SANDBOX/remote-source.tar.gz")" '{ok:true,data:{file:$file,sha256:$digest}}'
+  }
+  ssh() { return 0; }
+  rsync() {
+    printf 'transfer\n' >> "$SANDBOX/transfers"
+    local arguments=("$@") source target
+    source="${arguments[${#arguments[@]}-2]}"; target="${arguments[${#arguments[@]}-1]}"
+    cp "${source#*:}" "$target"
+  }
+  V4_REQUEST=$(jq -n --arg repo "$destination_repo" --arg projects "$destination_projects" '{site:"source.test",remote:"user@example.test",target_site:"destination.test",target_key:"destination",direction:"pull",destination_repo:$repo,destination_projects:$projects,source_repo:"/remote/repo",source_projects:"/remote/projects",yes:true}')
+  run v4SiteMigrate
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$SANDBOX/transfers" | tr -d ' ')" -eq 1 ]
+  grep -q -- '--repo-path /remote/repo --project-path /remote/projects' "$SANDBOX/remote-command"
+  [ -f "$destination_projects/destination/joomla/index.php" ]
+  [ ! -e "$VDM_PROJECT_PATH/destination" ]
+  [ -f "$source_project/joomla/index.php" ]
+  local value
+  migrationReadEnvValue "$destination_repo/joomla/available/destination.test/.env" VDM_PROJECT_PATH value
+  [ "$value" = "$destination_projects" ]
+  [ "$(jq -r '.project_dir' "$destination_repo/joomla/available/destination.test/project.json")" = "$destination_projects/destination" ]
+  V4_REQUEST=$(jq '.destination_repo="/invalid/../root"' <<< "$V4_REQUEST")
+  run v4SiteMigrate
+  [ "$status" -eq 2 ]
+  [ "$(wc -l < "$SANDBOX/transfers" | tr -d ' ')" -eq 1 ]
 }
 
 @test "v4 stopped restore runs posthook with database available then honors inactive state" {
@@ -637,4 +693,112 @@ HASH
   mkdir "$SANDBOX/large-package"
   v4ArchiveExtract "$archive" "$SANDBOX/large-package"
   [ "$(jq '.site.annotation|length' "$SANDBOX/large-package/manifest.json")" -eq 65536 ]
+}
+
+@test "v4 portable restore preserves disabled Adminer across MySQL-family changes" {
+  local archive target="$VDM_REPO_PATH/joomla/available/clone.test/project.json"
+  V4_META=$(jq '.services.database_ui=false | .services.database_viewer="adminer"' <<< "$V4_META")
+  printf '%s\n' "$V4_META" > "$V4_DIR/project.json"
+  archive=$(v4BackupCreate | jq -r '.file')
+  restore_dependencies
+  V4_REQUEST=$(jq -n --arg input "$archive" '{input:$input,target_site:"clone.test",target_key:"clone2",database_engine:"mysql",database_version:"8.4",yes:true}')
+  run v4BackupRestore
+  [ "$status" -eq 0 ]
+  jq -e '.database.engine=="mysql" and .services.database_ui==false and .services.database_viewer=="adminer"' "$target"
+  jq -e '.database.engine=="mariadb" and .services.database_ui==false and .services.database_viewer=="adminer"' "$VDM_REPO_PATH/joomla/available/source.test/project.json"
+}
+
+@test "v4 fresh database family uses a new viewer default without copying source provider" {
+  V4_META=$(jq '.services.database_ui=false | .services.database_viewer="phpmyadmin"' <<< "$V4_META")
+  printf '%s\n' "$V4_META" > "$V4_DIR/project.json"
+  v4SiteCreate() { printf '%s\n' "$V4_REQUEST" > "$SANDBOX/fresh-request.json"; }
+  V4_REQUEST='{"site":"source.test","target_site":"fresh.test","target_key":"fresh","database_engine":"postgres","database_version":"16","mode":"fresh","yes":true}'
+  run v4DbSwitch
+  [ "$status" -eq 0 ]
+  jq -e '.site=="fresh.test" and .database_engine=="postgres" and (has("services")|not) and (has("provider")|not)' "$SANDBOX/fresh-request.json"
+  jq -e '.services.database_ui==false and .services.database_viewer=="phpmyadmin"' "$VDM_REPO_PATH/joomla/available/source.test/project.json"
+}
+
+@test "v4 restored overrides realign managed site database and mail domains once" {
+  local package="$SANDBOX/companion-package"
+  mkdir -p "$package/compose"
+  jq -n --argjson site "$V4_META" '{site:$site}' > "$package/manifest.json"
+  cat > "$package/compose/docker-compose.override.yml" <<'YAML'
+services:
+  joomlasource:
+    labels:
+      primary: "Host(`source.test`)"
+      database: "Host(`sourcedb.test`)"
+      mail: "Host(`sourcemail.test`)"
+      unrelated: "Host(`other.test`)"
+YAML
+  V4_HOST=clone.source.test
+  V4_KEY=clone2
+  V4_ENV_KEY=CLONE2
+  V4_PROJECT="$VDM_PROJECT_PATH/clone2"
+  V4_DIR="$VDM_REPO_PATH/joomla/available/$V4_HOST"
+  mkdir -p "$V4_DIR"
+  run v4RestoreCompanions "$package/compose"
+  [ "$status" -eq 0 ]
+  grep -q 'Host(`clone.source.test`)' "$V4_DIR/docker-compose.override.yml"
+  grep -q 'Host(`clonedb.source.test`)' "$V4_DIR/docker-compose.override.yml"
+  grep -q 'Host(`clonemail.source.test`)' "$V4_DIR/docker-compose.override.yml"
+  grep -q 'Host(`other.test`)' "$V4_DIR/docker-compose.override.yml"
+  run ! grep -q 'clonedb.clone.source.test' "$V4_DIR/docker-compose.override.yml"
+}
+
+@test "v4 failed replacement reconciles companion hosts in the record's actual file" {
+  local archive tls_root="$VDM_SRC_PATH/local-tls" old_hosts="$SANDBOX/old-hosts" new_hosts="$SANDBOX/new-hosts"
+  mkdir -p "$tls_root/hosts"
+  printf '127.0.0.1 source.test # octojoom-v4:source.test\n127.0.0.1 manual.test\n' > "$old_hosts"
+  printf '127.0.0.1 unrelated.test\n' > "$new_hosts"
+  jq -n --arg file "$old_hosts" '{file:$file}' > "$tls_root/hosts/source.test.json"
+  archive=$(v4BackupCreate | jq -r '.file')
+  restore_dependencies
+  v4RealignConfiguration() {
+    V4_REQUEST=$(jq --arg file "$SANDBOX/new-hosts" '.hosts_file=$file' <<< "$V4_REQUEST")
+    v4HostsEntry add source.test || return $?
+    v4HostsEntry add sourcedb.test source.test || return $?
+    v4HostsEntry add sourcemail.test source.test || return $?
+    jq -n --arg file "$SANDBOX/new-hosts" '{file:$file,companions:["sourcedb.test","sourcemail.test"]}' > "$VDM_SRC_PATH/local-tls/hosts/source.test.json"
+    return 1
+  }
+  V4_REQUEST=$(jq -n --arg input "$archive" '{input:$input,target_site:"source.test",target_key:"source",replace:true,yes:true}')
+  run v4BackupRestore
+  [ "$status" -ne 0 ]
+  [ "$(jq -r '.file' "$tls_root/hosts/source.test.json")" = "$old_hosts" ]
+  grep -qE '^127[.]0[.]0[.]1[[:space:]]+source[.]test[[:space:]]+# octojoom-v4:source[.]test$' "$old_hosts"
+  grep -qx '127.0.0.1 manual.test' "$old_hosts"
+  [ "$(cat "$new_hosts")" = '127.0.0.1 unrelated.test' ]
+  [ -f "$VDM_PROJECT_PATH/source/joomla/index.php" ]
+}
+
+@test "v4 completed SQL import retains structured recovery result when posthook fails" {
+  printf 'CREATE TABLE imported (id INT);\n' > "$SANDBOX/import.sql"
+  V4_REQUEST=$(jq -n --arg input "$SANDBOX/import.sql" '{site:"source.test",input:$input,yes:true}')
+  V4_RESULT_FILE="$SANDBOX/import-result.json"
+  v4RunHook() { if [ "$1" = post-import-db ]; then return 1; fi; }
+  run v4DbImport
+  [ "$status" -eq 1 ]
+  [[ "$output" = *'database import completed'* ]]
+  [ "$(jq -r '.imported' "$V4_RESULT_FILE")" = true ]
+  local recovery
+  recovery=$(jq -r '.recovery' "$V4_RESULT_FILE")
+  [ -f "$recovery" ]
+  gzip -dc "$recovery" | grep -q 'CREATE TABLE original'
+  grep -q 'CREATE TABLE imported' "$SANDBOX/current.sql"
+  grep -qx joomlasource "$SANDBOX/running"
+}
+
+@test "v4 portable backups reject host CA material in the project root" {
+  local filename
+  for filename in rootCA-key.pem rootCA.pem; do
+    printf 'host CA material\n' > "$V4_PROJECT/$filename"
+    run v4BackupCreate
+    [ "$status" -eq 2 ]
+    [[ "$output" = *'Move private TLS keys outside the project'* ]]
+    [ -z "$(find "$SANDBOX/backups" -type f -print -quit)" ]
+    grep -qx joomlasource "$SANDBOX/running"
+    rm "$V4_PROJECT/$filename"
+  done
 }

@@ -37,6 +37,277 @@ setup() {
   done
 }
 
+@test "database viewer defaults remain compatible and explicit disabled stays disabled" {
+  run v4DatabaseUiConfig
+  assert_success
+  jq -e '.enabled and .provider=="phpmyadmin" and .service=="phpmyadminexample" and .port==80' <<< "$output"
+  V4_META=$(jq '.database.engine="postgres" | .services.database_ui=false' <<< "$V4_META")
+  run v4DatabaseUiConfig
+  assert_success
+  jq -e '.enabled==false and .provider=="adminer" and .service=="adminerexample" and .port==8080' <<< "$output"
+  v4GenerateCompose
+  jq -e '.services.phpmyadminexample==null and .services.adminerexample==null and .services.postgresexample!=null' "$V4_COMPOSE"
+}
+
+@test "database viewer generation supports either provider for MySQL family with private healthy ports" {
+  local engine provider port
+  for engine in mariadb mysql; do
+    for provider in phpmyadmin adminer; do
+      V4_META=$(jq --arg engine "$engine" --arg provider "$provider" '.database.engine=$engine | .services.database_viewer=$provider | .services.database_ui=true' <<< "$V4_META")
+      v4GenerateCompose
+      port=80; [ "$provider" != adminer ] || port=8080
+      jq -e --arg provider "$provider" --arg db "${engine}example" --argjson port "$port" '
+        .services[($provider+"example")] as $viewer |
+        $viewer.image==($provider+":5") and $viewer.container_name==($provider+"example") and
+        $viewer.labels["traefik.enable"]=="false" and $viewer.labels["io.octojoom.site"]=="example.test" and
+        $viewer.ports[0].host_ip=="127.0.0.1" and $viewer.ports[0].target==$port and
+        ($viewer.healthcheck.test[-1]|contains("$$s=@fsockopen")) and
+        (if $provider=="adminer" then $viewer.environment.ADMINER_DEFAULT_SERVER==$db and .services.phpmyadminexample==null
+         else $viewer.environment.PMA_HOST==$db and .services.adminerexample==null end)' "$V4_COMPOSE"
+      v4RuntimeValidateDatabaseUiCompose "$(cat "$V4_COMPOSE")"
+    done
+  done
+}
+
+@test "database viewer rejects incompatible providers and malformed controls before generation" {
+  v4GenerateCompose
+  cp "$V4_COMPOSE" "$SANDBOX/compose-before"
+  local original="$V4_META" invalid
+  for invalid in '{"database_ui":"false"}' '{"database_ui":null}' '{"database_viewer":"unknown"}' '{"database_viewer":null}'; do
+    V4_META=$(jq --argjson invalid "$invalid" '.services += $invalid' <<< "$original")
+    run v4GenerateCompose
+    assert_status 2
+    cmp "$SANDBOX/compose-before" "$V4_COMPOSE"
+  done
+  V4_META=$(jq '.database.engine="postgres" | .services.database_viewer="phpmyadmin" | .services.database_ui=false' <<< "$original")
+  run v4GenerateCompose
+  assert_status 2
+  [[ "$output" == *'phpMyAdmin does not support PostgreSQL'* ]]
+  cmp "$SANDBOX/compose-before" "$V4_COMPOSE"
+}
+
+@test "database viewer overrides cannot resurrect disabled services or change private database targets" {
+  v4GenerateCompose
+  local original="$V4_META" config
+  config=$(cat "$V4_COMPOSE")
+  V4_META=$(jq '.services.database_ui=false' <<< "$original")
+  run v4RuntimeValidateDatabaseUiCompose "$config"
+  assert_status 2
+  V4_META=$(jq '.services.database_viewer="adminer"' <<< "$original")
+  run v4RuntimeValidateDatabaseUiCompose "$config"
+  assert_status 2
+  V4_META="$original"
+  run v4RuntimeValidateDatabaseUiCompose "$(jq '.services.phpmyadminexample.ports[0].host_ip="0.0.0.0"' <<< "$config")"
+  assert_status 2
+  run v4RuntimeValidateDatabaseUiCompose "$(jq '.services.phpmyadminexample.environment.PMA_HOST="another-site"' <<< "$config")"
+  assert_status 2
+  local service
+  for service in mailpitexample redisexample nodeexample; do
+    run v4RuntimeValidateDatabaseUiCompose "$(jq --arg service "$service" '.services[$service]={image:"override:latest"}' <<< "$config")"
+    assert_status 2
+  done
+  v4RuntimeValidateDatabaseUiCompose "$config"
+}
+
+@test "failed database viewer swap restores prior provider and originally running services" {
+  v4GenerateCompose
+  cp "$V4_COMPOSE" "$SANDBOX/compose-before"
+  cp "$V4_DIR/project.json" "$SANDBOX/meta-before"
+  printf 'database untouched' > "$V4_PROJECT/db/marker"
+  hook_command docker <<'HOOK'
+case "$*" in
+  *' config --format json'*) printf '{"services":{}}'; exit 0;;
+  *' ps '*) printf 'mariadbexample\njoomlaexample\nphpmyadminexample\n'; exit 0;;
+  *' up '*)
+    if [ ! -f "$STUB_DIR/first-up" ]; then touch "$STUB_DIR/first-up"; exit 1; fi
+    printf '%s\n' "$*" > "$STUB_DIR/restored-up"
+    exit 0;;
+esac
+exit 0
+HOOK
+  run v4ApplyConfig "$(jq '.services.database_viewer="adminer"' <<< "$V4_META")"
+  assert_failure
+  cmp "$SANDBOX/compose-before" "$V4_COMPOSE"
+  cmp "$SANDBOX/meta-before" "$V4_DIR/project.json"
+  grep -F -- '--remove-orphans --wait --wait-timeout 180 mariadbexample joomlaexample phpmyadminexample' "$STUB_DIR/restored-up"
+  [ "$(cat "$V4_PROJECT/db/marker")" = 'database untouched' ]
+}
+
+@test "stopped database viewer disable and swap remove only the owned old container without starting the site" {
+  local original="$V4_META" request
+  printf 'database untouched' > "$V4_PROJECT/db/marker"
+  hook_command docker <<'HOOK'
+case "$*" in
+  *' config --format json'*) printf '{"name":"octojoomexample","services":{}}';;
+  *' ps --all --quiet phpmyadminexample'*) [ -f "$STUB_DIR/removed-viewer" ] || printf 'abcdef123456\r\n';;
+  'container inspect abcdef123456') printf '[{"Name":"/phpmyadminexample","State":{"Running":false,"Restarting":false},"Config":{"Labels":{"com.docker.compose.project":"octojoomexample","com.docker.compose.service":"phpmyadminexample"}}}]';;
+  *' rm -f phpmyadminexample') touch "$STUB_DIR/removed-viewer";;
+esac
+exit 0
+HOOK
+  for request in '{"database_ui":false}' '{"database_viewer":"adminer"}'; do
+    V4_META="$original"
+    printf '%s\n' "$V4_META" > "$V4_DIR/project.json"
+    v4GenerateCompose
+    rm -f "$STUB_DIR/removed-viewer"
+    : > "$STUB_DIR/commands.log"
+    run v4ApplyConfig "$(jq --argjson request "$request" '.services += $request' <<< "$V4_META")"
+    assert_success
+    [ -f "$STUB_DIR/removed-viewer" ]
+    grep -F ' rm -f phpmyadminexample' "$STUB_DIR/commands.log"
+    run ! grep -E ' (up|down) | rm .* -v' "$STUB_DIR/commands.log"
+    [ "$(cat "$V4_PROJECT/db/marker")" = 'database untouched' ]
+  done
+}
+
+@test "stopped database viewer removal refuses foreign ownership and restores prior metadata" {
+  v4GenerateCompose
+  cp "$V4_COMPOSE" "$SANDBOX/compose-before"
+  cp "$V4_DIR/project.json" "$SANDBOX/meta-before"
+  hook_command docker <<'HOOK'
+case "$*" in
+  *' config --format json'*) printf '{"name":"octojoomexample","services":{}}';;
+  *' ps --all --quiet phpmyadminexample'*) printf 'abcdef123456';;
+  'container inspect abcdef123456') printf '[{"Name":"/phpmyadminexample","State":{"Running":false,"Restarting":false},"Config":{"Labels":{"com.docker.compose.project":"someoneelse","com.docker.compose.service":"phpmyadminexample"}}}]';;
+esac
+exit 0
+HOOK
+  run v4ApplyConfig "$(jq '.services.database_ui=false' <<< "$V4_META")"
+  assert_status 3
+  [[ "$output" == *'not owned by this Compose project'* ]]
+  cmp "$SANDBOX/compose-before" "$V4_COMPOSE"
+  cmp "$SANDBOX/meta-before" "$V4_DIR/project.json"
+  run ! grep -E ' (rm|up|down) ' "$STUB_DIR/commands.log"
+}
+
+@test "failed stopped viewer removal restores configuration and leaves the site stopped" {
+  v4GenerateCompose
+  cp "$V4_COMPOSE" "$SANDBOX/compose-before"
+  cp "$V4_DIR/project.json" "$SANDBOX/meta-before"
+  hook_command docker <<'HOOK'
+case "$*" in
+  *' config --format json'*) printf '{"name":"octojoomexample","services":{}}';;
+  *' ps --all --quiet phpmyadminexample'*) printf 'abcdef123456';;
+  'container inspect abcdef123456') printf '[{"Name":"/phpmyadminexample","State":{"Running":false,"Restarting":false},"Config":{"Labels":{"com.docker.compose.project":"octojoomexample","com.docker.compose.service":"phpmyadminexample"}}}]';;
+  *' rm -f phpmyadminexample') exit 1;;
+esac
+exit 0
+HOOK
+  run v4ApplyConfig "$(jq '.services.database_ui=false' <<< "$V4_META")"
+  assert_failure
+  cmp "$SANDBOX/compose-before" "$V4_COMPOSE"
+  cmp "$SANDBOX/meta-before" "$V4_DIR/project.json"
+  run ! grep -E ' (up|down) ' "$STUB_DIR/commands.log"
+  [ ! -e "$V4_DIR/.operation.lock" ]
+}
+
+@test "failed route publication leaves the original stopped database viewer intact" {
+  v4GenerateCompose
+  cp "$V4_COMPOSE" "$SANDBOX/compose-before"
+  cp "$V4_DIR/project.json" "$SANDBOX/meta-before"
+  v4NetworkSyncRoute() { return 1; }
+  v4RuntimeRemoveStoppedServices() { touch "$SANDBOX/should-not-remove-viewer"; }
+  hook_command docker <<'HOOK'
+case "$*" in
+  *' config --format json'*) printf '{"services":{}}';;
+esac
+exit 0
+HOOK
+  run v4ApplyConfig "$(jq '.services.database_ui=false' <<< "$V4_META")"
+  assert_failure
+  cmp "$SANDBOX/compose-before" "$V4_COMPOSE"
+  cmp "$SANDBOX/meta-before" "$V4_DIR/project.json"
+  [ ! -e "$SANDBOX/should-not-remove-viewer" ]
+  run ! grep -E ' (up|down) ' "$STUB_DIR/commands.log"
+}
+
+@test "stopped mail Redis and Node disable remove only owned optional containers" {
+  local original="$V4_META" option role
+  printf 'database untouched' > "$V4_PROJECT/db/marker"
+  hook_command docker <<'HOOK'
+case "$*" in
+  *' config --format json'*) cat "$SANDBOX/prior-compose.json";;
+  *' ps --all --quiet '*) [ -f "$STUB_DIR/removed-service" ] || printf 'abcdef123456';;
+  'container inspect abcdef123456')
+    jq -n --arg service "$OCTOJOOM_TEST_SERVICE" '[{Name:(if $service=="nodeexample" then "/octojoomexample-nodeexample-1" else "/"+$service end),State:{Running:false,Restarting:false},Config:{Labels:{"com.docker.compose.project":"octojoomexample","com.docker.compose.service":$service,"com.docker.compose.oneoff":"False"}}}]';;
+  *' rm -f '*) printf '%s\n' "$*" > "$STUB_DIR/removed-service";;
+esac
+exit 0
+HOOK
+  for option in mail redis node; do
+    V4_META=$(jq --arg option "$option" '.services[$option]=true' <<< "$original")
+    printf '%s\n' "$V4_META" > "$V4_DIR/project.json"
+    v4GenerateCompose
+    cp "$V4_COMPOSE" "$SANDBOX/prior-compose.json"
+    role="$option"; [ "$role" != mail ] || role=mailpit
+    export OCTOJOOM_TEST_SERVICE="${role}example"
+    rm -f "$STUB_DIR/removed-service"
+    : > "$STUB_DIR/commands.log"
+    run v4ApplyConfig "$(jq --arg option "$option" '.services[$option]=false' <<< "$V4_META")"
+    assert_success
+    grep -F -- " rm -f ${role}example" "$STUB_DIR/removed-service"
+    run ! grep -E ' (up|down) | rm .* -v' "$STUB_DIR/commands.log"
+    [ "$(cat "$V4_PROJECT/db/marker")" = 'database untouched' ]
+  done
+}
+
+@test "stopped optional cleanup validates every owner before removing any container" {
+  local previous
+  previous=$(jq '.services.mail=true | .services.redis=true' <<< "$V4_META")
+  V4_META=$(jq '.services.mail=false | .services.redis=false' <<< "$previous")
+  hook_command docker <<'HOOK'
+case "$*" in
+  *' config --format json'*) printf '{"name":"octojoomexample","services":{}}';;
+  *' ps --all --quiet mailpitexample') printf 'aaaaaa';;
+  *' ps --all --quiet redisexample') printf 'bbbbbb';;
+  'container inspect aaaaaa') printf '[{"Name":"/mailpitexample","State":{"Running":false,"Restarting":false},"Config":{"Labels":{"com.docker.compose.project":"octojoomexample","com.docker.compose.service":"mailpitexample"}}}]';;
+  'container inspect bbbbbb') printf '[{"Name":"/redisexample","State":{"Running":false,"Restarting":false},"Config":{"Labels":{"com.docker.compose.project":"foreign","com.docker.compose.service":"redisexample"}}}]';;
+esac
+exit 0
+HOOK
+  run v4RuntimeRemoveStoppedServices "$V4_COMPOSE" "$previous"
+  assert_status 3
+  [[ "$output" == *'nothing was removed'* ]]
+  run ! grep -F ' rm ' "$STUB_DIR/commands.log"
+}
+
+@test "outer TLS transactions can defer stopped cleanup until final verification" {
+  v4GenerateCompose
+  v4RuntimeRemoveStoppedServices() { touch "$SANDBOX/should-not-remove-service"; }
+  hook_command docker <<'HOOK'
+case "$*" in
+  *' config --format json'*) printf '{"services":{}}';;
+esac
+exit 0
+HOOK
+  V4_DEFER_STOPPED_CLEANUP=true run v4ApplyConfig "$(jq '.services.database_ui=false' <<< "$V4_META")"
+  assert_success
+  [ ! -e "$SANDBOX/should-not-remove-service" ]
+  jq -e '.services.database_ui==false' "$V4_DIR/project.json"
+  run ! grep -E ' (up|down|rm) ' "$STUB_DIR/commands.log"
+}
+
+@test "contradictory viewer override is rejected before publishing new configuration" {
+  v4GenerateCompose
+  cp "$V4_COMPOSE" "$SANDBOX/compose-before"
+  cp "$V4_DIR/project.json" "$SANDBOX/meta-before"
+  printf 'services:\n  phpmyadminexample:\n    environment:\n      USER_SETTING: retained\n' > "$V4_DIR/docker-compose.override.yml"
+  cp "$V4_DIR/docker-compose.override.yml" "$SANDBOX/override-before"
+  hook_command docker <<'HOOK'
+case "$*" in
+  *' config --format json'*) cat "$SANDBOX/compose-before";;
+esac
+exit 0
+HOOK
+  run v4ApplyConfig "$(jq '.services.database_ui=false' <<< "$V4_META")"
+  assert_status 2
+  [[ "$output" == *'Compose override conflicts'* ]]
+  cmp "$SANDBOX/compose-before" "$V4_COMPOSE"
+  cmp "$SANDBOX/meta-before" "$V4_DIR/project.json"
+  cmp "$SANDBOX/override-before" "$V4_DIR/docker-compose.override.yml"
+  run ! grep -E ' (rm|up|down|stop) ' "$STUB_DIR/commands.log"
+}
+
 @test "nginx routes Joomla API PATH_INFO to FPM with custom docroot and private config" {
   V4_META=$(jq '.webserver="nginx" | .image="joomla:5.4.9-php8.3-fpm"' <<< "$V4_META")
   v4GenerateCompose
@@ -409,11 +680,15 @@ HOOK
     fi
     skip 'Native Docker Compose CLI is unavailable'
   fi
-  v4GenerateCompose
-  local file env_file expected
+  local file env_file expected provider
   file=$(v4DockerHostPath "$V4_COMPOSE"); env_file=$(v4DockerHostPath "$V4_ENV_FILE"); expected=$(v4DockerHostPath "$V4_DOCROOT")
-  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$native_docker" compose --file "$file" --env-file "$env_file" config --format json > "$SANDBOX/resolved-compose.json"
-  jq -e --arg expected "$expected" '.services.joomlaexample.volumes[] | select(.target=="/var/www/html") | (.source|gsub("\\\\";"/")|ascii_downcase)==($expected|ascii_downcase) and .target=="/var/www/html"' "$SANDBOX/resolved-compose.json"
+  for provider in phpmyadmin adminer disabled; do
+    V4_META=$(jq --arg provider "$provider" 'if $provider=="disabled" then .services.database_ui=false else .services.database_ui=true | .services.database_viewer=$provider end' <<< "$V4_META")
+    v4GenerateCompose
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$native_docker" compose --file "$file" --env-file "$env_file" config --format json > "$SANDBOX/resolved-compose.json"
+    jq -e --arg expected "$expected" '.services.joomlaexample.volumes[] | select(.target=="/var/www/html") | (.source|gsub("\\\\";"/")|ascii_downcase)==($expected|ascii_downcase) and .target=="/var/www/html"' "$SANDBOX/resolved-compose.json"
+    v4RuntimeValidateDatabaseUiCompose "$(cat "$SANDBOX/resolved-compose.json")"
+  done
 }
 
 @test "managed links are real symbolic links and refuse existing destinations" {

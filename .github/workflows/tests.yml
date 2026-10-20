@@ -140,6 +140,12 @@ jobs:
           OCTOJOOM_REQUIRE_NATIVE_COMPOSE: '1'
         run: bash tests/run.sh --filter 'native Windows Compose resolves' tests/unit/v4-runtime.bats
 
+      - name: Validate native Windows large JSON transport
+        if: runner.os == 'Windows'
+        env:
+          OCTOJOOM_NO_REAL_DOCKER: '1'
+        run: bash tests/run.sh --filter 'large requests|large JSON|structured results stream|large query results|metadata beyond native' tests/unit/v4-cli.bats tests/unit/v4-database.bats
+
       - name: Run the test suite
         env:
           # Keep legacy daemon checks Linux-only; the Windows config check is separate.

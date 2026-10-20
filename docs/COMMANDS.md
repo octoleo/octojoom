@@ -8,6 +8,36 @@ Use Bash 4 or newer and jq. Native Windows jq must be version 1.7 or newer so JS
 
 Run `octojoom` for the menu, select Joomla, then **Sites: dashboard and actions**. Existing project discovery keeps the configured Compose repository and project paths. Existing deployment and migration menus remain available. Version 4 projects add a private `.env` and a `project.json` beside their Compose file. Keep custom Compose changes in `docker-compose.override.yml`; generated files are owned by OctoJoom.
 
+## Bash Tab completion
+
+Enable completion in the current Bash session:
+
+```bash
+source <(octojoom completion bash)
+```
+
+For future sessions, add that line to your Bash startup file, such as `~/.bashrc`.
+Use the startup file your macOS Bash terminal actually loads. Activation is
+explicit: OctoJoom does not edit shell startup files. This integration supports
+Bash 4 or newer on Linux, macOS, and Windows Git Bash; it does not install a
+completion definition for zsh, fish, or PowerShell.
+
+Press Tab to complete a unique match, or Tab twice to list multiple matches.
+Try typing `octojoom si`, `octojoom site `, or
+`octojoom site create --webserver ` before pressing Tab. Completion discovers
+canonical command groups, actions, action-specific flags, enum and boolean
+values, saved site hostnames for `--site`, and relevant filesystem paths. Both
+`--option value` and `--option=value` work, including filenames with spaces.
+Help and version are discoverable through `--help` and `--version`.
+
+Candidates come from the shared command schema and local saved configuration.
+Site names honor `OCTOJOOM_HOME` and a preceding `--repo-path`; completion does
+not open a JSON `--config` file to discover overrides. It never starts containers,
+runs an operation, installs dependencies, or opens a dialog. Completion stops
+at `--` so Joomla, Composer, npm, SQL, and other tool arguments remain untouched.
+The generated definition targets canonical commands; legacy `--type`/`--task`
+aliases remain usable without their own completion vocabulary.
+
 ## Requests, results and desktop clients
 
 ```bash
@@ -80,7 +110,7 @@ octojoom site stop --site example.test
 octojoom site start --all --json
 ```
 
-`site start` enables the site's startup link by default; `--enable=false` starts it without adding that link. `site stop` leaves the link unchanged unless `--disable` is supplied. Restart preserves the enabled state. Start/restart wait for the database, Joomla runtime, Nginx when selected, and enabled mail/Redis services; `--timeout` defaults to 120 seconds. Batch lifecycle commands accept `--all` instead of `--site` and return each site's result and error. Deletion always requires `--yes`; when retaining data, it saves recoverable project configuration and scoped credentials in the reported recovery directory.
+`site start` enables the site's startup link by default; `--enable=false` starts it without adding that link. `site stop` leaves the link unchanged unless `--disable` is supplied. Restart preserves the enabled state. Start/restart wait for the database, Joomla runtime, Nginx when selected, and enabled database-viewer/mail/Redis services; `--timeout` defaults to 120 seconds. Batch lifecycle commands accept `--all` instead of `--site` and return each site's result and error. Deletion always requires `--yes`; when retaining data, it saves recoverable project configuration and scoped credentials in the reported recovery directory.
 
 `site path` returns the document root by default, or the project root with `--target project`. `site open` accepts `--target site|admin|database|mail|directory`; add `--print` to return the address/path without launching an application. Local site addresses use the actual assigned port. Before using a development hostname such as `example.test`, map it to loopback in your hosts file; local TLS setup and offline preparation can manage this entry.
 
@@ -124,7 +154,23 @@ octojoom database switch --site example.test --database-engine mysql --database-
   --mode clone --target-site mysql-copy.test --target-key mysqlcopy --yes
 ```
 
-Remote migration sends a single verified compressed archive over SSH/rsync and invokes the same restore command at the destination. Both ends require OctoJoom 4 and its prerequisites. Supply `--remote user@server`, `--direction push|pull`, target identity and destination/source roots when defaults differ. Source files remain available after migration.
+Remote migration sends a single verified compressed archive over SSH/rsync and invokes the same restore command at the destination. Both ends require OctoJoom 4 and its prerequisites. Supply `--remote user@server`, `--direction push|pull` and the target identity. `--destination-repo` and `--destination-projects` select the receiving host's roots in either direction; a pull otherwise uses your local `--repo-path` and `--project-path` defaults. For a pull from nondefault remote roots, supply `--source-repo` and `--source-projects`. A push reads its source from the local roots. To replace an existing destination, explicitly supply `--replace --yes`; the destination uses the same recovery archive and rollback process as a local restore. Source files remain available after migration.
+
+## Database viewer controls
+
+The database viewer can be enabled, disabled, or changed independently for each site. Existing projects default to an enabled phpMyAdmin viewer for MariaDB/MySQL and Adminer for PostgreSQL. Adminer also supports MariaDB/MySQL; phpMyAdmin is refused for PostgreSQL.
+
+```bash
+octojoom service configure --site example.test --service database-ui --provider adminer --enabled --yes
+octojoom service configure --site example.test --service database-ui --enabled=false --yes
+octojoom service configure --site example.test --service database-ui --provider phpmyadmin --enabled --yes
+octojoom site open --site example.test --target database
+octojoom site logs --site example.test --service database-ui --json
+```
+
+Changing the viewer preserves the Joomla installation, database contents and volumes. A stopped site stays stopped; only its previous managed viewer container is removed. Custom Compose overrides that retain a disabled or replaced managed viewer, or publish it beyond loopback, are refused before applying changes; the override file is retained so you can realign it. `site info` reports `database_ui.enabled`, `provider`, `service`, the derived companion `host`, the current `url`, and container `state`. The `database-ui` service alias follows the selected provider for logs, commands and shells. A disabled viewer has an empty URL and a `disabled` state; site information remains available, while explicit viewer commands explain how to enable it.
+
+With local HTTPS companion routing configured, the database URL follows the site hostname: `example.test` uses `https://exampledb.test`, with the configured HTTPS port when it differs from 443. Switching phpMyAdmin and Adminer retains that address. TLS setup and subsequent viewer configuration align the certificate, hosts entry and route; a long first DNS label uses `db.example.test` instead of appending the suffix. Without local HTTPS companion routing, the viewer uses its actual loopback HTTP port. Server-profile projects also keep viewer ports private. `site open --target database --print` returns the current address.
 
 ## Local HTTPS, sharing and email
 
@@ -148,7 +194,7 @@ Use `--http-port 8080 --https-port 8443` if ports 80/443 are occupied. Every sit
 
 External sharing requires a running local-profile site. It starts a temporary Cloudflare tunnel directly to that site's private HTTP web service and returns an HTTPS review URL. It preserves the public hostname for Joomla-generated links and does not route through the local certificate proxy. It does not expose database, mail or administration-tool ports. Joomla's administrator is part of the application and remains subject to Joomla authentication. `share status` reports the live container state and URL; `share stop` removes the site's tunnel container and saved URL. Stop sharing when the review ends. Public tunnel creation requires outbound access to Cloudflare and is intended for temporary review, not production hosting.
 
-Email capture is restricted to local-profile sites and uses Mailpit. Enabling it preserves Joomla's previous mail settings before pointing Joomla's SMTP transport at the private Mailpit service; disabling restores those settings. Mailpit's inbox is bound to loopback with an automatically assigned port, available through `mail status` or `site open --target mail`; use `--mail-port` during configuration to choose a fixed port. SMTP is not published on the host. `mail test` verifies that Joomla still points at this site's capture service, then sends a test through Joomla to `capture@example.test`. View it in the inbox; the command does not send through an external SMTP provider.
+Email capture is restricted to local-profile sites and uses Mailpit. Enabling it preserves Joomla's previous mail settings before pointing Joomla's SMTP transport at the private Mailpit service; disabling restores those settings. Mailpit's inbox uses a loopback HTTP port by default; use `--mail-port` during configuration to choose a fixed port, which is preserved across enable/disable calls. Repeating disable after capture is already off succeeds without changing user SMTP settings. With local HTTPS companion routing, `example.test` uses `https://examplemail.test` and the configured HTTPS port. Obtain the current address through `mail status` or `site open --target mail`. SMTP is not published on the host. `mail test` verifies that Joomla still points at this site's capture service, then sends a test through Joomla to `capture@example.test`. View it in the inbox; the command does not send through an external SMTP provider.
 
 Optional Redis and Node services are project scoped:
 
@@ -172,7 +218,7 @@ octojoom site offline --site example.test --composer-version 2.10.3 --json
 octojoom update check --json
 ```
 
-`site exec` passes arguments literally to the selected service (`web` by default). `--service` also accepts `frontend`, `db`, `mail`, `database-ui`, `redis`, `node`, or an exact service name from that project's Compose configuration. `--workdir` selects an absolute container directory and defaults to `/var/www/html`. `site shell` requires a terminal and supports a custom executable after `--`. `site joomla` invokes the installed `cli/joomla.php` with PHP and defaults to its command list. Bounded developer-command results contain stdout, stderr and the child exit status, with a 16 MiB limit for each output stream. Use a terminal shell for interactive output. Logs default to the web service and the last 100 lines; `--follow` streams until interrupted and cannot return JSON.
+`site exec` passes arguments literally to the selected service (`web` by default). `--service` also accepts `frontend`, `db`, `mail`, `database-ui`, `redis`, `node`, or an exact service name from that project's Compose configuration. `--workdir` selects an absolute container directory. Joomla web/PHP commands default to `/var/www/html`; companion services use their image's working directory unless one is supplied. `site shell` uses the same directory selection, requires a terminal and supports a custom executable after `--`. `site joomla` invokes the installed `cli/joomla.php` with PHP and defaults to its command list. Bounded developer-command results contain stdout, stderr and the child exit status, with a 16 MiB limit for each output stream. Use a terminal shell for interactive output. Logs default to the web service and the last 100 lines; `--follow` streams until interrupted and cannot return JSON.
 
 Composer uses the project's PHP runtime. When Composer is absent, OctoJoom downloads and verifies a cached PHAR, then runs it in a one-shot container using the selected Joomla image. `--composer-version` selects an explicit Composer 2 release and forces the PHAR path; the default fallback is 2.10.3. Composer always receives `--no-interaction`. npm uses the web runtime if npm is installed there, otherwise the configured Node service runs on demand. Enabling Node is required for that fallback. Composer/npm default to reporting their version when no arguments are supplied.
 
@@ -205,7 +251,7 @@ Configure an existing site's event with `hook configure`; disable it with `--ena
 | `pre-restore`, `post-restore` | Full/site archive restore, including cloning and database replacement. |
 | `pre-composer`, `post-composer` | Composer commands. |
 
-An internal temporary stop/start during backup or restore does not trigger the explicit lifecycle events. A failed hook stops the remaining commands and returns a failed operation. Pre-operation failures prevent the following operation; post-operation failures report failure after the completed change. Arbitrary hook side effects are not rolled back. A successful import/restore or a published backup remains available if its post-hook fails; inspect the command result and recovery paths.
+An internal temporary stop/start during backup or restore does not trigger the explicit lifecycle events. A failed hook stops the remaining commands and returns a failed operation. Pre-operation failures prevent the following operation; post-operation failures report failure after the completed change. Arbitrary hook side effects are not rolled back. A successful import/restore or a published backup remains available if its post-hook fails; inspect the command result and recovery paths. SQL imports retain `imported: true` and the recovery dump path in the result when `post-import-db` fails, while the command still exits nonzero.
 
 Archive hooks are inactive by default. Restore preserves them in `imported-hooks.json` for review; use `--trust-hooks` only when you want the archived commands to run. This rule also applies to clones and migrations. When replacing an existing site without trusting archived hooks, the destination keeps its own configured hooks. Its trusted `pre-restore` runs before replacement. The newly provisioned target's `pre-restore` runs only for a new destination with explicitly trusted hooks. Database-only snapshot restore retains the existing site's hooks and does not load commands from its archive.
 

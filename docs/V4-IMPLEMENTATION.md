@@ -5,6 +5,7 @@ This branch implements the agreed Joomla development and operations workflow whi
 ## Implementation scope
 
 - Shared noninteractive command API, validated JSON input/output, and documented exit codes.
+- Schema-driven Bash Tab completion for commands, actions, options and Joomla site names.
 - Per-site dashboard/menu using the same operations as terminal commands.
 - Site inventory, actual runtime information, quick access, logs and diagnostics.
 - Database export/import, selected tables, SQL access and batch operations.
@@ -14,7 +15,7 @@ This branch implements the agreed Joomla development and operations workflow whi
 - Apache and Nginx/FPM, configurable document roots and configuration realignment.
 - MariaDB, MySQL and supported PostgreSQL configurations; safe engine/version change flows.
 - Local trusted HTTPS and per-project temporary external sharing.
-- Existing-site email capture and optional project services.
+- Per-site email capture and database viewer controls, phpMyAdmin/Adminer switching, aligned local HTTPS hostnames and optional project services.
 - Container development tools, lifecycle hooks, offline preparation and update notices.
 - Cross-platform command tests, real-container integration tests, documentation and 4.0.0 version metadata.
 
