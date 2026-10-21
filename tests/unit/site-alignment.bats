@@ -124,7 +124,7 @@ EXTRA
   siteReplaceServiceScalar "$ALIGN_YML" "$SANDBOX/changed.yml" joomlaalpha image example/joomla:php-next
   assert_equal "$(siteReadServiceScalar "$SANDBOX/changed.yml" joomlaalpha image)" example/joomla:php-next
   assert_equal "$(siteReadServiceScalar "$SANDBOX/changed.yml" mariadbalpha image)" mariadb:latest
-  sed '/    image: joomla:/a\    image: duplicate:tag' "$ALIGN_YML" > "$SANDBOX/duplicate.yml"
+  awk '{ print } /    image: joomla:/ { print "    image: duplicate:tag" }' "$ALIGN_YML" > "$SANDBOX/duplicate.yml"
   run siteReplaceServiceScalar "$SANDBOX/duplicate.yml" "$SANDBOX/refused.yml" joomlaalpha image changed:tag
   assert_failure
 }
