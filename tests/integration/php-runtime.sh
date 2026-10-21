@@ -84,7 +84,12 @@ require __DIR__ . '/configuration.php';
 $c = new JConfig;
 $db = new mysqli($c->host, $c->user, $c->password, $c->db);
 $result = $db->query('SELECT message FROM runtime_marker LIMIT 1');
-echo $result->fetch_row()[0], ':', PHP_VERSION;
+if (isset($_GET['runtime-settings'])) {
+ header('Content-Type: application/json');
+ echo json_encode(['memory_limit' => ini_get('memory_limit'), 'max_execution_time' => ini_get('max_execution_time'), 'max_input_time' => ini_get('max_input_time')]);
+} else {
+ echo $result->fetch_row()[0], ':', PHP_VERSION;
+}
 PHP
 cat > "$COMPOSE" <<YAML
 name: $PROJECT
@@ -163,11 +168,13 @@ if grep -q must-not-copy "$SITE/.env"; then echo "Unrelated secret copied" >&2; 
 VDM_ACTION=settings
 VDM_memory_limit=512M
 VDM_max_execution_time=180
-OCTOJOOM_CLI_KEYS=(VDM_memory_limit VDM_max_execution_time)
-OCTOJOOM_CLI_VALUES=(512M 180)
+VDM_max_input_time=240
+OCTOJOOM_CLI_KEYS=(VDM_memory_limit VDM_max_execution_time VDM_max_input_time)
+OCTOJOOM_CLI_VALUES=(512M 180 240)
 joomla__TRuST__php
 [ "$(joomlaSiteCompose "$VDM_CONTAINER" exec -T "$WEB" php -r 'echo get_cfg_var("memory_limit");')" = 512M ]
-[ "$(joomlaSiteCompose "$VDM_CONTAINER" exec -T "$WEB" php -r 'echo get_cfg_var("max_execution_time");')" = 180 ]
+readJoomlaSiteFacts "$VDM_CONTAINER"
+curl --fail --silent --show-error "$VDM_SITE_URL/?runtime-settings=1" | jq -e '.memory_limit == "512M" and .max_execution_time == "180" and .max_input_time == "240"' >/dev/null
 grep -q 'VDM_memory_limit="128M"' "$VDM_SRC_PATH/.env"
 [ "$(docker exec "$DB" mariadb -uroot -ptest-root-password --batch --skip-column-names runtime -e 'SELECT message FROM runtime_marker')" = preserved-data ]
 
@@ -178,7 +185,8 @@ OCTOJOOM_CLI_KEYS=(VDM_memory_limit)
 OCTOJOOM_CLI_VALUES=(768M)
 joomla__TRuST__php
 [ "$(joomlaSiteCompose "$VDM_CONTAINER" exec -T "$WEB" php -r 'echo get_cfg_var("memory_limit");')" = 768M ]
-[ "$(joomlaSiteCompose "$VDM_CONTAINER" exec -T "$WEB" php -r 'echo get_cfg_var("max_execution_time");')" = 180 ]
+readJoomlaSiteFacts "$VDM_CONTAINER"
+curl --fail --silent --show-error "$VDM_SITE_URL/?runtime-settings=1" | jq -e '.memory_limit == "768M" and .max_execution_time == "180" and .max_input_time == "240"' >/dev/null
 [ "$(docker inspect --format '{{.Id}}' "$DB")" = "$original_db" ]
 
 # An invalid proposed image leaves every published configuration untouched.

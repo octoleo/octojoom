@@ -68,7 +68,11 @@ services that were running are recreated. A prepared/stopped site stays stopped,
 and enabled symlinks are unchanged. A running site's successful apply checks the
 selected PHP version, requested startup configuration, Joomla's database
 connection and its actual HTTP route. PHP startup configuration uses
-`get_cfg_var`, because the CLI SAPI overrides settings such as execution time.
+`get_cfg_var` for ordinary values. PHP CLI forcibly overrides both timeout
+settings, so their configured web values are read with PHP's native INI parser
+from the actual loaded/scanned startup files in order, excluding HOST/PATH
+scopes. Malformed scan files fail validation. The Docker acceptance test also
+checks both timeout values through an actual HTTP request.
 Failure restores the prior files/runtime through the same publication helper and
 reports any recovery problem.
 

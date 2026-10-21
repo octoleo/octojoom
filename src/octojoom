@@ -8895,6 +8895,57 @@ function joomlaPHPPatchIni() {
   chmod 644 "$destination"
 }
 
+# PHP CLI forcibly sets both timeout directives, including get_cfg_var(). Read
+# only those configured web values from PHP's actual ordered startup files;
+# retain native parsing and ignore per-HOST/PATH settings for this global check.
+function joomlaPHPConfigurationReader() {
+  cat <<'PHP'
+function octojoomConfiguredPHPValue($setting) {
+    if (!in_array($setting, ["max_execution_time", "max_input_time"], true)) {
+        return get_cfg_var($setting);
+    }
+    $paths = [];
+    if ($loaded = php_ini_loaded_file()) { $paths[] = $loaded; }
+    foreach (preg_split('/,\\s*/', trim((string) php_ini_scanned_files()), -1, PREG_SPLIT_NO_EMPTY) as $path) {
+        $paths[] = $path;
+    }
+    // PHP can skip a malformed scanned file, warn, and still exit successfully.
+    // Check every configured scan file before trusting the successfully loaded
+    // list; use that original list, not this directory enumeration, for order.
+    $scan = getenv("PHP_INI_SCAN_DIR");
+    $defaultScan = defined("PHP_CONFIG_FILE_SCAN_DIR") ? PHP_CONFIG_FILE_SCAN_DIR : "";
+    if ($scan === false) { $scan = $defaultScan; }
+    foreach ($scan === "" ? [] : explode(PATH_SEPARATOR, $scan) as $directory) {
+        if ($directory === "") { $directory = $defaultScan; }
+        if (!is_dir($directory)) { continue; }
+        $entries = @scandir($directory);
+        if ($entries === false) { throw new RuntimeException("A PHP scan directory could not be read."); }
+        foreach ($entries as $entry) {
+            $path = $directory . DIRECTORY_SEPARATOR . $entry;
+            if (substr($entry, -4) === ".ini" && is_file($path) && @parse_ini_file($path, true) === false) {
+                throw new RuntimeException("A loaded PHP configuration file could not be parsed.");
+            }
+        }
+    }
+    $value = null;
+    foreach ($paths as $path) {
+        $config = @parse_ini_file($path, true);
+        if ($config === false) { throw new RuntimeException("A loaded PHP configuration file could not be parsed."); }
+        foreach ($config as $key => $entry) {
+            if (is_array($entry)) {
+                if (!preg_match('/^(HOST|PATH)\\s*=/i', $key) && array_key_exists($setting, $entry)) {
+                    $value = $entry[$setting];
+                }
+            } elseif ($key === $setting) {
+                $value = $entry;
+            }
+        }
+    }
+    return $value;
+  }
+PHP
+}
+
 # Validate proposed startup settings in the selected image before publication.
 # This catches invalid INI expressions and unreadable configuration without
 # interrupting a running service or changing stopped-site data.
@@ -8904,13 +8955,13 @@ function joomlaPHPValidateIni() {
   shift 3
   [[ "$file" != *,* && "$target" != *,* && "$file" != *$'\n'* ]] || return 2
   docker run --rm --network none --read-only --entrypoint php \
-    --mount "type=bind,source=$file,target=$target,readonly" "$image" -r '
+    --mount "type=bind,source=$file,target=$target,readonly" "$image" -r "$(joomlaPHPConfigurationReader)"'
       if (!is_file($argv[1]) || @parse_ini_file($argv[1]) === false || strpos((string)php_ini_scanned_files(), $argv[1]) === false) {
         fwrite(STDERR,"PHP could not load the proposed override file.\n"); exit(1);
       }
       for ($i=2; $i<count($argv); $i+=2) {
         $expected=parse_ini_string($argv[$i]."=".$argv[$i+1]);
-        $actual=get_cfg_var($argv[$i]);
+        $actual=octojoomConfiguredPHPValue($argv[$i]);
         if ($expected===false || !isset($expected[$argv[$i]]) || strcasecmp((string)$actual,(string)$expected[$argv[$i]])!==0) {
           fwrite(STDERR,"PHP did not accept the proposed ".$argv[$i]." setting.\n"); exit(1);
         }
@@ -8931,12 +8982,11 @@ function joomlaRuntimeValidatePublished() {
   fi
   for setting in ${OCTOJOOM_PHP_CHANGED_SETTINGS:-}; do
     value="VDM_$setting"
-    # get_cfg_var reports startup configuration even where the CLI SAPI
-    # overrides a value (notably max_execution_time). parse_ini_string uses
-    # PHP's INI expression parser, never eval, for error_reporting constants.
-    joomlaSiteCompose "$site" exec -T "$VDM_SITE_SERVICE" php -r '
+    # Parse expressions natively, never eval. CLI overrides both timeouts, so
+    # their configured values come from the actual loaded startup files.
+    joomlaSiteCompose "$site" exec -T "$VDM_SITE_SERVICE" php -r "$(joomlaPHPConfigurationReader)"'
       $expected = parse_ini_string($argv[1] . "=" . $argv[2]);
-      $actual = get_cfg_var($argv[1]);
+      $actual = octojoomConfiguredPHPValue($argv[1]);
       exit($expected !== false && isset($expected[$argv[1]]) && strcasecmp((string)$actual, (string)$expected[$argv[1]]) === 0 ? 0 : 1);
     ' -- "$setting" "${!value}" || {
       printf 'PHP did not load the requested %s value.\n' "$setting" >&2; return 1;

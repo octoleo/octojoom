@@ -353,3 +353,46 @@ SH
   assert_equal "$output" actual-tag
   refute_file_exists "$SANDBOX/unneeded-fallback"
 }
+
+@test "native PHP reader distinguishes CLI timeout overrides from ordered web startup configuration" {
+  command -v php >/dev/null || skip 'native PHP CLI is unavailable; Docker acceptance covers web values'
+  local scan="$SANDBOX/php-scan" main="$SANDBOX/main.ini" reader
+  mkdir -p "$scan"
+  printf 'max_execution_time = 60\nmax_input_time = 90\n' > "$main"
+  printf 'max_execution_time = 180\nmemory_limit = 512M\n[PATH=/private]\nmax_execution_time = 999\n' > "$scan/10-runtime.ini"
+  printf '[Date]\nmax_input_time = 240\n[HOST=private.test]\nmax_input_time = 888\n' > "$scan/20-runtime.ini"
+  reader=$(joomlaPHPConfigurationReader)
+  run env PHP_INI_SCAN_DIR="$scan" php -c "$main" -r "$reader"'
+    echo get_cfg_var("max_execution_time"), ",", get_cfg_var("max_input_time"), "\n";
+    echo octojoomConfiguredPHPValue("max_execution_time"), ",", octojoomConfiguredPHPValue("max_input_time"), ",", octojoomConfiguredPHPValue("memory_limit");'
+  assert_success
+  assert_equal "$output" $'0,-1\n180,240,512M'
+}
+
+@test "native staged validation accepts requested timeouts but rejects a later INI override" {
+  command -v php >/dev/null || skip 'native PHP CLI is unavailable; Docker acceptance covers web values'
+  local native_php scan="$SANDBOX/php-scan" main="$SANDBOX/main.ini" staged
+  native_php=$(command -v php)
+  mkdir -p "$scan"
+  : > "$main"
+  staged="$scan/10-octojoom.ini"
+  printf 'max_execution_time = 180\nmax_input_time = 240\nmemory_limit = 512M\n' > "$staged"
+  # Replace only Docker's transport/mount mapping; execute the production PHP
+  # validation program with a real PHP SAPI and real loaded configuration.
+  docker() {
+    while [ "$1" != -r ]; do shift; done
+    local code="$2"
+    shift 4
+    env PHP_INI_SCAN_DIR="$scan" "$native_php" -c "$main" -r "$code" -- "$staged" "$@"
+  }
+  run joomlaPHPValidateIni test/php "$staged" /php/conf.d/zz-octojoom.ini max_execution_time 180 max_input_time 240 memory_limit 512M
+  assert_success
+  printf 'max_execution_time = 45\n' > "$scan/99-vendor.ini"
+  run joomlaPHPValidateIni test/php "$staged" /php/conf.d/zz-octojoom.ini max_execution_time 180
+  assert_failure
+  assert_output_contains 'PHP did not accept the proposed max_execution_time setting.'
+  printf 'memory_limit = "unterminated\n' > "$scan/99-vendor.ini"
+  run joomlaPHPValidateIni test/php "$staged" /php/conf.d/zz-octojoom.ini max_execution_time 180
+  assert_failure
+  assert_output_contains 'A loaded PHP configuration file could not be parsed.'
+}
