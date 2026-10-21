@@ -3692,7 +3692,10 @@ function siteWriteScopedEnv() {
       return 1
     fi
   done <<< "$references"
-  chmod 600 "$temporary" && mv -f -- "$temporary" "$destination"
+  if ! chmod 600 "$temporary" || ! mv -f -- "$temporary" "$destination"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
 }
 
 # These two helpers intentionally support the original, block-style service
@@ -3705,7 +3708,7 @@ function siteReadServiceScalar() {
     /^services:[[:space:]]*(#.*)?$/ { services=1; next }
     services && /^[^[:space:]#]/ { services=0; selected=0 }
     services && /^  [^[:space:]#]/ {
-      selected=($0 ~ ("^  " service ":[[:space:]]*(#.*)?$")); if (selected) blocks++
+      selected=(index($0, "  " service ":") == 1 && substr($0, length(service)+4) ~ /^[[:space:]]*(#.*)?$/); if (selected) blocks++
     }
     selected && $0 ~ ("^    " property ":[[:space:]]*") {
       count++; line=$0; sub("^    " property ":[[:space:]]*", "", line); value=line
@@ -3728,7 +3731,7 @@ function siteReplaceServiceScalar() {
   OCTOJOOM_SCALAR_VALUE="$escaped" awk -v service="$service" -v property="$property" '
     /^services:[[:space:]]*(#.*)?$/ { services=1 }
     services && /^[^[:space:]#]/ && $0 !~ /^services:/ { services=0; selected=0 }
-    services && /^  [^[:space:]#]/ { selected=($0 ~ ("^  " service ":[[:space:]]*(#.*)?$")) }
+    services && /^  [^[:space:]#]/ { selected=(index($0, "  " service ":") == 1 && substr($0, length(service)+4) ~ /^[[:space:]]*(#.*)?$/) }
     selected && $0 ~ ("^    " property ":[[:space:]]*") { $0="    " property ": \"" ENVIRON["OCTOJOOM_SCALAR_VALUE"] "\"" }
     { print }
   ' "$source" > "$destination"
@@ -3913,11 +3916,23 @@ function siteAlignmentPlan() {
 
 function siteAlignConfiguration() {
   (
-    local site="$1" action="${2:-apply}" plan state directory compose_file effective_env env_key service image staged_compose staged_env before after
+    local site="$1" action="${2:-apply}" plan state directory compose_file effective_env env_key service image
+    local staged_compose='' staged_env='' before='' after='' reported=false status temporary
+    trap '
+      status=$?
+      for temporary in "$staged_compose" "$staged_env" "$before" "$after"; do
+        [ -z "$temporary" ] || rm -f -- "$temporary"
+      done
+      if [ "$status" -ne 0 ] && ! "$reported"; then
+        printf "%s\taction-needed\tAlignment failed; original configuration or reported recovery files retained.\n" "$site"
+      fi
+      exit "$status"
+    ' EXIT
     plan=$(siteAlignmentPlan "$site") || exit 1
     state="${plan%%$'\t'*}"
     if [ "$action" = inspect ] || [ "$state" != pending ]; then
       printf '%s\t%s\n' "$site" "$plan"
+      reported=true
       [ "$state" != action-needed ]
       exit $?
     fi
@@ -3931,7 +3946,6 @@ function siteAlignConfiguration() {
     staged_env=$(mktemp "$directory/.align-env.XXXXXX") || { rm -f "$staged_compose"; exit 1; }
     before=$(mktemp "$directory/.align-before.XXXXXX") || exit 1
     after=$(mktemp "$directory/.align-after.XXXXXX") || exit 1
-    trap 'rm -f -- "$staged_compose" "$staged_env" "$before" "$after"' EXIT
     siteWriteScopedEnv "$compose_file" "$effective_env" "$env_key" "$staged_env" &&
       writeEnvVariable "$staged_env" "VDM_${env_key}_IMAGE=\"$image\"" true &&
       siteReplaceServiceScalar "$compose_file" "$staged_compose" "$service" image "\${VDM_${env_key}_IMAGE}" || exit 1
@@ -3940,6 +3954,7 @@ function siteAlignConfiguration() {
       migrationRunCompose "$staged_env" "$staged_compose" --project-directory "$directory" config > "$after" || exit 1
     if ! cmp -s "$before" "$after"; then
       printf '%s\taction-needed\tEffective Compose configuration changed unexpectedly; original retained.\n' "$site"
+      reported=true
       exit 1
     fi
     # No service arguments: effective configuration is identical, including when

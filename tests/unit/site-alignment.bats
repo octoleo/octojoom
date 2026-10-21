@@ -194,3 +194,16 @@ EXTRA
   assert_equal "$(file_mode "$ALIGN_DIR/.env")" 600
   assert_equal "$(file_mode "$ALIGN_YML")" 600
 }
+
+@test "scalar edit: a dotted service name is matched literally" {
+  cat > "$SANDBOX/dotted.yml" <<'YAML'
+services:
+  web.site:
+    image: intended:tag
+  webXsite:
+    image: neighbor:tag
+YAML
+  siteReplaceServiceScalar "$SANDBOX/dotted.yml" "$SANDBOX/changed.yml" web.site image changed:tag
+  assert_equal "$(siteReadServiceScalar "$SANDBOX/changed.yml" web.site image)" changed:tag
+  assert_equal "$(siteReadServiceScalar "$SANDBOX/changed.yml" webXsite image)" neighbor:tag
+}
