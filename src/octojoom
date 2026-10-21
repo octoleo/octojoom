@@ -9392,7 +9392,7 @@ function getPortListeners() {
       }'
     return 0
   fi
-  if listeners=$(sudo lsof -a -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN 2>&1); then
+  if listeners=$(cliSudo lsof -a -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN 2>&1); then
     scan_status=0
   else
     scan_status=$?
@@ -9479,15 +9479,15 @@ function ensurePortsFree() {
 	# Ask user to disable Linux services
 	message+="\nWould you like us to stop and disable these services?"
 
-	if getInputYesNo "$message" "Free Ports 80 & 443" 20 112 "defaultno"; then
+	if [ "${VDM_FREE_PORTS:-false}" = true ] || getInputYesNo "$message" "Free Ports 80 & 443" 20 112 "defaultno"; then
 
 		# Stop/disable Linux services
 		for svc in "${conflict_services[@]}"; do
 			if systemctl is-active --quiet "$svc"; then
-				sudo systemctl stop "$svc" || return 1
+				cliSudo systemctl stop "$svc" || return 1
 			fi
 			if systemctl is-enabled --quiet "$svc"; then
-				sudo systemctl disable "$svc" || return 1
+				cliSudo systemctl disable "$svc" || return 1
 			fi
 		done
 
@@ -9737,10 +9737,10 @@ function updateHostFile_unix() {
     # check if already in host file
     if hostFileHasHost "${hostname}" /etc/hosts; then
       showNotice "${USER^}, ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} is already in the /etc/hosts file."
-    elif (whiptail --yesno "${USER^}, to add the ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} entry to your host file we need sudo privileges." \
+    elif ([ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || whiptail --yesno "${USER^}, to add the ${1:-$VDM_SUBDOMAIN}.${2:-$VDM_DOMAIN} entry to your host file we need sudo privileges." \
       --title "Give sudo Privileges" --backtitle "${BACK_TITLE}" 8 112); then
       # add the domain to the host file
-      if ! printf '127.0.0.1       %s\n' "${hostname}" | sudo tee -a /etc/hosts >/dev/null; then
+      if ! printf '127.0.0.1       %s\n' "${hostname}" | cliSudo tee -a /etc/hosts >/dev/null; then
         showError "Failed to add ${hostname} to /etc/hosts."
         return 1
       fi
@@ -9782,9 +9782,9 @@ function updateHostFile_windows() {
     fi
     if hostFileHasHost "${subdomain}.${domain}" "$host_file"; then
       showNotice "${USER^}, ${subdomain}.${domain} is already in the hosts file."
-    elif (whiptail --yesno "${USER^}, to add the ${subdomain}.${domain} entry to your host file we need administrative privileges." \
+    elif ([ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || whiptail --yesno "${USER^}, to add the ${subdomain}.${domain} entry to your host file we need administrative privileges." \
       --title "Give administrative Privileges" --backtitle "${BACK_TITLE}" 8 112); then
-      if ! printf '127.0.0.1       %s\n' "${subdomain}.${domain}" | sudo tee -a "$host_file" >/dev/null; then
+      if ! printf '127.0.0.1       %s\n' "${subdomain}.${domain}" | cliSudo tee -a "$host_file" >/dev/null; then
         showError "Failed to add ${subdomain}.${domain} to the hosts file."
         return 1
       fi
@@ -11890,7 +11890,11 @@ function settings__TRuST__remote() {
     connectToRemoteSystem "$remote"
   else
     for argument in "${OCTOJOOM_ARGS[@]}"; do command+=" $(quoteRemoteArgument "$argument")"; done
-    ssh -- "$remote" "$command"
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+      ssh -o BatchMode=yes -T -- "$remote" "$command"
+    else
+      ssh -- "$remote" "$command"
+    fi
   fi
 }
 
@@ -11982,7 +11986,7 @@ function cliOptionVariable() {
     --docroot) echo VDM_DOCROOT;; --nginx-config) echo VDM_NGINX_CONFIG;; --nginx-image) echo VDM_NGINX_IMAGE;;
     --service) echo VDM_SERVICE;; --tail) echo VDM_TAIL;; --version-prefix) echo VDM_VERSION_PREFIX;;
     --file) echo VDM_INPUT_FILE;; --config-kind) echo VDM_CONFIG_KIND;;
-    --mode) echo VDM_MODE;; --secure) echo VDM_SECURE;; --cloudflare) echo VDM_SECURE_CLOUDFLARE;;
+    --mode) echo VDM_MODE;; --free-ports) echo VDM_FREE_PORTS;; --update-hosts) echo VDM_UPDATE_HOST;; --secure) echo VDM_SECURE;; --cloudflare) echo VDM_SECURE_CLOUDFLARE;;
     --secure-email) echo VDM_SECURE_EMAIL;; --cloudflare-token) echo VDM_CLOUDFLARE_DNS_API_TOKEN;;
     --traefik-network) echo VDM_TRAEFIK_GATEWAY;; --openssh-network) echo VDM_OPENSSH_GATEWAY;;
     --remote) echo VDM_REMOTE;; --direction) echo VDM_DIRECTION;; --project) echo VDM_PROJECT;;
@@ -12033,8 +12037,12 @@ function cliReadJSON() {
     echo >&2 'ERROR: Invalid JSON request; use type, task, container, action, options and a string args array.'
     return 17
   fi
+  # Structured requests default to headless unless the request explicitly opts
+  # into interactive collection; direct command flags still have final priority.
+  cliRememberValue OCTOJOOM_NON_INTERACTIVE true
   while IFS= read -r -d '' option && IFS= read -r -d '' value; do
     case "$option" in
+      yes) variable=VDM_FORCE;; sudo) variable=VDM_SUDO_ACCESS;;
       non-interactive) variable=OCTOJOOM_NON_INTERACTIVE;;
       quiet) variable=OCTOJOOM_QUIET;; verbose) variable=OCTOJOOM_VERBOSE;;
       no-progress) variable=OCTOJOOM_NO_PROGRESS;; all) variable=VDM_ALL;;
@@ -12060,6 +12068,8 @@ function parseCLI() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --) break;;
+      --output=*) OCTOJOOM_OUTPUT="${1#*=}";;
+      --output) [ "$#" -lt 2 ] || OCTOJOOM_OUTPUT="$2";;
       --input-json=*) [ -z "$json_file" ] || return 17; json_file="${1#*=}";;
       --input-json) [ -z "$json_file" ] && [ "$#" -ge 2 ] || return 17; json_file="$2"; shift;;
     esac
@@ -12106,7 +12116,7 @@ function parseCLI() {
   for index in "${!OCTOJOOM_CLI_KEYS[@]}"; do
     variable="${OCTOJOOM_CLI_KEYS[index]}"
     case "$variable" in
-      OCTOJOOM_NON_INTERACTIVE|OCTOJOOM_QUIET|OCTOJOOM_VERBOSE|OCTOJOOM_NO_PROGRESS|VDM_ALL|VDM_SHORT|VDM_FOLLOW|VDM_MOVE_FILES|VDM_AUTO_INSTALL|VDM_ENABLE|VDM_CUSTOMIZE|VDM_PERSISTENCE|VDM_DB_PERSISTENCE|VDM_MAILCATCHER|VDM_PHPMYADMIN|VDM_SAVE_DEFAULTS|VDM_PHP_SETTINGS|VDM_SECURE|VDM_SECURE_CLOUDFLARE|VDM_REMOVE_DEPLOYMENTS|VDM_REMOVE_CONFIG|VDM_REMOVE_DATA)
+      VDM_FORCE|VDM_SUDO_ACCESS|OCTOJOOM_NON_INTERACTIVE|OCTOJOOM_QUIET|OCTOJOOM_VERBOSE|OCTOJOOM_NO_PROGRESS|VDM_ALL|VDM_SHORT|VDM_FOLLOW|VDM_MOVE_FILES|VDM_AUTO_INSTALL|VDM_ENABLE|VDM_CUSTOMIZE|VDM_PERSISTENCE|VDM_DB_PERSISTENCE|VDM_MAILCATCHER|VDM_PHPMYADMIN|VDM_SAVE_DEFAULTS|VDM_PHP_SETTINGS|VDM_SECURE|VDM_SECURE_CLOUDFLARE|VDM_FREE_PORTS|VDM_UPDATE_HOST|VDM_REMOVE_DEPLOYMENTS|VDM_REMOVE_CONFIG|VDM_REMOVE_DATA)
         value=$(cliBoolean "${OCTOJOOM_CLI_VALUES[index]}") || { echo >&2 "ERROR: $variable requires true or false."; return 17; }
         OCTOJOOM_CLI_VALUES[index]="$value";;
     esac
@@ -12134,6 +12144,7 @@ function cliTaskNames() {
 
 function cliComplete() {
   local previous="${1:-}" current="${2:-}" type="${3:-joomla}" path item
+  case "$type" in joomla|openssh|traefik|portainer|settings|domains|directory) ;; *) return 0;; esac
   case "$previous" in
     --type) printf '%s\n' joomla openssh traefik portainer settings domains directory;;
     --task) cliTaskNames "$type";;
@@ -12161,6 +12172,8 @@ function cliCompletionScript() {
 _octojoom_complete() {
   local current="${COMP_WORDS[COMP_CWORD]}" previous='' prefix='' type=joomla word index
   (( COMP_CWORD == 0 )) || previous="${COMP_WORDS[COMP_CWORD-1]}"
+  if [ "$previous" = = ] && (( COMP_CWORD > 1 )); then previous="${COMP_WORDS[COMP_CWORD-2]}"; fi
+  [ "$current" != = ] || current=''
   for ((index=1; index<COMP_CWORD; index++)); do
     word="${COMP_WORDS[index]}"
     case "$word" in --type) type="${COMP_WORDS[index+1]}";; --type=*) type="${word#*=}";; esac
@@ -12173,7 +12186,7 @@ complete -o filenames -F _octojoom_complete octojoom
 # A function is necessary: only the caller's shell can change its own directory.
 octojoom_cd() {
   local directory
-  directory=$(command octojoom --type joomla --task path --container "$1" --non-interactive) || return
+  directory=$(command octojoom --type joomla --task path --container "${1:-}" --non-interactive) || return
   [ -d "$directory" ] || return 1
   cd -- "$directory" || return
   }
@@ -12217,7 +12230,14 @@ function removeShellIntegration() {
 }
 
 function cliResolvePaths() {
-  VDM_HOME_PATH="${OCTOJOOM_HOME:-${HOME}}"
+  case "$OSTYPE" in linux*) OS_NUMBER=1;; darwin*) OS_NUMBER=2;; msys*|cygwin*) OS_NUMBER=3;; *) OS_NUMBER=0;; esac
+  VDM_HOME_PATH="${OCTOJOOM_HOME:-}"
+  if [ -z "$VDM_HOME_PATH" ]; then
+    case "$OS_NUMBER" in
+      1) VDM_HOME_PATH="/home/${USER}";; 2) VDM_HOME_PATH="/Users/${USER}";; 3) VDM_HOME_PATH="/c/Users/${USER}";;
+      *) echo >&2 'ERROR: Unsupported operating system.'; return 1;;
+    esac
+  fi
   local home_path="$VDM_HOME_PATH" src_path="${VDM_HOME_PATH}/.config/octojoom"
   VDM_SRC_PATH="$src_path"
   [ ! -f "$src_path/.env" ] || loadEnvFile "$src_path/.env" || return 1
@@ -12269,6 +12289,7 @@ function cliPreflight() {
       : "${VDM_ENV_KEY:=${VDM_KEY^^}}"; : "${VDM_PUID:=$(id -u)}"; : "${VDM_PGID:=$(id -g)}"
       : "${VDM_PUBLIC_KEY_GLOBAL_DIR:=${VDM_PUBLIC_KEY_U_DIR%/*}}";;
     traefik/setup|portainer/setup)
+      if [ -f "$VDM_REPO_PATH/$VDM_CONTAINER_TYPE/.env" ]; then loadEnvFile "$VDM_REPO_PATH/$VDM_CONTAINER_TYPE/.env" || return 1; cliApplyValues; fi
       isValidDomain "${VDM_DOMAIN:-}" || { echo >&2 'ERROR: Setup requires --domain.'; return 17; }
       if [ "${VDM_SECURE:-false}" = true ] && [ "${VDM_CONTAINER_TYPE}" = traefik ]; then
         [ -n "${VDM_SECURE_EMAIL:-}" ] || { echo >&2 'ERROR: HTTPS setup requires --secure-email.'; return 17; }

@@ -179,3 +179,12 @@ JSON
   assert_equal "$VDM_SECURE_CLOUDFLARE" true
   [ ! -s "$STUB_DIR/dialogs.log" ]
 }
+
+@test "headless: Traefik setup reuses a saved email without requesting it again" {
+  mkdir -p "$VDM_REPO_PATH/traefik"
+  printf 'VDM_SECURE_EMAIL="admin@example.test"\n' >"$VDM_REPO_PATH/traefik/.env"
+  run_octojoom --type traefik --task setup --domain example.test --secure true --non-interactive
+  assert_success
+  assert_file_exists "$VDM_REPO_PATH/traefik/docker-compose.yml"
+  [ ! -s "$STUB_DIR/dialogs.log" ]
+}

@@ -53,7 +53,8 @@ Streaming `logs --follow` and interactive `shell` require text output.
 
 ### Optional JSON request
 
-JSON is transport, never stored site metadata. `jq` is required only for JSON
+JSON is transport, never stored site metadata. Structured requests default to
+headless mode unless their options explicitly request interactive collection. `jq` is required only for JSON
 requests/results; ordinary flags, menus and Bash completion do not require it.
 Use `--input-json request.json`, or `--input-json -` to read stdin. The accepted
 schema has these fields only:
@@ -130,7 +131,9 @@ Setup credentials/settings include `--db-name`, `--db-user`, `--db-password`,
 `--phpmyadmin`, `--persistence`, `--db-persistence`, and `--save-defaults`.
 PHP setting flags are `--memory-limit`, `--max-execution-time`,
 `--max-input-time`, `--max-input-vars`, `--upload-max-filesize`,
-`--post-max-size`, and `--error-reporting`. Server choices additionally accept
+`--post-max-size`, and `--error-reporting`. `--free-ports true` explicitly permits the existing Traefik flow to stop known
+conflicting host web services; its default leaves them alone. `--update-hosts`
+controls the existing host-entry preference. Server choices additionally accept
 `--nginx-image` and an explicit `--nginx-config` for custom routing equivalents.
 
 Existing operation-specific restrictions still apply: for example, the original
