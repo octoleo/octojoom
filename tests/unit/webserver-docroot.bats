@@ -287,15 +287,23 @@ APACHE
   printf 'server { listen 80; }\n' > "$work/staged-nginx.conf"
   OCTOJOOM_SITE_FILE_TARGETS=("$work/site/nginx.conf")
   OCTOJOOM_SITE_FILE_SOURCES=("$work/staged-nginx.conf")
-  jq -n --arg root "$work/website with spaces" --arg conf "$work/site/nginx.conf" \
+  # Real Compose reports native Windows paths; the staged companion arrays
+  # intentionally retain their Git Bash spelling to exercise normalization.
+  model_root="$work/website with spaces" model_conf="$work/site/nginx.conf" expected_staged="$work/staged-nginx.conf"
+  if is_windows; then
+    model_root=$(cygpath -am -- "$model_root")
+    model_conf=$(cygpath -am -- "$model_conf")
+    expected_staged=$(cygpath -am -- "$expected_staged")
+  fi
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' jq -n --arg root "$model_root" --arg conf "$model_conf" \
     '{services:{nginxalpha:{image:"nginx:stable-alpine",environment:{CUSTOM_VALUE:"kept literal"},volumes:[{type:"bind",source:$root,target:"/var/www/html"},{type:"bind",source:$conf,target:"/etc/nginx/conf.d/default.conf"}]}}}' > "$work/model.json"
   # shellcheck disable=SC2317 # Semantic model supplied to the isolated validator.
   migrationRunCompose() { cat "$work/model.json"; }
   run joomlaValidateStagedWebConfiguration "$compose" "$work/.env" "$work/site" nginxalpha nginx
   assert_success
   assert_file_contains "$STUB_DIR/commands.log" 'docker run --rm --network none --read-only'
-  assert_file_contains "$STUB_DIR/commands.log" "source=$work/staged-nginx.conf,target=/etc/nginx/conf.d/default.conf,readonly"
-  assert_file_contains "$STUB_DIR/commands.log" "source=$work/website with spaces,target=/var/www/html,readonly"
+  assert_file_contains "$STUB_DIR/commands.log" "source=$expected_staged,target=/etc/nginx/conf.d/default.conf,readonly"
+  assert_file_contains "$STUB_DIR/commands.log" "source=$model_root,target=/var/www/html,readonly"
   assert_file_contains "$STUB_DIR/commands.log" '--env CUSTOM_VALUE=kept literal'
   refute_file_contains "$STUB_DIR/commands.log" ' compose up '
   fail_command docker-run 1
@@ -333,4 +341,20 @@ APACHE
   refute_file_exists "${VDM_REPO_PATH}/joomla/available/alpha.vdm.dev/php-fpm-user.conf"
   run joomlaValidateNewFpmOwnership joomla:verified-fpm 33 33
   assert_success
+}
+
+@test "Windows web companion paths normalize native and Git Bash aliases only" {
+  OS_NUMBER=3
+  # shellcheck disable=SC2317 # Simulate the native-path converter on every OS.
+  cygpath() {
+    [ "$1" = -am ] && [ "$2" = -- ] || return 1
+    case "$3" in
+      /c/*) printf 'C:/%s\n' "${3#/c/}" ;;
+      *) printf '%s\n' "$3" ;;
+    esac
+  }
+  assert_equal "$(joomlaWebHostPath '/c/site with spaces/nginx.conf')" "$(joomlaWebHostPath 'C:/site with spaces/nginx.conf')"
+  assert_equal "$(joomlaWebHostPath '/c/another/nginx.conf')" 'C:/another/nginx.conf'
+  OS_NUMBER=1
+  assert_equal "$(joomlaWebHostPath '/c/site with spaces/nginx.conf')" '/c/site with spaces/nginx.conf'
 }

@@ -2034,13 +2034,23 @@ APACHE_HEALTH
   cp "$current" "$destination"
 }
 
+# Compose reports native Windows host paths while Git Bash settings may use
+# /c/... paths. Normalize host paths only; container paths stay literal Linux.
+function joomlaWebHostPath() {
+  if [ "${OS_NUMBER:-0}" = 3 ] && command -v cygpath >/dev/null 2>&1; then
+    cygpath -am -- "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
 # Validate stopped-site configuration without activating its Compose project.
 # Use the actual candidate image, environment and mounts, replacing companions
 # with their staged files. Every existing mount is read-only; temporary runtime
 # directories are private tmpfs. This is syntax validation, not a route probe.
 function joomlaValidateStagedWebConfiguration() {
   local compose="$1" env_file="$2" directory="$3" service="$4" flavor="$5"
-  local model selected image mount type source target index value
+  local model selected image mount type source target index value companion_target
   command -v jq >/dev/null 2>&1 || return 1
   model=$(migrationRunCompose "$env_file" "$compose" --project-directory "$directory" config --format json) || return 1
   selected=$(printf '%s' "$model" | jq -ec --arg service "$service" '.services[$service]') || return 1
@@ -2061,8 +2071,10 @@ function joomlaValidateStagedWebConfiguration() {
     target=$(printf '%s' "$mount" | jq -er '.target') || return 1
     case "$type" in
       bind)
+        source=$(joomlaWebHostPath "$source") || return 1
         for ((index=0; index<${#OCTOJOOM_SITE_FILE_TARGETS[@]}; index++)); do
-          [ "$source" != "${OCTOJOOM_SITE_FILE_TARGETS[$index]}" ] || source="${OCTOJOOM_SITE_FILE_SOURCES[$index]}"
+          companion_target=$(joomlaWebHostPath "${OCTOJOOM_SITE_FILE_TARGETS[$index]}") || return 1
+          [ "$source" != "$companion_target" ] || source=$(joomlaWebHostPath "${OCTOJOOM_SITE_FILE_SOURCES[$index]}") || return 1
         done
         [ -e "$source" ] || { printf 'A required webserver mount does not exist: %s\n' "$source" >&2; return 1; }
         ;;
@@ -2086,7 +2098,9 @@ function joomlaValidateStagedWebConfiguration() {
     # shellcheck disable=SC2016 # Expanded only inside the isolated container.
     args+=(--entrypoint sh "$image" -c 'mkdir -p "${APACHE_RUN_DIR:-/var/run/apache2}" && exec apache2ctl -t')
   fi
-  docker "${args[@]}" || {
+  # Host bind sources are already native on Windows. Do not let Git Bash
+  # rewrite the container destinations or the native command arguments.
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker "${args[@]}" || {
     printf 'Candidate %s configuration failed native syntax validation; the stopped site is unchanged.\n' "$flavor" >&2
     return 1
   }
