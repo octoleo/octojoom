@@ -3448,6 +3448,10 @@ function runPermissionProgress() {
   local message="${1:-}"
   local permission_pid permission_status=0
   shift
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    "$@"
+    return $?
+  fi
   progressSwitchOn || return 1
   {
     "$@" || permission_status=$?
@@ -3465,34 +3469,57 @@ function runPermissionProgress() {
 
 function fixJoomlaFilePermissions() {
   local project="${1}" file
-  sudo find "${project}" -type f -exec chmod 644 {} + || return $?
+  runPrivileged find "${project}" -type f -exec chmod 644 {} + || return $?
   for file in configuration.php .htaccess php.ini; do
     [ -f "${project}/${file}" ] || continue
     if [ "${file}" = 'configuration.php' ]; then
-      sudo chmod 444 "${project}/${file}" || return $?
+      runPrivileged chmod 444 "${project}/${file}" || return $?
     else
-      sudo chmod 400 "${project}/${file}" || return $?
+      runPrivileged chmod 400 "${project}/${file}" || return $?
     fi
   done
 }
 
 function fixJoomlaDirectoryPermissions() {
   local project="${1}" folder rules
-  sudo find "${project}" -type d -exec chmod 755 {} + || return $?
+  runPrivileged find "${project}" -type d -exec chmod 755 {} + || return $?
   rules=$(lockFolder) || return $?
   for folder in .idea .hidden .git; do
     [ -d "${project}/${folder}" ] || continue
-    sudo chmod -R 700 "${project}/${folder}" || return $?
-    sudo tee "${project}/${folder}/.htaccess" <<<"${rules}" >/dev/null || return $?
-    sudo chmod 400 "${project}/${folder}/.htaccess" || return $?
+    runPrivileged chmod -R 700 "${project}/${folder}" || return $?
+    runPrivileged tee "${project}/${folder}/.htaccess" <<<"${rules}" >/dev/null || return $?
+    runPrivileged chmod 400 "${project}/${folder}/.htaccess" || return $?
   done
   if [ -d "${project}/tmp" ]; then
-    sudo chmod -R 700 "${project}/tmp" || return $?
+    runPrivileged chmod -R 700 "${project}/tmp" || return $?
   fi
 }
 
 # To fix the permissions of Joomla containers
+function joomla__TRuST__fix() {
+  fixContainersPermissions
+}
+
 function fixContainersPermissions() {
+  local headless="${OCTOJOOM_NON_INTERACTIVE:-false}"
+  if [ "$headless" = true ]; then
+    if ! isSafeProjectName "${VDM_PROJECT:-}" ||
+      [[ ! "${VDM_PUID:-}" =~ ^[0-9]+$ || ! "${VDM_PGID:-}" =~ ^[0-9]+$ ]]; then
+      printf 'Permission repair requires --project and numeric --uid and --gid.\n' >&2
+      return 17
+    fi
+    if [ -L "${VDM_PROJECT_PATH}/${VDM_PROJECT}" ] ||
+      [ ! -d "${VDM_PROJECT_PATH}/${VDM_PROJECT}/joomla" ] ||
+      [ -L "${VDM_PROJECT_PATH}/${VDM_PROJECT}/joomla" ] ||
+      [ -L "${VDM_PROJECT_PATH}/${VDM_PROJECT}/db" ]; then
+      printf 'Permission repair requires a direct Joomla project directory.\n' >&2
+      return 17
+    fi
+    if [ "$(id -u)" != "$VDM_PUID" ] && ! command -v setfacl >/dev/null 2>&1; then
+      printf 'Install setfacl before repairing permissions for a different owner.\n' >&2
+      return 1
+    fi
+  fi
   if [ ! -d "${VDM_PROJECT_PATH}" ]; then
     showError "The ${VDM_PROJECT_PATH} does not exist."
     return 1
@@ -3502,15 +3529,21 @@ function fixContainersPermissions() {
   fi
   local vdm_fix_me persistent volume project user_id
   local -a vdm_fix_me_array=()
-  vdm_fix_me=$(getSelectedDirectories "Select persistent volume to fix." \
-    "${VDM_PROJECT_PATH}" "Fix Joomla Permissions") || return $?
-  [ -n "${vdm_fix_me}" ] || return 0
-  if ! whiptail --yesno "${USER^}, to fix these permissions we need sudo privileges." \
-    --title "Give sudo Privileges" --backtitle "${BACK_TITLE}" 8 112; then
-    return 0
+  if [ "$headless" = true ]; then
+    vdm_fix_me_array=("$VDM_PROJECT")
+  else
+    vdm_fix_me=$(getSelectedDirectories "Select persistent volume to fix." \
+      "${VDM_PROJECT_PATH}" "Fix Joomla Permissions") || return $?
+    [ -n "${vdm_fix_me}" ] || return 0
+    if useSudo; then
+      if ! whiptail --yesno "${USER^}, to fix these permissions we need sudo privileges." \
+        --title "Give sudo Privileges" --backtitle "${BACK_TITLE}" 8 112; then
+        return 0
+      fi
+      sudo -v || return $?
+    fi
+    IFS=' ' read -r -a vdm_fix_me_array <<<"${vdm_fix_me}"
   fi
-  sudo -v || return $?
-  IFS=' ' read -r -a vdm_fix_me_array <<<"${vdm_fix_me}"
   for volume in "${vdm_fix_me_array[@]}"; do
     persistent="${volume//\"/}"
     project="${VDM_PROJECT_PATH}/${persistent}"
@@ -3518,10 +3551,12 @@ function fixContainersPermissions() {
       showError "${project} is not a Joomla persistent volume and was skipped."
       return 1
     fi
-    showNotice "Fixing ${persistent}/joomla permissions now."
-    setContainerUser "$(id -u)" || return $?
+    if [ "$headless" != true ]; then
+      showNotice "Fixing ${persistent}/joomla permissions now."
+      setContainerUser "$(id -u)" || return $?
+    fi
     runPermissionProgress "Setting the ownership of ${persistent} Joomla directory/files." \
-      sudo chown -R "${VDM_PUID}:${VDM_PGID}" "${project}/joomla" || return $?
+      runPrivileged chown -R "${VDM_PUID}:${VDM_PGID}" "${project}/joomla" || return $?
     runPermissionProgress "Setting the file permissions for ${persistent} Joomla." \
       fixJoomlaFilePermissions "${project}/joomla" || return $?
     runPermissionProgress "Setting the directory permissions for ${persistent} Joomla." \
@@ -3533,19 +3568,19 @@ function fixContainersPermissions() {
         return 1
       fi
       runPermissionProgress "Setting permissions so user:${USER} can access and edit ${persistent} Joomla." \
-        sudo setfacl -R -m "u:${USER}:rwx" "${project}/joomla" || return $?
+        runPrivileged setfacl -R -m "u:${USER}:rwx" "${project}/joomla" || return $?
     elif command -v setfacl >/dev/null 2>&1; then
-      sudo setfacl -R -b "${project}/joomla" || return $?
+      runPrivileged setfacl -R -b "${project}/joomla" || return $?
     fi
     if [ -d "${project}/db" ]; then
       runPermissionProgress "Setting the ownership of ${persistent} database directory/files." \
-        sudo chown -R 999:999 "${project}/db" || return $?
+        runPrivileged chown -R 999:999 "${project}/db" || return $?
       runPermissionProgress "Setting the file permissions for ${persistent} database." \
-        sudo find "${project}/db" -type f -exec chmod 660 {} + || return $?
+        runPrivileged find "${project}/db" -type f -exec chmod 660 {} + || return $?
       runPermissionProgress "Setting the directory permissions for ${persistent} database." \
-        sudo find "${project}/db" -type d -exec chmod 700 {} + || return $?
+        runPrivileged find "${project}/db" -type d -exec chmod 700 {} + || return $?
     fi
-    showNotice "Permissions update completed!"
+    [ "$headless" = true ] || showNotice "Permissions update completed!"
   done
 }
 
@@ -5000,6 +5035,7 @@ function readJoomlaSiteFacts() {
   # shellcheck disable=SC2034
   VDM_SITE_KEY='' VDM_SITE_ENV_KEY='' VDM_SITE_SERVICE='' VDM_SITE_IMAGE=''
   VDM_SITE_SERVICES='' VDM_SITE_MOUNT_TYPE='' VDM_SITE_MOUNT_SOURCE='' VDM_SITE_MOUNT_TARGET=''
+  VDM_SITE_VOLUME_NAME=''
   VDM_SITE_DOCROOT='' VDM_SITE_HOST_PATH='' VDM_SITE_WEBSERVER=unknown
   VDM_SITE_ENABLED=disabled VDM_SITE_RUNNING=unavailable VDM_SITE_HEALTH=unavailable
   VDM_SITE_URL='' VDM_SITE_ADMIN_URL='' VDM_SITE_VIEWER_URL='' VDM_SITE_MAIL_URL=''
@@ -5052,6 +5088,9 @@ function readJoomlaSiteFacts() {
         [.services[$s].volumes[]? | select(.target=="/var/www/html")][0] // empty |
         [.type,.source,.target] | @tsv')
       IFS=$'\t' read -r VDM_SITE_MOUNT_TYPE VDM_SITE_MOUNT_SOURCE VDM_SITE_MOUNT_TARGET <<< "$mount"
+      if [ "$VDM_SITE_MOUNT_TYPE" = volume ]; then
+        VDM_SITE_VOLUME_NAME=$(printf '%s' "$config" | jq -r --arg volume "$VDM_SITE_MOUNT_SOURCE" '.volumes[$volume].name // empty')
+      fi
     fi
   else
     VDM_SITE_SERVICES=$(joomlaSourceServices "$VDM_SITE_COMPOSE")
@@ -5179,12 +5218,12 @@ function joomlaSiteFactsJSON() {
     --arg image "$VDM_SITE_IMAGE" --arg runtime_image "$VDM_SITE_RUNTIME_IMAGE" --arg image_id "$VDM_SITE_IMAGE_DIGEST" \
     --arg joomla "$VDM_SITE_JOOMLA_VERSION" --arg php "$VDM_SITE_PHP_VERSION" --arg webserver "$VDM_SITE_WEBSERVER" \
     --arg root "$VDM_SITE_DOCROOT" --arg host_path "$VDM_SITE_HOST_PATH" --arg mount_type "$VDM_SITE_MOUNT_TYPE" \
-    --arg mount_source "$VDM_SITE_MOUNT_SOURCE" --arg compose "$VDM_SITE_COMPOSE" --arg env "$VDM_SITE_ENV" \
+    --arg mount_source "$VDM_SITE_MOUNT_SOURCE" --arg volume_name "$VDM_SITE_VOLUME_NAME" --arg compose "$VDM_SITE_COMPOSE" --arg env "$VDM_SITE_ENV" \
     --arg service "$VDM_SITE_SERVICE" --arg services "$VDM_SITE_SERVICES" --arg states "$VDM_SITE_SERVICE_STATES" \
     --arg viewer "$VDM_SITE_VIEWER_URL" --arg mail "$VDM_SITE_MAIL_URL" --arg alignment "$VDM_SITE_ALIGNMENT" \
     '{site:$site,enabled:$enabled,running:$running,health:$health,routable:"unchecked",url:$url,administrator:$administrator,
       image:$image,runtime_image:$runtime_image,image_id:$image_id,joomla_version:$joomla,php_version:$php,webserver:$webserver,
-      document_root:$root,host_path:$host_path,mount:{type:$mount_type,source:$mount_source},compose:$compose,environment:$env,
+      document_root:$root,host_path:$host_path,mount:{type:$mount_type,source:$mount_source,volume_name:$volume_name},compose:$compose,environment:$env,
       web_service:$service,services:($services|split("\n")|map(select(length>0))),service_states:($states|split("\n")|map(select(length>0))),
       database_viewer_url:$viewer,mail_url:$mail,alignment:$alignment}'
 }
@@ -5332,12 +5371,9 @@ function joomla__TRuST__permissions() {
     fi
     if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ]; then
       getInputYesNo "Repair file and directory permissions in:\n${VDM_SITE_HOST_PATH}?" 'Repair website permissions' 12 112 || exit 0
-    else
-      # Existing helpers use sudo; prohibit a password prompt for automation.
-      sudo() { command sudo -n "$@"; }
     fi
     if [ -n "${VDM_PUID:-}" ]; then
-      sudo chown -R "${VDM_PUID}:${VDM_PGID}" "$VDM_SITE_HOST_PATH" || exit $?
+      runPrivileged chown -R "${VDM_PUID}:${VDM_PGID}" "$VDM_SITE_HOST_PATH" || exit $?
     fi
     fixJoomlaFilePermissions "$VDM_SITE_HOST_PATH" || exit $?
     fixJoomlaDirectoryPermissions "$VDM_SITE_HOST_PATH"

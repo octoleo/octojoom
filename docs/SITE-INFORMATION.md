@@ -60,6 +60,12 @@ to the selected service at its document root, without shell reconstruction.
 selected bind-mounted root; optional `--uid` and `--gid` together request an
 ownership change. Headless permission repair uses noninteractive sudo.
 
+The original whole-project repair is also available as `--task fix --project
+PROJECT --uid UID --gid GID --non-interactive`. It preserves the original Joomla
+and MariaDB directory repair behavior, including MariaDB's original UID/GID 999.
+It requires a direct existing project and both numeric IDs before making changes.
+This command does not implement a new database-engine ownership detector.
+
 The `path` command returns a real bind-mounted host document root. A named
 volume has no fabricated host path: use the selected site's container shell.
 Scoped document-root settings are resolved under the actual mounted root.
@@ -75,6 +81,8 @@ Scoped document-root settings are resolved under the actual mounted root.
 - Compose JSON with optional `jq` supplies structured inspection of custom YAML.
   Without it, bounded readers recognize original Octojoom block formatting;
   unsupported facts remain unknown while the site and lifecycle stay available.
+- Named-volume facts keep the logical Compose source separate from the actual
+  daemon volume name. Runtime probes must use the latter and check its existence.
 - PHP/webserver/alignment actions share the same selected identity and facts.
   Original clone/migration restrictions still apply to their specific operations.
 

@@ -232,8 +232,8 @@ HOOK
   VDM_CONTAINER=first.vdm.dev OCTOJOOM_NON_INTERACTIVE=true
   run joomla__TRuST__permissions
   assert_success
-  assert_command '^sudo -n find .*/alpha/joomla/site -type f'
-  assert_command '^sudo -n find .*/alpha/joomla/site -type d'
+  assert_command '^sudo( -n)? find .*/alpha/joomla/site -type f'
+  assert_command '^sudo( -n)? find .*/alpha/joomla/site -type d'
   refute_command '^sudo.*chown'
   [ ! -s "${STUB_DIR}/dialogs.log" ]
 }
@@ -253,4 +253,41 @@ HOOK
   assert_status 28
   assert_command '^docker compose .*first.* exec -T --workdir /var/www/html joomlaalpha php -r'
   [ ! -e unsafe ]
+}
+
+@test "site facts distinguish logical named volume source from actual daemon volume name" {
+  command -v jq >/dev/null 2>&1 || skip 'optional jq is unavailable'
+  make_joomla_container alpha ALPHA first
+  hook_command docker <<'HOOK'
+case "$*" in
+  *'config --format json')
+    printf '{"services":{"web":{"image":"joomla:latest","volumes":[{"type":"volume","source":"siteweb","target":"/var/www/html"}]}},"volumes":{"siteweb":{"name":"project_siteweb"}}}'
+    exit 0 ;;
+esac
+HOOK
+  readJoomlaSiteFacts first.vdm.dev
+  assert_equal "$VDM_SITE_MOUNT_SOURCE" siteweb
+  assert_equal "$VDM_SITE_VOLUME_NAME" project_siteweb
+}
+
+@test "original project permission repair has headless parity including database storage" {
+  make_joomla_container alpha ALPHA first
+  make_joomla_container beta BETA second
+  VDM_PROJECT=alpha VDM_PUID=1000 VDM_PGID=1000 OCTOJOOM_NON_INTERACTIVE=true
+  run joomla__TRuST__fix
+  assert_success
+  assert_command '^sudo( -n)? chown -R 1000:1000 .*/alpha/joomla$'
+  assert_command '^sudo( -n)? chown -R 999:999 .*/alpha/db$'
+  refute_command '^sudo.*beta'
+  [ ! -s "${STUB_DIR}/dialogs.log" ]
+}
+
+@test "headless project permission repair rejects missing identity before changes" {
+  make_joomla_container alpha ALPHA first
+  VDM_PROJECT=alpha VDM_PUID=1000 OCTOJOOM_NON_INTERACTIVE=true
+  unset VDM_PGID
+  run joomla__TRuST__fix
+  assert_status 17
+  refute_command '^sudo'
+  [ ! -s "${STUB_DIR}/dialogs.log" ]
 }
