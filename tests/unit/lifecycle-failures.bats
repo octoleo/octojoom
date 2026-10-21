@@ -231,6 +231,8 @@ EOF
 }
 
 @test "persistent reset: removal failure stops before the next filesystem mount" {
+  # Inject the failure through Unix privilege delegation, including on Git Bash.
+  OS_NUMBER=1
   mkdir -p "${VDM_PROJECT_PATH}/abc/joomla" "${VDM_PROJECT_PATH}/abc/db"
   hook_command sudo <<'EOF'
 if [ "$1" = rm ]; then exit 16; fi
@@ -244,6 +246,8 @@ EOF
 }
 
 @test "persistent clone: a failed copy removes only its newly created destination" {
+  # Inject the failure through Unix privilege delegation, including on Git Bash.
+  OS_NUMBER=1
   mkdir -p "${VDM_PROJECT_PATH}/abc/joomla"
   hook_command sudo <<'EOF'
 if [ "$1" = cp ]; then exit 17; fi
