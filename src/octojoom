@@ -6170,7 +6170,7 @@ function readJoomlaSiteFacts() {
   VDM_SITE_ENABLED=disabled VDM_SITE_RUNNING=unavailable VDM_SITE_HEALTH=unavailable
   VDM_SITE_URL='' VDM_SITE_ADMIN_URL='' VDM_SITE_VIEWER_URL='' VDM_SITE_MAIL_URL=''
   VDM_SITE_JOOMLA_VERSION=unknown VDM_SITE_PHP_VERSION=unavailable VDM_SITE_RUNTIME_IMAGE=''
-  VDM_SITE_IMAGE_DIGEST='' VDM_SITE_SERVICE_STATES='' VDM_SITE_ROUTABLE=unchecked
+  VDM_SITE_IMAGE_DIGEST='' VDM_SITE_SERVICE_STATES='' VDM_SITE_SERVICE_IMAGES='' VDM_SITE_ROUTABLE=unchecked
   VDM_SITE_ALIGNMENT=unavailable
   if isFunc siteAlignmentPlan; then
     VDM_SITE_ALIGNMENT=$(siteAlignmentPlan "$site") || VDM_SITE_ALIGNMENT=unavailable
@@ -6280,6 +6280,7 @@ function readJoomlaSiteFacts() {
       block=$(joomlaSourceService "$VDM_SITE_COMPOSE" "$service")
       image=$(printf '%s\n' "$block" | joomlaSourceScalar image)
     fi
+    VDM_SITE_SERVICE_IMAGES+="${service}: ${image:-unknown}"$'\n'
     candidate=$(joomlaRouteURL "$block" "$proxy")
     [ -n "$candidate" ] || candidate=$(joomlaPublishedURL "$site" "$service" "$config")
     case "$image" in
@@ -6359,7 +6360,8 @@ function showJoomlaSiteFacts() {
   printf 'Document root: %s\nStorage: %s %s\nHost directory: %s\nCompose: %s\nEnvironment: %s\n' "${VDM_SITE_DOCROOT:-unknown}" "${VDM_SITE_MOUNT_TYPE:-unknown}" "$VDM_SITE_MOUNT_SOURCE" "${VDM_SITE_HOST_PATH:-not a known bind mount}" "$VDM_SITE_COMPOSE" "${VDM_SITE_ENV:-none}"
   [ -z "$VDM_SITE_VIEWER_URL" ] || printf 'Database viewer: %s\n' "$VDM_SITE_VIEWER_URL"
   [ -z "$VDM_SITE_MAIL_URL" ] || printf 'Mail viewer: %s\n' "$VDM_SITE_MAIL_URL"
-  [ -z "$VDM_SITE_SERVICE_STATES" ] || printf '%s' "$VDM_SITE_SERVICE_STATES"
+  [ -z "$VDM_SITE_SERVICE_IMAGES" ] || printf 'Configured services:\n%s' "$VDM_SITE_SERVICE_IMAGES"
+  [ -z "$VDM_SITE_SERVICE_STATES" ] || printf 'Observed service state:\n%s' "$VDM_SITE_SERVICE_STATES"
   return 0
 }
 
@@ -6371,13 +6373,13 @@ function joomlaSiteFactsJSON() {
     --arg joomla "$VDM_SITE_JOOMLA_VERSION" --arg php "$VDM_SITE_PHP_VERSION" --arg webserver "$VDM_SITE_WEBSERVER" \
     --arg root "$VDM_SITE_DOCROOT" --arg host_path "$VDM_SITE_HOST_PATH" --arg mount_type "$VDM_SITE_MOUNT_TYPE" \
     --arg mount_source "$VDM_SITE_MOUNT_SOURCE" --arg volume_name "$VDM_SITE_VOLUME_NAME" --arg compose "$VDM_SITE_COMPOSE" --arg env "$VDM_SITE_ENV" \
-    --arg service "$VDM_SITE_SERVICE" --arg services "$VDM_SITE_SERVICES" --arg states "$VDM_SITE_SERVICE_STATES" \
+    --arg service "$VDM_SITE_SERVICE" --arg services "$VDM_SITE_SERVICES" --arg states "$VDM_SITE_SERVICE_STATES" --arg service_images "$VDM_SITE_SERVICE_IMAGES" \
     --arg viewer "$VDM_SITE_VIEWER_URL" --arg mail "$VDM_SITE_MAIL_URL" --arg alignment "$VDM_SITE_ALIGNMENT" \
     '{site:$site,enabled:$enabled,running:$running,health:$health,routable:"unchecked",url:$url,administrator:$administrator,
       image:$image,runtime_image:$runtime_image,image_id:$image_id,joomla_version:$joomla,php_version:$php,webserver:$webserver,
       document_root:$root,host_path:$host_path,mount:{type:$mount_type,source:$mount_source,volume_name:$volume_name},compose:$compose,environment:$env,
       web_service:$service,services:($services|split("\n")|map(select(length>0))),service_states:($states|split("\n")|map(select(length>0))),
-      database_viewer_url:$viewer,mail_url:$mail,alignment:$alignment}'
+      service_images:($service_images|split("\n")|map(select(length>0))),database_viewer_url:$viewer,mail_url:$mail,alignment:$alignment}'
 }
 
 function joomla__TRuST__info() {

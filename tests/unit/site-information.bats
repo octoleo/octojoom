@@ -344,3 +344,14 @@ HOOK
   assert_command '^docker compose .* exec -T mariadbalpha mariadb --version$'
   refute_command '^docker compose .*exec -T --workdir .*mariadbalpha'
 }
+
+@test "information retains configured database and viewer images when Docker is unavailable" {
+  make_joomla_container alpha ALPHA first
+  VDM_CONTAINER=first.vdm.dev
+  fail_command docker-compose-ps 23
+  run joomla__TRuST__info
+  assert_success
+  assert_output_contains 'Services: unavailable'
+  assert_output_contains 'mariadbalpha: mariadb:latest'
+  assert_output_contains 'phpmyadminalpha: phpmyadmin/phpmyadmin'
+}
