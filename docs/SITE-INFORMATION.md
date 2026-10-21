@@ -5,8 +5,11 @@ action. The details refresh after each action. Back returns to the website list,
 then the original Joomla menu. Existing Compose directories appear immediately;
 no registration, conversion or additional project record is needed.
 
-The list includes enabled and disabled websites. Enabled means the enabled
-symlink points at that site's available directory. Running service state and
+The list includes enabled and disabled websites. Enabled normally means the
+enabled symlink points at that site's available directory. Git Bash can copy a
+directory instead of creating a native symlink; that entry is recognized only
+while its Compose file and any private `.env` match the available site. Stale
+copies and incorrect links are reported as invalid. Running service state and
 health are inspected separately. An unavailable Docker daemon is reported as
 unavailable, not stopped. Viewing information never starts or redeploys a site.
 
@@ -44,7 +47,7 @@ octojoom --type joomla --task logs --container demo.example.test --service jooml
 its current containers; `redeploy` recreates them from current configuration.
 These commands preserve enabled/disabled state and do not remove volumes or
 implicitly pull newer images. Existing `up` and `down` tasks still operate on all
-enabled sites. Enable/disable retain their original symlink semantics; a failed
+enabled sites. Enable/disable retain their original platform behavior; a failed
 enable may leave the site enabled even though services could not start.
 
 Logs default to the latest 100 lines of all services. `--service` selects a
