@@ -6375,9 +6375,41 @@ function joomlaSourceScalar() {
   printf '%s\n' "$value"
 }
 
+# Native Windows jq treats these arguments as filesystem paths unless MSYS
+# conversion is disabled. They are JSON filters and data, including container
+# paths. Normalize its CRLF output before comparing scalar values in Bash.
+function joomlaSiteJSON() {
+  (
+    set -o pipefail
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' jq "$@" | sed $'s/\r$//'
+  )
+}
+
+# Git Bash may implement ln -s by copying a directory. Such a copy represents
+# this site only while its effective configuration still matches the source.
+function getJoomlaSiteEnabledState() {
+  local available="${VDM_REPO_PATH}/joomla/available/$1" enabled="${VDM_REPO_PATH}/joomla/enabled/$1"
+  if [ -L "$enabled" ]; then
+    if [ "$enabled" -ef "$available" ]; then printf 'enabled\n'; else printf 'invalid-link\n'; fi
+  elif [ -e "$enabled" ]; then
+    if [ "${OS_NUMBER:-0}" = 3 ] && [ -d "$enabled" ] &&
+      cmp -s "$available/docker-compose.yml" "$enabled/docker-compose.yml" &&
+      { { [ ! -e "$available/.env" ] && [ ! -e "$enabled/.env" ]; } ||
+        { [ -f "$available/.env" ] && [ -f "$enabled/.env" ] && cmp -s "$available/.env" "$enabled/.env"; }; }; then
+      printf 'enabled\n'
+    else
+      printf 'invalid-link\n'
+    fi
+  else
+    printf 'disabled\n'
+  fi
+}
+
 # Accept only a literal single-host router; complicated expressions are shown as
 # unavailable rather than presenting an invented URL. The published proxy port
 # is resolved separately from its internal HTTP/HTTPS target.
+# JSON filters below use jq variables, not shell expansion.
+# shellcheck disable=SC2016
 function joomlaRouteURL() {
   local labels="$1" proxy_json="${2:-}" host scheme=http target=80 port='' entrypoints
   # shellcheck disable=SC2016
@@ -6390,13 +6422,13 @@ function joomlaRouteURL() {
   if [ -n "$proxy_json" ]; then
     # A custom entrypoint's container port can be read from Traefik's command.
     if [ -n "$entrypoints" ] && [[ "$entrypoints" != *,* ]]; then
-      port=$(printf '%s' "$proxy_json" | jq -r --arg entry "$entrypoints" '
+      port=$(printf '%s' "$proxy_json" | joomlaSiteJSON -r --arg entry "$entrypoints" '
         [.services[]?.command[]? | select(type=="string") |
         select(startswith("--entrypoints."+$entry+".address=:")) |
         split(":")[-1] | split("/")[0]][0] // empty' 2>/dev/null)
       [[ "$port" =~ ^[0-9]+$ ]] && target="$port"
     fi
-    port=$(printf '%s' "$proxy_json" | jq -r --argjson target "$target" '
+    port=$(printf '%s' "$proxy_json" | joomlaSiteJSON -r --argjson target "$target" '
       [.services[]?.ports[]? | select(.target==$target) | .published | tostring] | unique | if length==1 then .[0] else empty end' 2>/dev/null)
   else
     # Original short-syntax Traefik port mappings, including quoted values.
@@ -6414,11 +6446,13 @@ function joomlaRouteURL() {
 
 # Resolve direct HTTP ports as well as proxy routes. Dynamic published ports are
 # read from the running service; a failed lookup remains unavailable.
+# JSON filters below use jq variables, not shell expansion.
+# shellcheck disable=SC2016
 function joomlaPublishedURL() {
   local site="$1" service="$2" config="$3" target host port mapping
   [ -n "$config" ] || return 0
   for target in 80 443; do
-    mapping=$(printf '%s' "$config" | jq -r --arg s "$service" --argjson target "$target" '
+    mapping=$(printf '%s' "$config" | joomlaSiteJSON -r --arg s "$service" --argjson target "$target" '
       [.services[$s].ports[]? | select(.target==$target)][0] // empty |
       [(.host_ip // "127.0.0.1"),(.published // "" | tostring)] | join("|")')
     [ -n "$mapping" ] || continue
@@ -6437,6 +6471,8 @@ function joomlaPublishedURL() {
   done
 }
 
+# JSON filters below use jq variables, not shell expansion.
+# shellcheck disable=SC2016
 function readJoomlaSiteFacts() {
   local site="${1:-}" service block image config='' proxy='' candidate mount relative='.' value ids row
   local state health configured=0 expected=0 running=0 stopped_count=0 unavailable=0 unhealthy=0 healthy=0
@@ -6455,15 +6491,7 @@ function readJoomlaSiteFacts() {
   if isFunc siteAlignmentPlan; then
     VDM_SITE_ALIGNMENT=$(siteAlignmentPlan "$site") || VDM_SITE_ALIGNMENT=unavailable
   fi
-  if [ -L "${VDM_REPO_PATH}/joomla/enabled/${site}" ]; then
-    if [ "${VDM_REPO_PATH}/joomla/enabled/${site}" -ef "$VDM_SITE_DIR" ]; then
-      VDM_SITE_ENABLED=enabled
-    else
-      VDM_SITE_ENABLED='invalid-link'
-    fi
-  elif [ -e "${VDM_REPO_PATH}/joomla/enabled/${site}" ]; then
-    VDM_SITE_ENABLED='invalid-link'
-  fi
+  VDM_SITE_ENABLED=$(getJoomlaSiteEnabledState "$site")
   # The identity helper has narrow semantics; failure does not hide the site.
   if getJoomlaComposeIdentity "$VDM_SITE_COMPOSE"; then
     # shellcheck disable=SC2034
@@ -6472,7 +6500,7 @@ function readJoomlaSiteFacts() {
   VDM_SITE_ENV_KEY="${VDM_SITE_ENV_KEY:-$(sed -nE 's/.*[$][{]VDM_([A-Za-z0-9_]+)_DB[}].*/\1/p' "$VDM_SITE_COMPOSE" | head -n 1)}"
   if command -v jq >/dev/null 2>&1; then
     config=$(joomlaSiteCompose "$site" config --format json 2>/dev/null) || config=''
-    printf '%s' "$config" | jq -e '.services | type=="object"' >/dev/null 2>&1 || config=''
+    printf '%s' "$config" | joomlaSiteJSON -e '.services | type=="object"' >/dev/null 2>&1 || config=''
     if [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ]; then
       proxy=$(
         local proxy_file="${VDM_REPO_PATH}/traefik/docker-compose.yml" proxy_env
@@ -6482,24 +6510,24 @@ function readJoomlaSiteFacts() {
         [ -z "$proxy_env" ] || proxy_args+=(--env-file "$proxy_env")
         docker "${proxy_args[@]}" --file "$proxy_file" config --format json 2>/dev/null
       ) || proxy=''
-      printf '%s' "$proxy" | jq -e '.services | type=="object"' >/dev/null 2>&1 || proxy=''
+      printf '%s' "$proxy" | joomlaSiteJSON -e '.services | type=="object"' >/dev/null 2>&1 || proxy=''
     fi
   fi
   if [ -n "$config" ]; then
-    VDM_SITE_SERVICES=$(printf '%s' "$config" | jq -r '.services | keys[]')
+    VDM_SITE_SERVICES=$(printf '%s' "$config" | joomlaSiteJSON -r '.services | keys[]')
     # JOOMLA_DB_HOST also identifies images from arbitrary configured registries.
-    VDM_SITE_SERVICE=$(printf '%s' "$config" | jq -r '
+    VDM_SITE_SERVICE=$(printf '%s' "$config" | joomlaSiteJSON -r '
       [.services | to_entries[] | select((.value.environment.JOOMLA_DB_HOST? != null) or
       ((.value.image // "") | test("(^|/)(joomla|joomengine)(:|@|$)"))) | .key] |
       if length==1 then .[0] else empty end')
     if [ -n "$VDM_SITE_SERVICE" ]; then
-      VDM_SITE_IMAGE=$(printf '%s' "$config" | jq -r --arg s "$VDM_SITE_SERVICE" '.services[$s].image // empty')
-      mount=$(printf '%s' "$config" | jq -r --arg s "$VDM_SITE_SERVICE" '
+      VDM_SITE_IMAGE=$(printf '%s' "$config" | joomlaSiteJSON -r --arg s "$VDM_SITE_SERVICE" '.services[$s].image // empty')
+      mount=$(printf '%s' "$config" | joomlaSiteJSON -r --arg s "$VDM_SITE_SERVICE" '
         [.services[$s].volumes[]? | select(.target=="/var/www/html")][0] // empty |
         [.type,.source,.target] | @tsv')
       IFS=$'\t' read -r VDM_SITE_MOUNT_TYPE VDM_SITE_MOUNT_SOURCE VDM_SITE_MOUNT_TARGET <<< "$mount"
       if [ "$VDM_SITE_MOUNT_TYPE" = volume ]; then
-        VDM_SITE_VOLUME_NAME=$(printf '%s' "$config" | jq -r --arg volume "$VDM_SITE_MOUNT_SOURCE" '.volumes[$volume].name // empty')
+        VDM_SITE_VOLUME_NAME=$(printf '%s' "$config" | joomlaSiteJSON -r --arg volume "$VDM_SITE_MOUNT_SOURCE" '.volumes[$volume].name // empty')
       fi
     fi
   else
@@ -6554,8 +6582,8 @@ function readJoomlaSiteFacts() {
   while IFS= read -r service; do
     [ -n "$service" ] || continue
     if [ -n "$config" ]; then
-      block=$(printf '%s' "$config" | jq -r --arg s "$service" '.services[$s].labels // {} | to_entries[] | .key+"="+(.value|tostring)')
-      image=$(printf '%s' "$config" | jq -r --arg s "$service" '.services[$s].image // empty')
+      block=$(printf '%s' "$config" | joomlaSiteJSON -r --arg s "$service" '.services[$s].labels // {} | to_entries[] | .key+"="+(.value|tostring)')
+      image=$(printf '%s' "$config" | joomlaSiteJSON -r --arg s "$service" '.services[$s].image // empty')
     else
       block=$(joomlaSourceService "$VDM_SITE_COMPOSE" "$service")
       image=$(printf '%s\n' "$block" | joomlaSourceScalar image)
@@ -6570,7 +6598,7 @@ function readJoomlaSiteFacts() {
         # An unrelated Nginx service must not replace this website's route. The
         # HTTP companion shares its root and depends on the selected PHP service.
         if [ "$service" = "$VDM_SITE_SERVICE" ] ||
-          { [ -n "$config" ] && printf '%s' "$config" | jq -e --arg s "$service" --arg web "$VDM_SITE_SERVICE" \
+          { [ -n "$config" ] && printf '%s' "$config" | joomlaSiteJSON -e --arg s "$service" --arg web "$VDM_SITE_SERVICE" \
             --arg source "$VDM_SITE_MOUNT_SOURCE" --arg target "$VDM_SITE_MOUNT_TARGET" '
             (.services[$s].depends_on[$web] != null) and
             any(.services[$s].volumes[]?; .source==$source and .target==$target)' >/dev/null 2>&1; } ||
@@ -6584,7 +6612,7 @@ function readJoomlaSiteFacts() {
   done <<< "$VDM_SITE_SERVICES"
   [ -z "$VDM_SITE_URL" ] || VDM_SITE_ADMIN_URL="${VDM_SITE_URL}/administrator/"
   if [ -n "$config" ]; then
-    expected=$(printf '%s' "$config" | jq '[.services[] | select((.profiles // [] | length)==0)] | length')
+    expected=$(printf '%s' "$config" | joomlaSiteJSON '[.services[] | select((.profiles // [] | length)==0)] | length')
   else
     while IFS= read -r service; do [ -z "$service" ] || expected=$((expected + 1)); done <<< "$VDM_SITE_SERVICES"
   fi
@@ -6645,9 +6673,11 @@ function showJoomlaSiteFacts() {
   return 0
 }
 
+# JSON filters below use jq variables, not shell expansion.
+# shellcheck disable=SC2016
 function joomlaSiteFactsJSON() {
   command -v jq >/dev/null 2>&1 || { printf 'JSON output requires jq.\n' >&2; return 1; }
-  jq -n --arg site "$VDM_SITE_NAME" --arg enabled "$VDM_SITE_ENABLED" --arg running "$VDM_SITE_RUNNING" \
+  joomlaSiteJSON -n --arg site "$VDM_SITE_NAME" --arg enabled "$VDM_SITE_ENABLED" --arg running "$VDM_SITE_RUNNING" \
     --arg health "$VDM_SITE_HEALTH" --arg url "$VDM_SITE_URL" --arg administrator "$VDM_SITE_ADMIN_URL" \
     --arg image "$VDM_SITE_IMAGE" --arg runtime_image "$VDM_SITE_RUNTIME_IMAGE" --arg image_id "$VDM_SITE_IMAGE_DIGEST" \
     --arg joomla "$VDM_SITE_JOOMLA_VERSION" --arg php "$VDM_SITE_PHP_VERSION" --arg webserver "$VDM_SITE_WEBSERVER" \
@@ -6883,8 +6913,7 @@ function showJoomlaWebsiteInformation() {
   while true; do
     sites=()
     while IFS= read -r site; do
-      hint=disabled
-      [ ! "${VDM_REPO_PATH}/joomla/enabled/${site}" -ef "${VDM_REPO_PATH}/joomla/available/${site}" ] || hint=enabled
+      hint=$(getJoomlaSiteEnabledState "$site")
       sites+=("$site" "$hint")
     done < <(listJoomlaSites)
     if [ "${#sites[@]}" -eq 0 ]; then showNotice 'There are no websites configured yet.'; return 0; fi

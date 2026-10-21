@@ -143,7 +143,8 @@ HOOK
   assert_success
   assert_command '^docker compose .*available/first\.vdm\.dev/docker-compose\.yml stop$'
   refute_command '^docker compose .*second\.vdm\.dev'
-  [ -L "${VDM_REPO_PATH}/joomla/enabled/first.vdm.dev" ]
+  assert_equal "$(getJoomlaSiteEnabledState first.vdm.dev)" enabled
+  if ! is_windows; then [ -L "${VDM_REPO_PATH}/joomla/enabled/first.vdm.dev" ]; fi
   grep -qx joomlabeta "${STUB_DIR}/docker/running"
   run grep -qx joomlaalpha "${STUB_DIR}/docker/running"
   assert_failure
@@ -358,4 +359,36 @@ HOOK
   assert_output_contains 'Services: unavailable'
   assert_output_contains 'mariadbalpha: mariadb:latest'
   assert_output_contains 'phpmyadminalpha: phpmyadmin/phpmyadmin'
+}
+
+@test "Windows copied enable entries require current Compose and private environment contents" {
+  make_joomla_container alpha ALPHA first
+  local available="${VDM_REPO_PATH}/joomla/available/first.vdm.dev" enabled="${VDM_REPO_PATH}/joomla/enabled/first.vdm.dev"
+  cp "${VDM_REPO_PATH}/joomla/.env" "$available/.env"
+  mkdir -p "${VDM_REPO_PATH}/joomla/enabled"
+  cp -R "$available" "$enabled"
+  OS_NUMBER=3
+  assert_equal "$(getJoomlaSiteEnabledState first.vdm.dev)" enabled
+  printf '\n# changed\n' >>"$enabled/docker-compose.yml"
+  assert_equal "$(getJoomlaSiteEnabledState first.vdm.dev)" invalid-link
+  cp "$available/docker-compose.yml" "$enabled/docker-compose.yml"
+  printf '\nVDM_ALPHA_DOCROOT=other\n' >>"$enabled/.env"
+  assert_equal "$(getJoomlaSiteEnabledState first.vdm.dev)" invalid-link
+  rm "$enabled/.env"
+  assert_equal "$(getJoomlaSiteEnabledState first.vdm.dev)" invalid-link
+  cp "$available/.env" "$enabled/.env"
+  OS_NUMBER=1
+  assert_equal "$(getJoomlaSiteEnabledState first.vdm.dev)" invalid-link
+}
+
+@test "site JSON reader preserves native arguments and normalizes CRLF without hiding failure" {
+  jq() {
+    [ "${MSYS_NO_PATHCONV:-}" = 1 ] && [ "${MSYS2_ARG_CONV_EXCL:-}" = '*' ] || return 42
+    [ "$1" = --arg ] && [ "$2" = root ] && [ "$3" = /var/www/html ] || return 43
+    printf 'app\r\n/var/www/html\r\n'
+    return 7
+  }
+  run joomlaSiteJSON --arg root /var/www/html '$root'
+  assert_status 7
+  assert_equal "$output" $'app\n/var/www/html'
 }
