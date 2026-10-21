@@ -159,19 +159,33 @@ JSON
   assert_output_contains --remove-data
 }
 
-@test "completion: existing login precedence and symlinked bashrc remain intact" {
+@test "completion: existing login precedence remains intact" {
   printf '# user login settings\n' >"$VDM_HOME_PATH/.profile"
-  printf '# user shell settings\n' >"$VDM_HOME_PATH/shell-rc"
-  ln -s "$VDM_HOME_PATH/shell-rc" "$VDM_HOME_PATH/.bashrc"
+  printf '# user shell settings\n' >"$VDM_HOME_PATH/.bashrc"
   installShellIntegration
   refute_file_exists "$VDM_HOME_PATH/.bash_profile"
-  [ -L "$VDM_HOME_PATH/.bashrc" ]
   assert_file_contains "$VDM_HOME_PATH/.profile" 'BASH_VERSION'
   assert_file_contains "$VDM_HOME_PATH/.profile" '# user login settings'
   removeShellIntegration
+  assert_file_contains "$VDM_HOME_PATH/.bashrc" '# user shell settings'
+  assert_file_contains "$VDM_HOME_PATH/.profile" '# user login settings'
+  refute_file_contains "$VDM_HOME_PATH/.profile" '# octojoom shell integration'
+}
+
+@test "completion: installation and removal preserve an existing bashrc symlink" {
+  printf '# user shell settings\n' >"$VDM_HOME_PATH/shell-rc"
+  # Git Bash can implement ln -s by copying when native symlinks are unavailable.
+  # Detect fixture support before calling the application, not after its edits.
+  if ! ln -s "$VDM_HOME_PATH/shell-rc" "$VDM_HOME_PATH/.bashrc" || [ ! -L "$VDM_HOME_PATH/.bashrc" ]; then
+    skip 'The test filesystem does not support native symlinks'
+  fi
+  installShellIntegration
   [ -L "$VDM_HOME_PATH/.bashrc" ]
   assert_file_contains "$VDM_HOME_PATH/.bashrc" '# user shell settings'
-  refute_file_contains "$VDM_HOME_PATH/.profile" '# octojoom shell integration'
+  removeShellIntegration
+  [ -L "$VDM_HOME_PATH/.bashrc" ]
+  assert_file_contains "$VDM_HOME_PATH/.bashrc" '# user shell settings'
+  refute_file_contains "$VDM_HOME_PATH/.bashrc" '# octojoom shell integration'
 }
 
 @test "headless: explicit Cloudflare selection survives the shared question helper" {
