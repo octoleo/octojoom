@@ -2101,7 +2101,9 @@ function joomlaVerifyWebConfiguration() {
       $base=$argv[1];
       $fail=static function($path,$code,$reason) {fwrite(STDERR,"Web verification failed for ".$path." (HTTP ".$code."): ".$reason."\n"); exit(1);};
       foreach (["/", "/administrator/", "/api/index.php/v1/content/articles", "/configuration.php", "/octojoom-missing-script.php"] as $path) {
-        $context=stream_context_create(["http"=>["ignore_errors"=>true,"timeout"=>15,"follow_location"=>0]]);
+        // Joomla API content negotiation requires a supported Accept header.
+        $accept=strpos($path,"/api/")===0 ? "application/vnd.api+json" : "*/*";
+        $context=stream_context_create(["http"=>["ignore_errors"=>true,"timeout"=>15,"follow_location"=>0,"header"=>"Accept: ".$accept."\r\n"]]);
         $body=@file_get_contents($base.$path,false,$context); $code=0;
         foreach($http_response_header ?? [] as $line) if(preg_match("~^HTTP/[0-9.]+ ([0-9]+)~",$line,$m)) $code=(int)$m[1];
         if($body===false || !$code || $code>=500) $fail($path,$code,"request failed");
