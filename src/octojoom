@@ -11213,8 +11213,8 @@ function joomla__TRuST__migrate() {
       showNotice 'Migration cancelled: no remote host was selected.'
       return 0
     fi
-    local capability_action=capabilities expected_protocol=octojoom-migration-v1
-    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then capability_action=capabilities-headless; expected_protocol=octojoom-migration-v2; fi
+    local capability_action=capabilities expected_protocol='octojoom-migration-v1'
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then capability_action='capabilities-headless'; expected_protocol='octojoom-migration-v2'; fi
     capabilities=$(remoteMigrationWorker "$remote" false "$capability_action") || {
       showError 'The remote host is not ready for complete project migration. Update Octojoom on both hosts and verify SSH, Docker, tar and rsync access.'
       return 1
