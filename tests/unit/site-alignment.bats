@@ -207,3 +207,13 @@ YAML
   assert_equal "$(siteReadServiceScalar "$SANDBOX/changed.yml" web.site image)" changed:tag
   assert_equal "$(siteReadServiceScalar "$SANDBOX/changed.yml" webXsite image)" neighbor:tag
 }
+
+@test "scoped settings: clone keeps credential and PHP values when renaming the environment key" {
+  formatEnvAssignment 'VDM_ALPHA_PHP_MEMORY_LIMIT=512M' >> "$ALIGN_ENV"
+  : > "$SANDBOX/clone.env"
+  cloneContainerEnvVariables "$ALIGN_ENV" ALPHA BETA "$SANDBOX/clone.env" >/dev/null
+  migrationReadEnvValue "$SANDBOX/clone.env" VDM_BETA_DB_PASS cloned
+  assert_equal "$cloned" secret
+  migrationReadEnvValue "$SANDBOX/clone.env" VDM_BETA_PHP_MEMORY_LIMIT cloned
+  assert_equal "$cloned" 512M
+}
