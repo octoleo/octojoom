@@ -119,6 +119,7 @@ setup() {
   VDM_JOOMLA_SECURE_LABELS='' VDM_PHPMYADMIN_SECURE_LABELS='' VDM_EXTRA_CONTAINER_STUFF='' VDM_EXTRA_JOOMLA_ENV=''
   VDM_DB_VOLUMES_MOUNT=$(getYMLine3 '- "${VDM_PROJECT_PATH}/alpha/db:/var/lib/mysql"')
   VDM_PUID='' VDM_PGID='' VDM_VOLUMES=''
+  # shellcheck disable=SC2317 # Selected setup hook invokes this test double.
   joomlaRuntimeSelectImageForFlavor() { printf 'joomla:verified-fpm\n'; }
   joomlaSetupWebPrepare
   joomlaContainer > "$work/generated.yml"
@@ -175,4 +176,15 @@ PHP
   assert_file_contains "$work/changed.php" "public \$log_path = '/var/www/html/site/administrator/logs';"
   assert_file_contains "$work/changed.php" "public \$tmp_path = '/external/private/tmp';"
   assert_file_contains "$work/changed.php" "public \$password = 'unchanged-secret';"
+}
+
+@test "canceling a setup web question exits before choosing a tag or writing files" {
+  VDM_J_REPO=joomla VDM_JV=current
+  joomlaRuntimeProbeImage() { printf '{"flavor":"apache","php":"8.3.1"}\n'; }
+  getInputYesNo() { return 255; }
+  joomlaRuntimeSelectImageForFlavor() { echo 'unexpected flavor selection' >&2; return 1; }
+  run joomlaSetupWebChoices
+  assert_status 255
+  refute_output_contains 'unexpected flavor selection'
+  refute_file_exists "${VDM_REPO_PATH}/joomla/available/alpha.vdm.dev/nginx.conf"
 }

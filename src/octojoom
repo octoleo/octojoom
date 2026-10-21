@@ -2057,12 +2057,17 @@ function joomla__TRuST__webserver() {
       OCTOJOOM_SITE_FILE_TARGETS+=("$VDM_SITE_DIR/nginx.conf" "$VDM_SITE_DIR/apache-healthcheck.yml")
       OCTOJOOM_SITE_FILE_SOURCES+=("$work/nginx.conf" "$work/apache-healthcheck.yml")
       # Official FPM uses its pool user, not Apache's environment variables.
-      local puid='' pgid=''
+      local puid='' pgid='' model
       migrationReadEnvValue "$VDM_SITE_ENV" "VDM_${VDM_SITE_ENV_KEY}_PUID" puid || :
       migrationReadEnvValue "$VDM_SITE_ENV" "VDM_${VDM_SITE_ENV_KEY}_PGID" pgid || :
+      if [ -z "$puid$pgid" ]; then
+        model=$(joomlaSiteCompose "$site" config --format json) || exit 1
+        puid=$(printf '%s' "$model" | jq -r --arg service "$VDM_SITE_SERVICE" '.services[$service].environment.APACHE_RUN_USER // empty') || exit 1
+        pgid=$(printf '%s' "$model" | jq -r --arg service "$VDM_SITE_SERVICE" '.services[$service].environment.APACHE_RUN_GROUP // empty') || exit 1
+      fi
       if [ -n "$puid$pgid" ]; then
         puid="${puid#\#}" pgid="${pgid#\#}"
-        [[ "$puid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ ]] || exit 1
+        [[ "$puid" =~ ^([0-9]+|[A-Za-z_][A-Za-z0-9_-]*)$ && "$pgid" =~ ^([0-9]+|[A-Za-z_][A-Za-z0-9_-]*)$ ]] || exit 1
         docker run --rm --entrypoint sh "$image" -c 'test -d /usr/local/etc/php-fpm.d' || exit 1
         printf '[www]\nuser = %s\ngroup = %s\n' "$puid" "$pgid" > "$work/php-fpm-user.conf"
         joomlaWebCompanionMount "$work/docker-compose.yml" "$work/compose.next" "$VDM_SITE_SERVICE" php-fpm-user.conf /usr/local/etc/php-fpm.d/zz-octojoom-user.conf "$work" && mv "$work/compose.next" "$work/docker-compose.yml" || exit 1
@@ -2178,7 +2183,7 @@ function joomlaRestoreMovedRoot() {
 
 function joomla__TRuST__docroot() {
   (
-    local site="${VDM_CONTAINER:-}" requested="${VDM_DOCROOT-}" action="${VDM_ACTION:-show}" work root flavor current_relative files_moved=false old_host new_host
+    local site="${VDM_CONTAINER:-}" requested="${VDM_DOCROOT-}" action="${VDM_ACTION:-show}" work root flavor current_relative files_moved=false keep_work=false old_host new_host
     [ -n "$site" ] || { printf 'Select a website with --container.\n' >&2; exit 2; }
     readJoomlaSiteFacts "$site" || exit 1
     [ "$action" = show ] && { printf '%s\n' "$VDM_SITE_DOCROOT"; exit 0; }
@@ -2212,7 +2217,7 @@ function joomla__TRuST__docroot() {
       joomlaCheckDocumentRoot "$site" "$VDM_SITE_SERVICE" "$root" || { printf 'The selected directory is not an existing installed Joomla root inside this mount.\n' >&2; exit 2; }
     fi
     work=$(mktemp -d "$VDM_SITE_DIR/.docroot.XXXXXX") || exit 1
-    trap 'rm -rf "$work"' EXIT
+    trap 'if "$keep_work"; then printf "Document-root recovery files retained in %s.\n" "$work" >&2; else rm -rf "$work"; fi' EXIT
     cp "$VDM_SITE_COMPOSE" "$work/docker-compose.yml" || exit 1
     siteWriteScopedEnv "$VDM_SITE_COMPOSE" "$VDM_SITE_ENV" "$VDM_SITE_ENV_KEY" "$work/.env" || exit 1
     writeEnvVariable "$work/.env" "VDM_${VDM_SITE_ENV_KEY}_DOCROOT=$requested" true || exit 1
@@ -2242,11 +2247,16 @@ function joomla__TRuST__docroot() {
     if [ "${VDM_MOVE_FILES:-false}" = true ]; then
       cp -p "$old_host/configuration.php" "$work/configuration.original.php" || exit 1
       joomlaPatchMovedRootConfiguration "$old_host/configuration.php" "$work/configuration.php" "$VDM_SITE_DOCROOT" "$root" || exit 1
+      keep_work=true
       joomlaMoveDocumentRoot "$old_host" "$new_host" "$VDM_SITE_MOUNT_SOURCE" || exit 1
       files_moved=true
       if ! runPrivileged tee "$new_host/configuration.php" < "$work/configuration.php" >/dev/null; then
         runPrivileged tee "$new_host/configuration.php" < "$work/configuration.original.php" >/dev/null || :
-        joomlaRestoreMovedRoot "$old_host" "$new_host" || printf 'Moved files need recovery at %s.\n' "$new_host" >&2
+        if joomlaRestoreMovedRoot "$old_host" "$new_host"; then
+          keep_work=false
+        else
+          printf 'Moved files need recovery at %s.\n' "$new_host" >&2
+        fi
         exit 1
       fi
     fi
@@ -2259,29 +2269,40 @@ function joomla__TRuST__docroot() {
     if ! sitePublishConfiguration "$site" "$work/docker-compose.yml" "$work/.env" "${affected[@]}"; then
       if "$files_moved"; then
         runPrivileged tee "$new_host/configuration.php" < "$work/configuration.original.php" >/dev/null || :
-        if ! joomlaRestoreMovedRoot "$old_host" "$new_host"; then
+        if joomlaRestoreMovedRoot "$old_host" "$new_host"; then
+          keep_work=false
+        else
           printf 'Configuration was not applied. File recovery needs attention: %s -> %s\n' "$new_host" "$old_host" >&2
         fi
       fi
       exit 1
     fi
+    keep_work=false
     printf 'Document root set to %s.\n' "$root"
   )
 }
 
 # Setup hooks keep new choices within the existing questionnaire and generator.
 function joomlaSetupWebChoices() {
-  local choice image probe discovered
+  local choice image probe discovered answer_status
   VDM_WEBSERVER="${VDM_WEBSERVER:-apache}"
   VDM_DOCROOT="${VDM_DOCROOT:-.}"
   if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ]; then
     probe=$(joomlaRuntimeProbeImage "${VDM_J_REPO}:${VDM_JV}") || return 1
     discovered=$(printf '%s' "$probe" | jq -er '.flavor + " / PHP " + .php') || return 1
-    if ! getInputYesNo "Selected image: ${discovered}. Keep the selected webserver (${VDM_WEBSERVER})?" 'Joomla webserver' 8 80; then
+    if getInputYesNo "Selected image: ${discovered}. Keep the selected webserver (${VDM_WEBSERVER})?" 'Joomla webserver' 8 80; then
+      :
+    else
+      answer_status=$?
+      [ "$answer_status" -eq 1 ] || return "$answer_status"
       choice=$(whiptail --title 'Joomla webserver' --backtitle "$BACK_TITLE" --menu 'Select the webserver' 15 80 2 apache 'Apache' nginx 'Nginx with PHP-FPM' 3>&1 1>&2 2>&3) || return 2
       VDM_WEBSERVER="$choice"
     fi
-    if ! getInputYesNo "Use the usual Joomla document root (${VDM_DOCROOT})?" 'Joomla document root' 8 80; then
+    if getInputYesNo "Use the usual Joomla document root (${VDM_DOCROOT})?" 'Joomla document root' 8 80; then
+      :
+    else
+      answer_status=$?
+      [ "$answer_status" -eq 1 ] || return "$answer_status"
       VDM_DOCROOT=$(getInput 'Project-relative directory, or . for the website mount root' "$VDM_DOCROOT" 'Joomla document root') || return 2
     fi
   fi
@@ -2317,6 +2338,13 @@ function joomlaSetupWebPrepare() {
     VDM_J_REPO="${selected_image%:*}" VDM_JV="${selected_image##*:}"
     createPrivateDirectory -p "$dir" || return 1
     joomlaNginxConfiguration "joomla${VDM_KEY}" "$root" > "$dir/nginx.conf" || return 1
+    if [ -n "${VDM_PUID:-}${VDM_PGID:-}" ]; then
+      [[ "${VDM_PUID:-}" =~ ^[0-9]+$ && "${VDM_PGID:-}" =~ ^[0-9]+$ ]] || return 1
+      docker run --rm --entrypoint sh "$selected_image" -c 'test -d /usr/local/etc/php-fpm.d' || return 1
+      printf '[www]\nuser = %s\ngroup = %s\n' "$VDM_PUID" "$VDM_PGID" > "$dir/php-fpm-user.conf" || return 1
+      chmod 644 "$dir/php-fpm-user.conf" || return 1
+      VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 '- "./php-fpm-user.conf:/usr/local/etc/php-fpm.d/zz-octojoom-user.conf:ro"')
+    fi
     VDM_WEB_EXPOSE=9000
     # shellcheck disable=SC2089 # Serialized YAML consumed by the generator.
     VDM_WEB_HEALTH='["CMD", "php", "-r", "exit(@fsockopen('\''127.0.0.1'\'', 9000) ? 0 : 1);"]'
