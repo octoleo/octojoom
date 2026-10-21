@@ -47,7 +47,7 @@ jobs:
 
       - name: Lint the tests
         run: |
-          shellcheck -x tests/run.sh tests/test-clone.sh tests/test-clone-flow.sh tests/integration/clone.sh tests/integration/migration.sh \
+          shellcheck -x tests/run.sh tests/test-clone.sh tests/test-clone-flow.sh tests/integration/*.sh \
             tests/helpers/common.bash tests/helpers/stub-lib.bash tests/helpers/bin/*
           find tests -path tests/.cache -prune -o -name '*.bats' -print0 | xargs -0 shellcheck -s bash
 
@@ -108,3 +108,23 @@ jobs:
 
       - name: Exercise source packaging and destination realignment with real databases
         run: timeout --signal=TERM --kill-after=30s 12m bash tests/integration/migration.sh
+
+  php-runtime-integration:
+    name: Docker PHP runtime integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify published PHP switching and effective site settings
+        run: timeout --signal=TERM --kill-after=30s 17m bash tests/integration/php-runtime.sh
+
+  web-runtime-integration:
+    name: Docker web runtime integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Joomla Apache and Nginx routing and document roots
+        run: timeout --signal=TERM --kill-after=30s 22m bash tests/integration/web-runtime.sh
