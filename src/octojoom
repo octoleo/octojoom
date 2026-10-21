@@ -3190,6 +3190,11 @@ function portainer__TRuST__delete() {
 #####################################################################################################################VDM
 ######################################## RESET JOOMLA
 function joomla__TRuST__reset() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    cliPreflightOtherTask || return $?
+    resetPersistentJoomlaVolumes
+    return $?
+  fi
   # ask if there are volumes to delete
   if hasDirectories '' "${VDM_PROJECT_PATH}" && \
     getInputYesNo "Would you like to reset persistent volumes found in (${VDM_PROJECT_PATH})?" \
