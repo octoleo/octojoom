@@ -2464,10 +2464,11 @@ function openssh__TRuST__down() {
 #####################################################################################################################VDM
 ######################################## CLONE JOOMLA PROJECT FILES
 function joomla__TRuST__clonefiles() {
+  cliPreflightOtherTask || return $?
   # check if we have persistent volumes (project folders) to clone
   if ! hasDirectories '' "${VDM_PROJECT_PATH}"; then
     showError "There are no project folders found in ${VDM_PROJECT_PATH}."
-  elif getInputYesNo "This only copies a project folder (persistent volume) found in (${VDM_PROJECT_PATH}) to a new folder.\n\
+  elif [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || getInputYesNo "This only copies a project folder (persistent volume) found in (${VDM_PROJECT_PATH}) to a new folder.\n\
 It does not create a docker-compose.yml file, and the copied Joomla site keeps pointing at the original database.\n\
 Use (Clone a container) to clone a complete container.\n\nWould you like to continue?" \
       "Clone Project Files" 14 112; then
@@ -2511,6 +2512,7 @@ function joomla__TRuST__clone() {
 # users, passwords and table prefix are copied as they are. The clone is placed in
 # available/ and is NOT enabled.
 function cloneJoomlaContainer() {
+  cliPreflightOtherTask || return $?
   local clone_lock="${VDM_REPO_PATH}/joomla/.clone.lock"
   local clone_status=0
   if ! mkdir "${clone_lock}" 2>/dev/null; then
@@ -2625,6 +2627,10 @@ The clone needs the env values of the source container."
     showError "The (${project}) folder is not a Joomla project folder, it must have a joomla and a db sub-folder."
     return 1
   fi
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] && [ "$project" != "$VDM_SRC_PROJECT_FOLDER" ]; then
+    showError 'The selected project does not match the source Compose mount.'
+    return 17
+  fi
   if [ -n "${VDM_SRC_PROJECT_FOLDER}" ] && [ "${project}" != "${VDM_SRC_PROJECT_FOLDER}" ] &&
     ! getInputYesNo "The docker-compose.yml of (${container}) mounts the (${VDM_SRC_PROJECT_FOLDER}) project folder, but you selected (${project}).\n\n\
 The clone will be a copy of (${project}). Would you like to continue?" "Different Project Folder" 12 112 "defaultno"; then
@@ -2640,6 +2646,10 @@ Setup a new container instead of cloning this one."
   ### 4. make sure the site uses the database of the container being cloned
   host=$(getJoomlaConfigValue "${config}" 'host')
   if ! [[ "${host}" =~ ^mariadb${old_key}(:[0-9]+)?$ ]]; then
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+      showError 'The source uses an external database; automatic cold cloning cannot copy it safely.'
+      return 17
+    fi
     if ! getInputYesNo "The configuration.php of (${project}) connects to the database host (${host}) and not to (mariadb${old_key}).\n\n\
 The clone would keep using that same database, which is only safe when it is not the database of another container.\n\n\
 Would you like to continue without changing the database host?" "Database Host Mismatch" 14 112 "defaultno"; then
@@ -2706,7 +2716,9 @@ Would you like to continue without changing the database host?" "Database Host M
   fi
   ##########################
   ### 8. only in expert mode ask for a new site name
-  if isExpert && ${patch_host}; then
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    site_name="${VDM_J_SITE_NAME:-}"
+  elif isExpert && ${patch_host}; then
     current_site_name=$(getJoomlaConfigValue "${config}" 'sitename')
     site_name=$(getInput "Enter the site name of the clone.\n[Keep the current name (${current_site_name}) to leave it unchanged]" \
       "${current_site_name} (clone)" 'Enter Site Name')
@@ -2723,6 +2735,9 @@ Would you like to continue without changing the database host?" "Database Host M
     if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ]; then
       source_running=true
       stop_line="The (${container}) containers will be stopped during the copy and started again afterwards.\n"
+    elif [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+      showError 'Stop the source database or enable its existing Compose project before cloning.'
+      return 17
     elif getInputYesNo "The database container (mariadb${old_key}) is running, but (${container}) is not enabled,\n\
 so it was started outside ${PROGRAM_NAME} and cannot be stopped for the copy.\n\n\
 Copying a running database can produce an inconsistent copy. Stop it first, or continue at your own risk.\n\n\
@@ -2754,7 +2769,7 @@ Would you like to continue anyway?" "Database Is Running" 14 112 "defaultno"; th
   message+="  VDM_${new_env}_* values${shared_note} in ${env_target}\n\n"
   message+="${stop_line}"
   message+="The database name, users, passwords and table prefix stay exactly as they are.\nThe clone is placed in available/ and is not enabled.\n\nContinue?"
-  if [ "${VDM_FORCE:-false}" != "true" ] &&
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && [ "${VDM_FORCE:-false}" != "true" ] &&
     ! whiptail --yesno "${message}" "$(getDialogHeight "${message}" 7)" 112 --scrolltext \
       --title "Confirm Clone" --backtitle "${BACK_TITLE}" 3>&1 1>&2 2>&3; then
     showNotice "The clone was cancelled, nothing was changed." 8
@@ -2763,12 +2778,12 @@ Would you like to continue anyway?" "Database Is Running" 14 112 "defaultno"; th
   ##########################
   ### 11. we need sudo for the copy (db files are owned by the database user), where sudo is used
   if useSudo; then
-    if ! getInputYesNo "${USER^}, to copy the project folder and update its configuration.php we need sudo privileges." \
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && ! getInputYesNo "${USER^}, to copy the project folder and update its configuration.php we need sudo privileges." \
         "Give sudo Privileges" 8 112; then
       showNotice "The clone was cancelled, nothing was changed." 8
       return 0
     fi
-    if ! sudo -v; then
+    if ! { if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then sudo -n -v; else sudo -v; fi; }; then
       showError "The clone needs sudo privileges to copy the project folder, nothing was changed."
       return 1
     fi
@@ -2948,7 +2963,11 @@ Use (Enable existing container) or (Pull up all enabled containers) to start (${
   [ -n "${warnings}" ] && message+="
   Please check:
 ${warnings}"
-  whiptail --msgbox "${message}" --fb --scrolltext --title "Clone Complete" --backtitle "${BACK_TITLE}" "$(getDialogHeight "${message}" 9)" 112
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    printf 'Cloned %s to %s (disabled).\n' "$container" "$new_container"
+  else
+    whiptail --msgbox "${message}" --fb --scrolltext --title "Clone Complete" --backtitle "${BACK_TITLE}" "$(getDialogHeight "${message}" 9)" 112
+  fi
   # return a success
   return "${restart_status}"
 }
@@ -3155,6 +3174,10 @@ function joomla__TRuST__reset() {
 #####################################################################################################################VDM
 ######################################## Migrate Joomla
 function joomla__TRuST__migratefiles() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    migrateSelectedFolder 'joomla'
+    return $?
+  fi
   # check if this type have available containers
   if ! hasDirectories "${VDM_CONTAINER_TYPE}/available/"; then
     showError "The path ${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/ does not exist or is empty, first run a ${VDM_CONTAINER_TYPE^} setup."
@@ -3195,6 +3218,10 @@ function joomla__TRuST__migratefiles() {
 #####################################################################################################################VDM
 ######################################## Migrate OPENSSH
 function openssh__TRuST__migrate() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    migrateSelectedFolder 'openssh'
+    return $?
+  fi
   # check if this type have available containers
   if ! hasDirectories "${VDM_CONTAINER_TYPE}/available/"; then
     showError "The path ${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/ does not exist or is empty, first run a ${VDM_CONTAINER_TYPE^} setup."
@@ -3234,6 +3261,10 @@ function openssh__TRuST__migrate() {
 #####################################################################################################################VDM
 ######################################## Migrate Directory
 function directory__TRuST__migrate() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    migrateSelectedFolder 'directory'
+    return $?
+  fi
   # set some local variables
   local vdm_migrate_me
   local directory
@@ -3586,14 +3617,22 @@ function clonePersistentVolume() {
           showError "Docker could not inspect the database. The project folder was not copied."
           return 1
         fi
+        if [ "${database_state}" -eq 0 ] && [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+          showError 'Stop the source project before copying its raw database files.'
+          return 17
+        fi
         if [ "${database_state}" -eq 0 ] && ! getInputYesNo "The database container (mariadb${persistent}) is running.\n\
 Copying a running database can produce an inconsistent copy. Disable the container first, or continue at your own risk.\n\n\
 Would you like to continue anyway?" "Database Is Running" 12 112 "defaultno"; then
           showNotice "The (${persistent}) project folder was not copied, because its database container is running." 8
           return 0
         fi
+        # Explicit automation never copies a live database directory.
+        if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+          ensureProjectStopped "$persistent" || return $?
+        fi
         # set the new persistent volume name
-        new_persistent="${persistent}"
+        new_persistent="${VDM_TARGET_PROJECT:-${persistent}}"
         while ! isSafeProjectName "${new_persistent}" || [ -e "${VDM_PROJECT_PATH}/${new_persistent}" ] ||
           [ -L "${VDM_PROJECT_PATH}/${new_persistent}" ]; do
           # get the value
@@ -3609,9 +3648,9 @@ Would you like to continue anyway?" "Database Is Running" 12 112 "defaultno"; th
         mkdir "${VDM_PROJECT_PATH}/${new_persistent}" || return $?
         # clone or (copy) the files to a new directory (including hidden files).
         local copy_status=0
-        sudo cp -a "${VDM_PROJECT_PATH}/${persistent}/." "${VDM_PROJECT_PATH}/${new_persistent}/" || copy_status=$?
+        runPrivileged cp -a "${VDM_PROJECT_PATH}/${persistent}/." "${VDM_PROJECT_PATH}/${new_persistent}/" || copy_status=$?
         if [ "${copy_status}" -ne 0 ]; then
-          sudo rm -rf "${VDM_PROJECT_PATH}/${new_persistent}" ||
+          runPrivileged rm -rf "${VDM_PROJECT_PATH}/${new_persistent}" ||
             showError "The incomplete copy (${new_persistent}) could not be removed."
           showError "The (${persistent}) project could not be copied (exit status ${copy_status})."
           return "${copy_status}"
@@ -3997,7 +4036,7 @@ function useSudo() {
 # run a command with sudo where useSudo says so, else directly
 function runPrivileged() {
   if useSudo; then
-    sudo "$@"
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then sudo -n "$@"; else sudo "$@"; fi
   else
     "$@"
   fi
@@ -4068,6 +4107,7 @@ function isJoomlaKeyInUse() {
 
 # reset persistent Joomla volume
 function resetPersistentJoomlaVolumes() {
+  cliPreflightOtherTask || return $?
   # we first check if we have some volumes
   if hasDirectories '' "${VDM_PROJECT_PATH}"; then
     # set some local variables
@@ -4089,17 +4129,19 @@ function resetPersistentJoomlaVolumes() {
         ensureProjectStopped "${persistent}" || return $?
         # last serious check and then its gone
         if [ -d "${VDM_PROJECT_PATH}/${persistent}/joomla" ] &&
-          (whiptail --yesno "Are you absolutely sure you would like to delete this (${persistent}/joomla) persistent volume? THIS CAN'T BE UNDONE!\n(we need sudo privileges)" \
-            --title "Delete Persistent Volume" --backtitle "${BACK_TITLE}" 15 112); then
+          { { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] && [[ "$VDM_VOLUME" == web || "$VDM_VOLUME" == both ]]; } ||
+          { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && whiptail --yesno "Are you absolutely sure you would like to delete this (${persistent}/joomla) persistent volume? THIS CAN'T BE UNDONE!\n(we need sudo privileges)" \
+            --title "Delete Persistent Volume" --backtitle "${BACK_TITLE}" 15 112; }; }; then
           # then remove soft link
-          sudo rm -rf "${VDM_PROJECT_PATH}/${persistent}/joomla" || return $?
+          runPrivileged rm -rf "${VDM_PROJECT_PATH}/${persistent}/joomla" || return $?
         fi
         # last serious check and then its gone
         if [ -d "${VDM_PROJECT_PATH}/${persistent}/db" ] &&
-          (whiptail --yesno "Are you absolutely sure you would like to delete this (${persistent}/db) persistent volume? THIS CAN'T BE UNDONE!\n(we need sudo privileges)" \
-            --title "Delete Persistent Volume" --backtitle "${BACK_TITLE}" 15 112); then
+          { { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] && [[ "$VDM_VOLUME" == database || "$VDM_VOLUME" == both ]]; } ||
+          { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && whiptail --yesno "Are you absolutely sure you would like to delete this (${persistent}/db) persistent volume? THIS CAN'T BE UNDONE!\n(we need sudo privileges)" \
+            --title "Delete Persistent Volume" --backtitle "${BACK_TITLE}" 15 112; }; }; then
           # then remove soft link
-          sudo rm -rf "${VDM_PROJECT_PATH}/${persistent}/db" || return $?
+          runPrivileged rm -rf "${VDM_PROJECT_PATH}/${persistent}/db" || return $?
         fi
       done
     fi
@@ -7045,6 +7087,15 @@ function hasRemoteSystemSet() {
 
 # Get a selected remote system
 function getRemoteSystem() {
+  if [ -n "${VDM_REMOTE:-}" ]; then
+    [[ "$VDM_REMOTE" =~ ^[A-Za-z0-9_][A-Za-z0-9_.@:-]*$ ]] || return 17
+    printf '%s\n' "$VDM_REMOTE"
+    return 0
+  fi
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    printf '%s\n' 'ERROR: --remote is required.' >&2
+    return 17
+  fi
   # The selected folder
   local answer
 
@@ -7085,6 +7136,13 @@ function getRemoteSystem() {
 
 # get a selected migration type
 function getMigrationType() {
+  if [ -n "${VDM_DIRECTION:-}" ]; then
+    case "$VDM_DIRECTION" in push|pull) printf '%s\n' "$VDM_DIRECTION"; return 0;; *) return 17;; esac
+  fi
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    printf '%s\n' 'ERROR: --direction push or pull is required.' >&2
+    return 17
+  fi
   # the selected folder
   local answer
   # we start the selection array
@@ -7102,12 +7160,46 @@ function getMigrationType() {
   echo "${answer:-push}"
 }
 
+# Use SSH configuration and keys without requesting passwords during automation.
+function migrationSSH() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    ssh -o BatchMode=yes "$@"
+  else
+    ssh "$@"
+  fi
+}
+
+# Prompt-free argument collection for the existing folder transfer operations.
+function migrateSelectedFolder() {
+  local kind="$1" remote direction target local_path
+  remote=$(getRemoteSystem) && direction=$(getMigrationType) || return 17
+  if [ "$kind" = directory ]; then
+    target="${VDM_PROJECT:-}"
+    isSafeProjectName "$target" || return 17
+    local_path="$VDM_PROJECT_PATH/$target"
+  else
+    target="${VDM_CONTAINER:-}"
+    isValidDomain "$target" || return 17
+    local_path="$VDM_REPO_PATH/$kind/available/$target"
+  fi
+  if [ "$direction" = push ] && [ ! -d "$local_path" ]; then return 17; fi
+  (
+    export RSYNC_RSH='ssh -o BatchMode=yes'
+    if [ "$kind" = directory ]; then
+      "${direction}DirectoryMigration" "$local_path" "$target" "$remote"
+    else
+      "${direction}ContainerMigration" "$local_path" "$kind/available/$target" "$remote"
+    fi
+  )
+}
+
 # Check if the remote .env file exists using the remote user's home directory
 function remoteEnvFileExists() {
   local remote_system="$1"
 
   # Expand HOME on the remote host, never on the local machine.
-  ssh -- "${remote_system}" '[ -f "$HOME/.config/octojoom/.env" ]'
+  # shellcheck disable=SC2016 # HOME is intentionally resolved on the remote host.
+  migrationSSH -- "${remote_system}" '[ -f "$HOME/.config/octojoom/.env" ]'
 }
 
 # Quote one argument for the remote POSIX shell (including embedded apostrophes).
@@ -7132,7 +7224,7 @@ function getRemoteEnvValue() {
 
   if [[ ! "${env_key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] ||
     ! remoteEnvFileExists "${remote_system}" ||
-    ! remote_env_value=$(ssh -- "${remote_system}" "grep \"^${env_key}=\" \"\$HOME/.config/octojoom/.env\""); then
+    ! remote_env_value=$(migrationSSH -- "${remote_system}" "grep \"^${env_key}=\" \"\$HOME/.config/octojoom/.env\""); then
     printf '%s\n' none_found
     return 1
   fi
@@ -7222,7 +7314,7 @@ function pullRemoteFolder() {
   staging_path="${workspace}/payload"
   # The archive is created privately on the source, including when root access
   # is needed to read project files. Nothing is rsynced as a loose directory.
-  if ! remote_workspace=$(ssh -- "${remote}" "umask 077;
+  if ! remote_workspace=$(migrationSSH -- "${remote}" "umask 077;
     [ ! -L $(quoteRemoteArgument "${remote_path}") ] || exit 1;
     workspace=\$(mktemp -d \"\${TMPDIR:-/tmp}/octojoom-pull.XXXXXX\") || exit 1;
     trap 'rm -rf -- \"\$workspace\"' 0;
@@ -7253,7 +7345,7 @@ function pullRemoteFolder() {
   fi
   backup_path="${local_path}_backup_$(date +%Y%m%d%H%M%S)_${BASHPID}_${RANDOM}"
   if [ -e "${local_path}" ]; then
-    if whiptail --yesno "${USER^}, would you like to retain a backup of the local directory?" \
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || whiptail --yesno "${USER^}, would you like to retain a backup of the local directory?" \
       --title "Backup Local" --backtitle "${BACK_TITLE}" 15 112; then
       keep_backup=true
     fi
@@ -7291,7 +7383,7 @@ function pushArchivedMigration() {
     showError "The PUSH failed: the archive contains an unsupported or unsafe entry. The local archive was retained at ${tar_path}."
     return 1
   fi
-  if ! workspace=$(ssh -- "${remote}" "umask 077; mkdir -p -- $(quoteRemoteArgument "$(dirname "${remote_path}")") &&
+  if ! workspace=$(migrationSSH -- "${remote}" "umask 077; mkdir -p -- $(quoteRemoteArgument "$(dirname "${remote_path}")") &&
     mktemp -d $(quoteRemoteArgument "${remote_path}.migration.XXXXXX")") ||
     ! isSafeMigrationPath "${workspace}" || [[ "${workspace}" != "${remote_path}.migration."* ]]; then
     showError "The PUSH failed while creating a private remote workspace. The local archive was retained at ${tar_path}."
@@ -7319,15 +7411,15 @@ function publishRemoteMigration() {
   local quoted_staging quoted_path quoted_backup backup_path publish_status
   isSafeMigrationPath "${staging_path}" && isSafeMigrationPath "${remote_path}" || return 1
   if remoteFolderExists "${remote_path}" "${remote}" &&
-    whiptail --yesno "${USER^}, would you like to backup the remote directory?" \
-      --title "Backup Remote" --backtitle "${BACK_TITLE}" 15 112; then
+    { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || whiptail --yesno "${USER^}, would you like to backup the remote directory?" \
+      --title "Backup Remote" --backtitle "${BACK_TITLE}" 15 112; }; then
     keep_backup=true
   fi
   backup_path="${remote_path}_backup_$(date +%Y%m%d%H%M%S)_${BASHPID}_${RANDOM}"
   quoted_staging=$(quoteRemoteArgument "${staging_path}")
   quoted_path=$(quoteRemoteArgument "${remote_path}")
   quoted_backup=$(quoteRemoteArgument "${backup_path}")
-  if ssh -- "${remote}" "[ -d ${quoted_staging} ] && [ ! -e ${quoted_backup} ] || exit 20;
+  if migrationSSH -- "${remote}" "[ -d ${quoted_staging} ] && [ ! -e ${quoted_backup} ] || exit 20;
     if [ -e ${quoted_path} ]; then mv -- ${quoted_path} ${quoted_backup} || exit 20; fi;
     if mv -- ${quoted_staging} ${quoted_path}; then
       if [ '${keep_backup}' = false ] && [ -e ${quoted_backup} ]; then
@@ -7382,7 +7474,7 @@ function pushDirectoryMigration() {
     return 1
   fi
   pushArchivedMigration "${tar_path}" "${remote_path}" "${remote}" || return 1
-  if whiptail --yesno "${USER^}, would you like to fix the permissions of this remote directory?\nWe will start ${PROGRAM_NAME} on the remote server; navigate to the fix, and exit when done." \
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && whiptail --yesno "${USER^}, would you like to fix the permissions of this remote directory?\nWe will start ${PROGRAM_NAME} on the remote server; navigate to the fix, and exit when done." \
     --title "Permissions Fix" --backtitle "${BACK_TITLE}" 15 112; then
     connectToRemoteSystem "${remote}" || return 1
   fi
@@ -7428,7 +7520,7 @@ function remoteFolderExists() {
   local remote_path="$1"
   local remote="$2"
 
-  ssh -- "${remote}" "[ -d $(quoteRemoteArgument "${remote_path}") ]"
+  migrationSSH -- "${remote}" "[ -d $(quoteRemoteArgument "${remote_path}") ]"
 }
 
 # run Octojoom on a remote system
@@ -7484,7 +7576,7 @@ function backupRemoteFolder() {
   backup_name="${remote_path}_backup_$(date +%Y%m%d%H%M%S)_${BASHPID}_${RANDOM}"
   quoted_path=$(quoteRemoteArgument "${remote_path}")
   quoted_backup=$(quoteRemoteArgument "${backup_name}")
-  ssh -- "${remote}" "[ -d ${quoted_path} ] && [ ! -e ${quoted_backup} ] && mv -- ${quoted_path} ${quoted_backup}"
+  migrationSSH -- "${remote}" "[ -d ${quoted_path} ] && [ ! -e ${quoted_backup} ] && mv -- ${quoted_path} ${quoted_backup}"
 }
 
 # remove the remote folder
@@ -7492,7 +7584,7 @@ function removeRemoteFolder() {
   local remote_path="$1"
   local remote="$2"
   isSafeMigrationPath "${remote_path}" || return 1
-  ssh -- "${remote}" "if [ -d $(quoteRemoteArgument "${remote_path}") ]; then \
+  migrationSSH -- "${remote}" "if [ -d $(quoteRemoteArgument "${remote_path}") ]; then \
     rm -rf -- $(quoteRemoteArgument "${remote_path}") || sudo -n rm -rf -- $(quoteRemoteArgument "${remote_path}"); fi"
 }
 
@@ -7502,7 +7594,7 @@ function prepRemoteFolder() {
   local remote="$2"
 
   isSafeMigrationPath "${remote_path}" || return 1
-  ssh -- "${remote}" "mkdir -p -- $(quoteRemoteArgument "${remote_path}")"
+  migrationSSH -- "${remote}" "mkdir -p -- $(quoteRemoteArgument "${remote_path}")"
 }
 
 # Remotely extract a tar.gz file to a specified folder on the remote host
@@ -7521,7 +7613,7 @@ function remoteUntarGz() {
     (umask 077; mkdir -- $(quoteRemoteArgument "${remote_extract_path}")) &&
     tar --no-same-owner -xzf $(quoteRemoteArgument "${remote_file_path}") -C $(quoteRemoteArgument "${remote_extract_path}") &&
     rm -f -- $(quoteRemoteArgument "${remote_file_path}")"
-  ssh -- "${remote}" "bash -c $(quoteRemoteArgument "${remote_script}")"
+  migrationSSH -- "${remote}" "bash -c $(quoteRemoteArgument "${remote_script}")"
 }
 
 # Transfer the folder to the remote server using rsync
@@ -7581,7 +7673,7 @@ function transferTarWasSuccessful() {
     local_checksum=$(shasum -a 256 -- "${local_path}") || return 1
   fi
   quoted_path=$(quoteRemoteArgument "${remote_path}")
-  remote_checksum=$(ssh -- "${remote}" "if command -v sha256sum >/dev/null 2>&1; then \
+  remote_checksum=$(migrationSSH -- "${remote}" "if command -v sha256sum >/dev/null 2>&1; then \
     sha256sum -- ${quoted_path}; else shasum -a 256 -- ${quoted_path}; fi") || return 1
   local_checksum="${local_checksum%% *}"
   remote_checksum="${remote_checksum%% *}"
@@ -8534,6 +8626,11 @@ function importJoomlaMigration() {
     migrationValidateManifest "$preview/manifest.env" || exit 1
     migrationReadEnvValue "$preview/manifest.env" VDM_MIGRATION_KEY key || exit 1
     migrationReadEnvValue "$preview/manifest.env" VDM_MIGRATION_CONTAINER host || exit 1
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+      key="$VDM_KEY"
+      host="$VDM_TARGET_HOST"
+      migrationDestinationAvailable "$key" "$host" || { showError 'Destination key or hostname is unavailable.'; exit 1; }
+    else
     while true; do
       key=$(getInput 'Destination project key (letters only). The source key can be retained when unused.' "$key" 'Migration Project Key') || exit 3
       [[ "$key" =~ ^[A-Za-z]+$ ]] || { showError 'Use letters only for the project key.'; continue; }
@@ -8545,7 +8642,13 @@ function importJoomlaMigration() {
       [ "$status" -ne 2 ] || { showError 'Docker could not inspect destination containers. Restore Docker access before retrying.'; exit 1; }
       showError 'That key or hostname is already in use.'
     done
+    fi
     env_key="${key^^}"
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+      secure="${VDM_SECURE:-false}"
+      if [ "$secure" = true ]; then resolver=vdmresolver; [ "${VDM_SECURE_CLOUDFLARE:-false}" != true ] || resolver=cfresolver; fi
+      puid="${VDM_PUID:-}"; pgid="${VDM_PGID:-}"
+    else
     if getInputYesNo 'Enable HTTPS for this destination? A working destination Traefik ACME resolver is required.' 'Migration HTTPS' 10 112 'defaultno'; then
       secure=true
       resolver=vdmresolver
@@ -8558,6 +8661,7 @@ function importJoomlaMigration() {
       [[ "$puid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ ]] || { showError 'User and group IDs must be numeric.'; exit 1; }
     fi
     if ! getInputYesNo "Prepare ${host} using project key ${key}?\nDatabase name, users, passwords and table prefix will be retained.\nDestination paths, routing and Joomla host settings will be realigned.\nHTTPS: ${secure}. The source is unaffected by destination import." 'Prepare Migration' 14 112 'defaultno'; then exit 3; fi
+    fi
     # Release the preview before extracting the publication copy; large projects
     # need only one extracted copy plus the final project during publication.
     runPrivileged rm -rf -- "$preview" || exit 1
@@ -8565,7 +8669,8 @@ function importJoomlaMigration() {
     trap - EXIT
     prepareJoomlaMigration "$archive" "$key" "$env_key" "$host" "$secure" "$resolver" "$puid" "$pgid" || exit 1
     if reason=$(migrationDestinationReady "$secure" "$resolver"); then
-      if getInputYesNo 'The project is prepared. Enable it now and wait for database and Joomla health checks?' 'Enable Migrated Site' 10 112 'defaultno'; then
+      if { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] && [ "${VDM_ENABLE:-false}" = true ]; } ||
+        { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && getInputYesNo 'The project is prepared. Enable it now and wait for database and Joomla health checks?' 'Enable Migrated Site' 10 112 'defaultno'; }; then
         activateJoomlaMigration "$key" "$host" "$secure" "$resolver" || exit 1
         showNotice "Migration complete. ${host} is enabled; database connectivity, container health and the destination HTTP/HTTPS route passed."
       else
@@ -8573,6 +8678,7 @@ function importJoomlaMigration() {
       fi
     else
       showNotice "Migration prepared. ${host} remains disabled.\n\n${reason}"
+      if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] && [ "${VDM_ENABLE:-false}" = true ]; then exit 1; fi
     fi
   )
 }
@@ -8641,7 +8747,7 @@ function migrationWorker() {
       showNotice() { printf '%s\n' "$1" >&2; }
     fi
     case "$action" in
-      capabilities)
+      capabilities|capabilities-headless)
         [ "$#" -eq 0 ] || return 1
         for tool in tar gzip rsync docker; do
           command -v "$tool" >/dev/null 2>&1 || {
@@ -8650,7 +8756,7 @@ function migrationWorker() {
           }
         done
         command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || return 1
-        printf '%s\n' octojoom-migration-v1
+        if [ "$action" = capabilities-headless ]; then printf '%s\n' octojoom-migration-v2; else printf '%s\n' octojoom-migration-v1; fi
         ;;
       list)
         [ "$#" -eq 0 ] || return 1
@@ -8694,6 +8800,22 @@ function migrationWorker() {
           importJoomlaMigration "$1"
         fi
         ;;
+      import-options)
+        [ "$#" -eq 8 ] || return 17
+        path="$1"; shift
+        workspace="${path%/package.tar.gz}"
+        [ "$path" = "${workspace}/package.tar.gz" ] && isMigrationWorkspace "$workspace" || return 1
+        OCTOJOOM_NON_INTERACTIVE=true
+        VDM_TASK=import VDM_ARCHIVE="$path" VDM_KEY="$1" VDM_TARGET_HOST="$2" VDM_SECURE="$3"
+        VDM_SECURE_CLOUDFLARE="$4" VDM_PUID="$5" VDM_PGID="$6" VDM_ENABLE="$7"
+        cliPreflightOtherTask || return $?
+        importJoomlaMigration "$path"
+        ;;
+      export-to-options)
+        [ "$#" -eq 2 ] && isValidDomain "$1" && isMigrationWorkspace "$2" || return 17
+        OCTOJOOM_NON_INTERACTIVE=true
+        exportJoomlaMigration "$1" "${2}/package.tar.gz"
+        ;;
       cleanup)
         [ "$#" -eq 1 ] && isMigrationWorkspace "$1" || return 1
         rm -rf -- "$1"
@@ -8713,10 +8835,12 @@ function remoteMigrationWorker() {
   for argument in "$@"; do
     command+=" $(quoteRemoteArgument "$argument")"
   done
-  if [ "$tty" = true ]; then
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    ssh -o BatchMode=yes -- "$remote" "$command"
+  elif [ "$tty" = true ]; then
     ssh -t -- "$remote" "$command"
   else
-    ssh -- "$remote" "$command"
+    migrationSSH -- "$remote" "$command"
   fi
 }
 
@@ -8728,6 +8852,11 @@ function isRemoteMigrationWorkspace() {
 function selectRemoteMigrationProject() {
   local remote="$1" projects project selected
   local -a choices=()
+  if [ -n "${VDM_CONTAINER:-}" ]; then
+    isValidDomain "$VDM_CONTAINER" || return 17
+    printf '%s\n' "$VDM_CONTAINER"
+    return 0
+  fi
   projects=$(remoteMigrationWorker "$remote" false list) || return 1
   while IFS= read -r project; do
     [ -n "$project" ] || continue
@@ -8749,6 +8878,8 @@ function joomla__TRuST__migrate() {
     set +x
     local direction remote container capabilities local_workspace='' remote_workspace=''
     local local_archive remote_archive local_digest remote_digest migration_status=0
+    [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] || export RSYNC_RSH='ssh -o BatchMode=yes'
+    cliPreflightOtherTask || return $?
     direction=$(getMigrationType) || return 1
     [[ "$direction" == push || "$direction" == pull ]] || return 1
     remote=$(getRemoteSystem) || return 1
@@ -8756,11 +8887,13 @@ function joomla__TRuST__migrate() {
       showNotice 'Migration cancelled: no remote host was selected.'
       return 0
     fi
-    capabilities=$(remoteMigrationWorker "$remote" false capabilities) || {
+    local capability_action=capabilities expected_protocol=octojoom-migration-v1
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then capability_action=capabilities-headless; expected_protocol=octojoom-migration-v2; fi
+    capabilities=$(remoteMigrationWorker "$remote" false "$capability_action") || {
       showError 'The remote host is not ready for complete project migration. Update Octojoom on both hosts and verify SSH, Docker, tar and rsync access.'
       return 1
     }
-    if [ "$capabilities" != octojoom-migration-v1 ]; then
+    if [ "$capabilities" != "$expected_protocol" ]; then
       showError 'The remote Octojoom migration protocol is incompatible. Update both installations before migrating.'
       return 1
     fi
@@ -8772,8 +8905,10 @@ function joomla__TRuST__migrate() {
     fi
     [ -n "$container" ] || return 0
     isValidDomain "$container" || return 1
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ]; then
     getInputYesNo "Package (${container}) and ${direction} it through (${remote})?\n\nThe source services will be stopped briefly to take a consistent copy, then restarted. Compose, project-specific environment values and project files travel together in one compressed archive. Destination choices are made on the destination host. The source is retained." \
       'Migrate complete Joomla project' 17 112 || return 0
+    fi
     local_workspace=$(createMigrationWorkspace) || return 1
     local_archive="${local_workspace}/package.tar.gz"
     if [ "$direction" = push ]; then
@@ -8793,7 +8928,9 @@ function joomla__TRuST__migrate() {
     if [ "$direction" = pull ]; then
       # Keep source packaging interactive for ordinary sudo authentication, but
       # keep protocol path discovery separate from terminal output.
-      remoteMigrationWorker "$remote" true export-to "$container" "$remote_workspace" || {
+      local export_action=export-to
+      [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] || export_action=export-to-options
+      remoteMigrationWorker "$remote" true "$export_action" "$container" "$remote_workspace" || {
         showError "Source packaging failed. The remote recovery workspace is ${remote}:${remote_workspace}."
         return 1
       }
@@ -8810,7 +8947,12 @@ function joomla__TRuST__migrate() {
     fi
     if [ "$migration_status" -eq 0 ]; then
       if [ "$direction" = push ]; then
-        remoteMigrationWorker "$remote" true import "$remote_archive" || migration_status=$?
+        if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+          remoteMigrationWorker "$remote" false import-options "$remote_archive" "$VDM_KEY" "$VDM_TARGET_HOST" \
+            "${VDM_SECURE:-false}" "${VDM_SECURE_CLOUDFLARE:-false}" "${VDM_PUID:-}" "${VDM_PGID:-}" "${VDM_ENABLE:-false}" || migration_status=$?
+        else
+          remoteMigrationWorker "$remote" true import "$remote_archive" || migration_status=$?
+        fi
       else
         importJoomlaMigration "$local_archive" || migration_status=$?
       fi
@@ -8831,6 +8973,72 @@ function joomla__TRuST__migrate() {
   )
 }
 
+
+
+# Validate automation choices before filesystem writes or source interruption.
+function cliPreflightOtherTask() {
+  [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || return 0
+  case "${VDM_CONTAINER_TYPE:-}:${VDM_TASK:-}" in
+    joomla:clone)
+      if ! isValidDomain "${VDM_CONTAINER:-}" || ! [[ "${VDM_KEY:-}" =~ ^[A-Za-z]{2,}$ ]] || ! isValidDomain "${VDM_DOMAIN:-}"; then
+        printf '%s\n' 'ERROR: clone requires --container, a new --key, and --domain.' >&2; return 17
+      fi
+      VDM_ENV_KEY="${VDM_ENV_KEY:-${VDM_KEY^^}}"
+      VDM_SUBDOMAIN="${VDM_SUBDOMAIN:-${VDM_KEY,,}}"
+      [[ "$VDM_ENV_KEY" =~ ^[A-Za-z]{2,}$ && "$VDM_SUBDOMAIN" =~ ^[A-Za-z]+$ ]] || return 17
+      local collision=0 suffix
+      isJoomlaKeyInUse "$VDM_KEY" || collision=$?
+      [ "$collision" -eq 1 ] || { printf '%s\n' 'ERROR: destination key is in use or cannot be inspected.' >&2; return 17; }
+      for suffix in '' db mail; do
+        if isJoomlaHostInUse "$VDM_SUBDOMAIN$suffix.$VDM_DOMAIN"; then return 17; fi
+      done
+      if [ "${VDM_ARG_DOMAIN:-false}" != true ] && [ "${VDM_MULTI_DOMAIN:-false}" = true ]; then
+        printf '%s\n' 'ERROR: --domain is required when multiple domains are configured.' >&2; return 17
+      fi
+      ;;
+    joomla:export)
+      if ! isValidDomain "${VDM_CONTAINER:-}" || [[ "${VDM_ARCHIVE:-}" != /* ]] || [ -e "$VDM_ARCHIVE" ] || [ -L "$VDM_ARCHIVE" ]; then
+        printf '%s\n' 'ERROR: export requires --container and an unused absolute --archive path.' >&2; return 17
+      fi
+      ;;
+    joomla:import|joomla:migrate)
+      if ! [[ "${VDM_KEY:-}" =~ ^[A-Za-z]{2,}$ && "${VDM_TARGET_HOST%%.*}" =~ ^[A-Za-z]+$ ]] || ! isValidDomain "${VDM_TARGET_HOST:-}"; then
+        printf '%s\n' 'ERROR: migration requires destination --key and --target-host.' >&2; return 17
+      fi
+      case "${VDM_ENABLE:-false}:${VDM_SECURE:-false}:${VDM_SECURE_CLOUDFLARE:-false}" in
+        true:true:true|true:true:false|true:false:false|false:true:true|false:true:false|false:false:false) ;; *) return 17;;
+      esac
+      if [ -n "${VDM_PUID:-}${VDM_PGID:-}" ]; then [[ "$VDM_PUID" =~ ^[0-9]+$ && "$VDM_PGID" =~ ^[0-9]+$ ]] || return 17; fi
+      if [ "$VDM_TASK" = import ]; then
+        [ -f "${VDM_ARCHIVE:-}" ] && [ ! -L "$VDM_ARCHIVE" ] || return 17
+      else
+        isValidDomain "${VDM_CONTAINER:-}" && getRemoteSystem >/dev/null && getMigrationType >/dev/null || return 17
+      fi
+      ;;
+    joomla:reset)
+      isSafeProjectName "${VDM_PROJECT:-}" && [ -d "$VDM_PROJECT_PATH/$VDM_PROJECT" ] && [ ! -L "$VDM_PROJECT_PATH/$VDM_PROJECT" ] || return 17
+      case "${VDM_VOLUME:-}" in web|database|both) ;; *) printf '%s\n' 'ERROR: reset requires --project and --volume web, database, or both.' >&2; return 17;; esac
+      ;;
+    joomla:clonefiles)
+      isSafeProjectName "${VDM_PROJECT:-}" && isSafeProjectName "${VDM_TARGET_PROJECT:-}" &&
+        [ -d "$VDM_PROJECT_PATH/$VDM_PROJECT" ] && [ ! -L "$VDM_PROJECT_PATH/$VDM_PROJECT" ] &&
+        [ ! -e "$VDM_PROJECT_PATH/$VDM_TARGET_PROJECT" ] && [ ! -L "$VDM_PROJECT_PATH/$VDM_TARGET_PROJECT" ] || return 17
+      ;;
+  esac
+  return 0
+}
+
+function joomla__TRuST__export() {
+  cliPreflightOtherTask || return $?
+  [ -n "${VDM_CONTAINER:-}" ] && [ -n "${VDM_ARCHIVE:-}" ] || return 17
+  exportJoomlaMigration "$VDM_CONTAINER" "$VDM_ARCHIVE"
+}
+
+function joomla__TRuST__import() {
+  cliPreflightOtherTask || return $?
+  [ -n "${VDM_ARCHIVE:-}" ] || return 17
+  importJoomlaMigration "$VDM_ARCHIVE"
+}
 
 # Parse all options before performing an action. Values passed explicitly on the
 # command line override the saved global config loaded later.

@@ -349,6 +349,7 @@ if [ "$(container_running "${SOURCE_DB}")" != true ] || [ "$(container_running "
   die 'The source services were not restarted.'
 fi
 pass 'real source services were stopped for the cold copy and restarted'
+wait_until 'source application after restart' web_probe "${SOURCE_WEB}" "${RUN_ID}" "${SOURCE_DB}:3306"
 [ ! -e "${VDM_REPO_PATH}/joomla/enabled/${CLONE_CONTAINER}" ] || die 'The clone was automatically enabled.'
 [ "$(getJoomlaConfigValue "${CLONE_PROJECT}/joomla/configuration.php" host)" = "${CLONE_DB}:3306" ] || die 'Clone JConfig still uses the source database.'
 [ "$(host_privileged stat -c '%a:%u:%g' "${CLONE_PROJECT}/joomla/configuration.php")" = \

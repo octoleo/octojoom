@@ -35,13 +35,14 @@ setup() {
     local action="$3"
     printf 'remote:%s\n' "${action}" >>"${FLOW_LOG}"
     case "${action}" in
+    capabilities-headless) printf '%s\n' octojoom-migration-v2 ;;
     capabilities) printf '%s\n' "${FLOW_PROTOCOL}" ;;
     list) printf '%s\n' source.vdm.dev ;;
     receive)
       mkdir -p "${FLOW_REMOTE}"
       printf '%s\n' "${FLOW_REMOTE}"
       ;;
-    export-to)
+    export-to|export-to-options)
       [ "$2" = true ] && [ "$4" = source.vdm.dev ] && [ "$5" = "${FLOW_REMOTE}" ] || return 2
       cp "${FLOW_PAYLOAD}" "${FLOW_REMOTE}/package.tar.gz"
       ;;
@@ -52,7 +53,7 @@ setup() {
         migrationArchiveDigest "$4"
       fi
       ;;
-    import) return "${FLOW_IMPORT_STATUS}" ;;
+    import|import-options) return "${FLOW_IMPORT_STATUS}" ;;
     cleanup) rm -rf -- "$4" ;;
     *) return 2 ;;
     esac
@@ -236,4 +237,37 @@ SCRIPT
   run migrationWorker cleanup "${workspace}"
   assert_success
   refute_file_exists "${workspace}"
+}
+
+@test "headless complete push transports destination choices without prompts or remote TTY" {
+  OCTOJOOM_NON_INTERACTIVE=true VDM_TASK=migrate VDM_CONTAINER=source.vdm.dev
+  VDM_KEY=target VDM_TARGET_HOST=target.example.test VDM_ENABLE=false
+  getInputYesNo() { touch "$SANDBOX/unexpected-question"; return 99; }
+  run joomla__TRuST__migrate
+  assert_success
+  grep -q '^remote:capabilities-headless$' "$FLOW_LOG"
+  grep -q '^remote:import-options$' "$FLOW_LOG"
+  refute_file_exists "$SANDBOX/unexpected-question"
+  [ -z "$(flow_local_archive)" ]
+}
+
+@test "headless complete pull selects the requested source and keeps one archive transfer" {
+  OCTOJOOM_NON_INTERACTIVE=true VDM_TASK=migrate VDM_CONTAINER=source.vdm.dev
+  VDM_KEY=target VDM_TARGET_HOST=target.example.test VDM_ENABLE=false FLOW_DIRECTION=pull
+  getInputYesNo() { touch "$SANDBOX/unexpected-question"; return 99; }
+  run joomla__TRuST__migrate
+  assert_success
+  grep -q '^remote:export-to-options$' "$FLOW_LOG"
+  [ "$(grep -c '^transfer:' "$FLOW_LOG")" -eq 1 ]
+  refute_file_exists "$SANDBOX/unexpected-question"
+  [ ! -s "$STUB_DIR/dialogs.log" ]
+}
+
+@test "headless migration validates destination before touching source or creating a workspace" {
+  OCTOJOOM_NON_INTERACTIVE=true VDM_TASK=migrate VDM_CONTAINER=source.vdm.dev
+  VDM_KEY=target VDM_TARGET_HOST='../../outside'
+  run joomla__TRuST__migrate
+  assert_status 17
+  [ ! -s "$FLOW_LOG" ]
+  refute_file_exists "$VDM_SRC_PATH/migrations"
 }
