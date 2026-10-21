@@ -2507,6 +2507,33 @@ function joomla__TRuST__clone() {
   return "${clone_status}"
 }
 
+# Existing cold clone/export readers assume Joomla directly in the web mount.
+# Keep their supported path intact and reject only a configured nested root.
+function requireOriginalJoomlaDataLayout() {
+  local site="$1" operation="$2" compose_file env_file root env_key server
+  compose_file="${VDM_REPO_PATH}/joomla/available/$site/docker-compose.yml"
+  env_file=$(getContainerEnvFile joomla "$site" available)
+  if getJoomlaComposeIdentity "$compose_file"; then
+    env_key="$VDM_SRC_ENV_KEY"
+    if migrationReadEnvValue "$env_file" "VDM_${env_key}_WEBSERVER" server && [ "$server" = nginx ]; then
+      printf '%s does not yet support the Nginx/FPM layout. Source files and services are unchanged.\n' "$operation" >&2
+      return 1
+    fi
+    if migrationReadEnvValue "$env_file" "VDM_${env_key}_DOCROOT" root; then
+      case "$root" in ''|.|/var/www/html) ;;
+        *) printf '%s does not yet support a nested document root; use the original site data operation after restoring its root, or transfer it manually.\n' "$operation" >&2; return 1;;
+      esac
+    fi
+  fi
+  # Clone's original copier copies only the project directory. Migration already
+  # archives supported Compose-relative companion files itself.
+  if [ "$operation" = Clone ] && grep -qE "^[[:space:]]*-[[:space:]]*[\"']?[.]/" "$compose_file"; then
+    printf '%s\n' 'Clone cannot yet copy Compose-relative companion mounts. The source is unchanged; use complete project migration for supported companion files.' >&2
+    return 1
+  fi
+  return 0
+}
+
 # clone a complete Joomla container: docker-compose.yml, env values and project folder
 # Only namespace values change (key, env key, sub-domain, domain); the database name,
 # users, passwords and table prefix are copied as they are. The clone is placed in
@@ -2574,12 +2601,13 @@ function cloneJoomlaContainerUnlocked() {
   ##########################
   ### 1. select the source container
   container=$(getSelectedDirectory "Select the container you would like to clone." \
-    "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" '' "Clone ${VDM_CONTAINER_TYPE^} Container") || return 0
+    "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" '' "Clone ${VDM_CONTAINER_TYPE^} Container") || { local selection_status=$?; [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && return 0; return "$selection_status"; }
   # check that we have something, else return to main menu
   [ ${#container} -ge 1 ] || return 0
   isValidDomain "${container}" || return 1
   src_dir="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}"
   src_yml="${src_dir}/docker-compose.yml"
+  requireOriginalJoomlaDataLayout "$container" Clone || return $?
   if [ ! -f "${src_yml}" ]; then
     showError "The (${container}) container has no docker-compose.yml file to clone."
     return 1
@@ -2618,7 +2646,7 @@ The clone needs the env values of the source container."
   ### 3. select the project folder (persistent volume) of the source
   project=$(getSelectedDirectory "Select the project folder (persistent volume) of the (${container}) container.\n\
 [The folder named in its docker-compose.yml is pre-selected]" \
-    "${VDM_PROJECT_PATH}" "${VDM_SRC_PROJECT_FOLDER}" "Select Project Folder") || return 0
+    "${VDM_PROJECT_PATH}" "${VDM_SRC_PROJECT_FOLDER}" "Select Project Folder") || { local selection_status=$?; [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && return 0; return "$selection_status"; }
   if ! isSafeProjectName "${project}" || [ -L "${VDM_PROJECT_PATH}/${project}" ]; then
     showError "Select a direct project directory to clone."
     return 1
@@ -3531,6 +3559,25 @@ function isSafeProjectName() {
 function ensureProjectStopped() {
   local persistent="${1:-}" running_names yml key
   local -a keys=("${persistent}")
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    local project_path="${VDM_PROJECT_PATH}/${persistent}" ids id mounts mount
+    if migrationPathHasSymlink "$project_path"; then
+      showError 'Project operations cannot traverse symbolic links.'
+      return 1
+    fi
+    ids=$(docker ps -q) || return 1
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      mounts=$(docker inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{println .Source}}{{end}}{{end}}' "$id") || return 1
+      while IFS= read -r mount; do
+        [ -n "$mount" ] || continue
+        if [[ "$mount" == "$project_path" || "$mount" == "$project_path/"* || "$project_path" == "$mount/"* ]]; then
+          showError 'A running container uses this project directory. Stop it before changing the files.'
+          return 1
+        fi
+      done <<< "$mounts"
+    done <<< "$ids"
+  fi
   if ! isSafeProjectName "${persistent}" || [ -L "${VDM_PROJECT_PATH}/${persistent}" ]; then
     showError "The project name (${persistent}) must identify a direct project directory."
     return 1
@@ -9479,6 +9526,7 @@ function exportJoomlaMigration() {
     set +x
     umask 077
     local container="$1" archive="$2" source_dir source_yml source_env references name value project_root project key env_key secure
+    requireOriginalJoomlaDataLayout "$container" Migration || exit 1
     local package='' temporary_archive='' clone_lock="${VDM_REPO_PATH}/joomla/.clone.lock" locked=false restart=false result=1
     local locals path actual_image digests db_image='' architecture all_names state id actual_mounts declared_names config_copy=''
     local running_ids=() source_ids=()
@@ -10292,7 +10340,7 @@ function joomla__TRuST__migrate() {
     fi
     if [ "$direction" = push ]; then
       container=$(getSelectedDirectory 'Select the complete Joomla project to package and push.' \
-        "${VDM_REPO_PATH}/joomla/available/" '' 'Migrate Joomla project') || return 0
+        "${VDM_REPO_PATH}/joomla/available/" '' 'Migrate Joomla project') || { local selection_status=$?; [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && return 0; return "$selection_status"; }
     else
       container=$(selectRemoteMigrationProject "$remote") || return 1
     fi
