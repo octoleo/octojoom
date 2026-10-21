@@ -183,6 +183,7 @@ PHP
   VDM_J_REPO=joomla VDM_JV=current
   joomlaRuntimeProbeImage() { printf '{"flavor":"apache","php":"8.3.1"}\n'; }
   getInputYesNo() { return 255; }
+  # shellcheck disable=SC2317 # Cancellation must avoid this indirect setup helper.
   joomlaRuntimeSelectImageForFlavor() { echo 'unexpected flavor selection' >&2; return 1; }
   run joomlaSetupWebChoices
   assert_status 255
@@ -315,4 +316,21 @@ APACHE
   assert_failure
   assert_output_contains 'required webserver mount does not exist'
   refute_file_contains "$STUB_DIR/commands.log" 'docker run '
+}
+
+@test "new FPM custom ownership is checked before setup companion writes" {
+  VDM_CONTAINER_TYPE=joomla VDM_KEY=alpha VDM_ENV_KEY=ALPHA VDM_SUBDOMAIN=alpha VDM_DOMAIN=vdm.dev
+  VDM_J_REPO=joomla VDM_JV=verified-fpm VDM_WEBSERVER=nginx VDM_DOCROOT=.
+  VDM_PUID=1001 VDM_PGID=1001
+  # shellcheck disable=SC2317 # New setup resolves the image before ownership.
+  joomlaRuntimeSelectImageForFlavor() { printf 'joomla:verified-fpm\n'; }
+  # shellcheck disable=SC2317 # Image probe observes its actual initialization IDs.
+  docker() { printf '33:33\n'; }
+  run joomlaSetupWebPrepare
+  assert_status 2
+  assert_output_contains 'requested 1001:1001 would not own the initialized files'
+  refute_file_exists "${VDM_REPO_PATH}/joomla/available/alpha.vdm.dev/nginx.conf"
+  refute_file_exists "${VDM_REPO_PATH}/joomla/available/alpha.vdm.dev/php-fpm-user.conf"
+  run joomlaValidateNewFpmOwnership joomla:verified-fpm 33 33
+  assert_success
 }

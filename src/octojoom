@@ -2508,6 +2508,23 @@ function joomlaRuntimeSelectSetupFlavor() {
   joomlaRuntimeSelectImageForFlavor "$selected" "$flavor"
 }
 
+# The official Joomla FPM entrypoint copies a fresh installation as www-data
+# when started as root; Apache user variables do not change that owner. Pool
+# overrides alone would make a new custom-UID site unable to write its files.
+function joomlaValidateNewFpmOwnership() {
+  local image="$1" requested_uid="$2" requested_gid="$3" ownership
+  [[ "$requested_uid" =~ ^[0-9]+$ && "$requested_gid" =~ ^[0-9]+$ ]] || return 2
+  ownership=$(docker run --rm --network none --read-only --entrypoint sh "$image" -c \
+    'test -d /usr/local/etc/php-fpm.d || exit 1; uid=$(id -u) || exit 1; gid=$(id -g) || exit 1; if [ "$uid" = 0 ]; then uid=$(id -u www-data) || exit 1; gid=$(id -g www-data) || exit 1; fi; printf "%s:%s\n" "$uid" "$gid"') || {
+    printf 'The selected FPM image does not expose a verifiable installation owner.\n' >&2; return 1
+  }
+  if [ "$ownership" != "$requested_uid:$requested_gid" ]; then
+    printf 'New FPM installations use image UID/GID %s; requested %s:%s would not own the initialized files. Use the image IDs or create with Apache first and switch the installed site.\n' \
+      "$ownership" "$requested_uid" "$requested_gid" >&2
+    return 2
+  fi
+}
+
 function joomlaSetupWebPrepare() {
   local dir="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}" root=/var/www/html
   VDM_WEBSERVER="${VDM_WEBSERVER:-apache}" VDM_DOCROOT="${VDM_DOCROOT:-.}"
@@ -2521,11 +2538,13 @@ function joomlaSetupWebPrepare() {
     local selected_image
     selected_image=$(joomlaRuntimeSelectSetupFlavor fpm) || return 1
     VDM_J_REPO="${selected_image%:*}" VDM_JV="${selected_image##*:}"
+    if [ -n "${VDM_PUID:-}${VDM_PGID:-}" ]; then
+      joomlaValidateNewFpmOwnership "$selected_image" "${VDM_PUID:-}" "${VDM_PGID:-}" || return $?
+    fi
     createPrivateDirectory -p "$dir" || return 1
     joomlaNginxConfiguration "joomla${VDM_KEY}" "$root" > "$dir/nginx.conf" || return 1
     if [ -n "${VDM_PUID:-}${VDM_PGID:-}" ]; then
       [[ "${VDM_PUID:-}" =~ ^[0-9]+$ && "${VDM_PGID:-}" =~ ^[0-9]+$ ]] || return 1
-      docker run --rm --entrypoint sh "$selected_image" -c 'test -d /usr/local/etc/php-fpm.d' || return 1
       printf '[www]\nuser = %s\ngroup = %s\n' "$VDM_PUID" "$VDM_PGID" > "$dir/php-fpm-user.conf" || return 1
       chmod 644 "$dir/php-fpm-user.conf" || return 1
       VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 '- "./php-fpm-user.conf:/usr/local/etc/php-fpm.d/zz-octojoom-user.conf:ro"')

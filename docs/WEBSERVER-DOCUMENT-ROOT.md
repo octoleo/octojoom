@@ -134,3 +134,10 @@ is resolved only for parsing; connectivity and application checks run when the
 site is active. Missing includes fail the check. Compose configs/secrets mounts,
 anonymous volumes and volume subpaths require explicit configuration instead
 of this automatic stopped-site check.
+
+For a new FPM installation, an explicit UID/GID must match the image's measured
+installation owner. The official FPM entrypoint initializes files as `www-data`
+when it runs as root; Apache user variables do not change that. A mismatched
+request is rejected before companion files are written. Use the image IDs, or
+create with Apache and then switch the installed site, which retains its file
+ownership and matching FPM pool settings.
