@@ -6159,7 +6159,7 @@ function joomlaPublishedURL() {
 
 function readJoomlaSiteFacts() {
   local site="${1:-}" service block image config='' proxy='' candidate mount relative='.' value ids row
-  local state health configured=0 running=0 stopped=0 unavailable=0 unhealthy=0 healthy=0
+  local state health configured=0 expected=0 running=0 stopped_count=0 unavailable=0 unhealthy=0 healthy=0
   resolveJoomlaSite "$site" || return 1
   # Public context also consumed by PHP, webserver and alignment actions.
   # shellcheck disable=SC2034
@@ -6257,7 +6257,7 @@ function readJoomlaSiteFacts() {
   fi
   case "$relative" in
     ''|.) relative='' ;;
-    /*|..|../*|*/../*|*/..) relative=invalid ;;
+    /*|..|../*|*/../*|*/..|*\\*) relative=invalid ;;
   esac
   if [ "$relative" != invalid ] && [ -n "$VDM_SITE_MOUNT_TARGET" ]; then
     VDM_SITE_DOCROOT="${VDM_SITE_MOUNT_TARGET%/}${relative:+/$relative}"
@@ -6285,32 +6285,54 @@ function readJoomlaSiteFacts() {
     case "$image" in
       *phpmyadmin*|*adminer*) VDM_SITE_VIEWER_URL="$candidate" ;;
       *mailcatcher*|*mailpit*|*mailhog*) VDM_SITE_MAIL_URL="$candidate" ;;
-      *nginx*) [ -z "$candidate" ] || VDM_SITE_URL="$candidate"; VDM_SITE_WEBSERVER=nginx ;;
+      *nginx*)
+        # An unrelated Nginx service must not replace this website's route. The
+        # HTTP companion shares its root and depends on the selected PHP service.
+        if [ "$service" = "$VDM_SITE_SERVICE" ] ||
+          { [ -n "$config" ] && printf '%s' "$config" | jq -e --arg s "$service" --arg web "$VDM_SITE_SERVICE" \
+            --arg source "$VDM_SITE_MOUNT_SOURCE" --arg target "$VDM_SITE_MOUNT_TARGET" '
+            (.services[$s].depends_on[$web] != null) and
+            any(.services[$s].volumes[]?; .source==$source and .target==$target)' >/dev/null 2>&1; } ||
+          { [ -z "$config" ] && [ -n "$VDM_SITE_KEY" ] && [ "$service" = "nginx${VDM_SITE_KEY}" ]; }; then
+          [ -z "$candidate" ] || VDM_SITE_URL="$candidate"
+          VDM_SITE_WEBSERVER=nginx
+        fi
+        ;;
       *) [ "$service" != "$VDM_SITE_SERVICE" ] || [ -z "$candidate" ] || VDM_SITE_URL="$candidate" ;;
     esac
   done <<< "$VDM_SITE_SERVICES"
   [ -z "$VDM_SITE_URL" ] || VDM_SITE_ADMIN_URL="${VDM_SITE_URL}/administrator/"
+  if [ -n "$config" ]; then
+    expected=$(printf '%s' "$config" | jq '[.services[] | select((.profiles // [] | length)==0)] | length')
+  else
+    while IFS= read -r service; do [ -z "$service" ] || expected=$((expected + 1)); done <<< "$VDM_SITE_SERVICES"
+  fi
   if ids=$(joomlaSiteCompose "$site" ps --all --quiet 2>/dev/null); then
-    VDM_SITE_RUNNING=stopped VDM_SITE_HEALTH=not-defined
+    VDM_SITE_RUNNING=stopped VDM_SITE_HEALTH='not-running'
     while IFS= read -r candidate; do
       [ -n "$candidate" ] || continue
       row=$(docker inspect --format '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}not-defined{{end}}|{{.Config.Image}}|{{.Image}}|{{index .Config.Labels "com.docker.compose.service"}}' "$candidate" 2>/dev/null) || { unavailable=$((unavailable + 1)); continue; }
       IFS='|' read -r state health image value service <<< "$row"
       [ -n "$state" ] || { unavailable=$((unavailable + 1)); continue; }
-      if [ "$state" = running ]; then running=$((running + 1)); else stopped=$((stopped + 1)); fi
-      [ "$health" != unhealthy ] || unhealthy=$((unhealthy + 1))
-      [ "$health" != healthy ] || healthy=$((healthy + 1))
+      if [ "$state" = running ]; then
+        running=$((running + 1))
+        [ "$health" != unhealthy ] || unhealthy=$((unhealthy + 1))
+        [ "$health" != healthy ] || healthy=$((healthy + 1))
+      else stopped_count=$((stopped_count + 1)); fi
       VDM_SITE_SERVICE_STATES+="${service}: ${state} (${health})"$'\n'
       if [ "$service" = "$VDM_SITE_SERVICE" ]; then
         VDM_SITE_RUNTIME_IMAGE="$image" VDM_SITE_IMAGE_DIGEST="$value"
       fi
     done <<< "$ids"
     if [ "$unavailable" -gt 0 ]; then VDM_SITE_RUNNING=unavailable VDM_SITE_HEALTH=unavailable
-    elif [ "$running" -gt 0 ] && [ "$stopped" -gt 0 ]; then VDM_SITE_RUNNING=partial
+    elif [ "$running" -gt 0 ] && { [ "$stopped_count" -gt 0 ] || [ "$running" -lt "$expected" ]; }; then VDM_SITE_RUNNING=partial
     elif [ "$running" -gt 0 ]; then VDM_SITE_RUNNING=running
     fi
     if [ "$unhealthy" -gt 0 ]; then VDM_SITE_HEALTH=unhealthy
-    elif [ "$healthy" -gt 0 ]; then VDM_SITE_HEALTH=healthy
+    elif [ "$VDM_SITE_RUNNING" = unavailable ]; then VDM_SITE_HEALTH=unavailable
+    elif [ "$healthy" -eq "$running" ] && [ "$running" -ge "$expected" ] && [ "$stopped_count" -eq 0 ] && [ "$running" -gt 0 ]; then VDM_SITE_HEALTH=healthy
+    elif [ "$healthy" -gt 0 ]; then VDM_SITE_HEALTH='partially-checked'
+    elif [ "$running" -gt 0 ]; then VDM_SITE_HEALTH='not-defined'
     fi
   fi
   if [ -n "$VDM_SITE_HOST_PATH" ] && [ -r "$VDM_SITE_HOST_PATH/administrator/manifests/files/joomla.xml" ]; then

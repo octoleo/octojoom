@@ -291,3 +291,46 @@ HOOK
   refute_command '^sudo'
   [ ! -s "${STUB_DIR}/dialogs.log" ]
 }
+
+@test "unrelated Nginx service does not replace the Joomla website URL or server" {
+  command -v jq >/dev/null 2>&1 || skip 'optional jq is unavailable'
+  make_joomla_container alpha ALPHA first
+  hook_command docker <<'HOOK'
+case "$*" in
+  *'config --format json')
+    printf '{"services":{"app":{"image":"joomla:php8.4-apache","volumes":[{"type":"volume","source":"siteweb","target":"/var/www/html"}],"ports":[{"host_ip":"127.0.0.1","published":"8081","target":80}]},"zdocs":{"image":"nginx:stable-alpine","volumes":[{"type":"volume","source":"docs","target":"/var/www/html"}],"ports":[{"host_ip":"127.0.0.1","published":"8082","target":80}]}}}'
+    exit 0 ;;
+esac
+HOOK
+  readJoomlaSiteFacts first.vdm.dev
+  assert_equal "$VDM_SITE_URL" http://127.0.0.1:8081
+  assert_equal "$VDM_SITE_WEBSERVER" apache
+}
+
+@test "Nginx companion serving the Joomla mount supplies its HTTP URL" {
+  command -v jq >/dev/null 2>&1 || skip 'optional jq is unavailable'
+  make_joomla_container alpha ALPHA first
+  hook_command docker <<'HOOK'
+case "$*" in
+  *'config --format json')
+    printf '{"services":{"app":{"image":"joomla:php8.4-fpm","volumes":[{"type":"volume","source":"siteweb","target":"/var/www/html"}]},"http":{"image":"nginx:stable-alpine","depends_on":{"app":{"condition":"service_healthy"}},"volumes":[{"type":"volume","source":"siteweb","target":"/var/www/html","read_only":true}],"ports":[{"host_ip":"127.0.0.1","published":"8091","target":80}]}}}'
+    exit 0 ;;
+esac
+HOOK
+  readJoomlaSiteFacts first.vdm.dev
+  assert_equal "$VDM_SITE_URL" http://127.0.0.1:8091
+  assert_equal "$VDM_SITE_WEBSERVER" nginx
+}
+
+@test "configured but absent services are partial and do not produce healthy website status" {
+  make_joomla_container alpha ALPHA first
+  hook_command docker <<'HOOK'
+case "$*" in
+  *' ps --all --quiet') printf 'dbid\n'; exit 0 ;;
+  'inspect '*dbid) printf 'running|healthy|mariadb:latest|sha256:def|mariadbalpha\n'; exit 0 ;;
+esac
+HOOK
+  readJoomlaSiteFacts first.vdm.dev
+  assert_equal "$VDM_SITE_RUNNING" partial
+  assert_equal "$VDM_SITE_HEALTH" partially-checked
+}
