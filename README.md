@@ -23,11 +23,25 @@
 
 ---
 
-## Commands and automatic completion
+## Command and site-management guides
 
-The original menu and `--type`/`--task` commands share their operations.
-Use `--non-interactive` for automation, optional JSON request/result transport,
-and automatically installed Bash completion. See [command coverage and examples](docs/COMMANDS.md).
+The original menu and `--type`/`--task` commands share their operations. Octojoom
+remains one Bash executable using the existing Compose files, environment
+settings, and persistent project directories.
+
+| Guide | What it covers |
+| --- | --- |
+| [1. Commands and completion](docs/COMMANDS.md) | Noninteractive commands, optional JSON requests/results, Bash completion, and menu-to-command coverage |
+| [2. Website information](docs/SITE-INFORMATION.md) | Select a site, inspect its configuration and running state, and manage it from one screen or command |
+| [3. Setup and defaults](docs/SETUP-DEFAULTS.md) | Guided single and bulk setup, optional customization, and explicit saved defaults |
+| [4. Configuration alignment](docs/CONFIGURATION-ALIGNMENT.md) | Inspect and align existing sites without changing their intended Compose behavior |
+| [5. PHP runtime](docs/PHP-RUNTIME.md) | Select compatible published PHP images and change settings for one site |
+| [6. Webserver and document root](docs/WEBSERVER-DOCUMENT-ROOT.md) | Switch Apache/Nginx and select or explicitly move a site's document root |
+
+See [test coverage and validation limits](tests/README.md) for the portable suite
+and real Docker acceptance checks. Clone and complete project migration
+currently require the original Apache document-root layout; they refuse nested
+roots and Nginx/FPM sites before changing source data or services.
 
 ## 📚 Table of Contents
 
@@ -93,7 +107,12 @@ Ensure the following are installed before running Octojoom:
 | **curl** | any | Downloads resources |
 | **awk** | any | Text parsing |
 | **whiptail / newt** | any | Interactive menus |
-| **Docker Engine & Docker Compose** | latest | Container runtime |
+| **Docker Engine & Docker Compose** | Compose v2 | Container runtime |
+| **jq** | any | JSON requests/results and structured PHP/webserver runtime operations |
+
+`whiptail` is used for the interactive menus. Fully supplied noninteractive
+commands do not open dialogs or install missing dependencies; ordinary commands
+that do not need JSON or structured runtime inspection can run without `jq`.
 
 ---
 

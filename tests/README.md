@@ -12,6 +12,14 @@ Run one area while developing:
 bash tests/run.sh tests/unit/cli-menus.bats
 ```
 
+Run the command and site-management suites together:
+
+```bash
+bash tests/run.sh tests/unit/cli-automation.bats tests/unit/cli-existing-operations.bats \
+  tests/unit/site-information.bats tests/unit/setup-defaults.bats \
+  tests/unit/site-alignment.bats tests/unit/php-runtime.bats tests/unit/webserver-docroot.bats
+```
+
 Run the migration suites together:
 
 ```bash
@@ -32,8 +40,16 @@ On Linux, installed Docker Compose also validates generated configuration.
 | Area | What the tests check |
 | --- | --- |
 | CLI and menus | Option forms, missing values, dispatch, cancellation, exit status, and configured paths |
+| Command automation | No-dialog execution, early input validation, literal JSON arguments, explicit false/empty values, JSON envelopes, and menu-operation parity |
+| Bash discovery | Local-only completion, idempotent installation/removal, fresh-shell activation, login-file precedence, and existing startup-file preservation |
+| Expert configuration | Effective per-site ENV, validated replacement, stable Compose project identity, original running-state discovery, stopped-site preservation, and rollback |
+| Website information | Enabled versus running state, unavailable Docker, site facts and routes, secret exclusion, selected-site actions, and bind/named-volume paths |
 | Configuration and dialogs | Secret persistence, literal input, permissions, validation, random values, and prompt cancellation |
 | Joomla setup | Single and bulk deployment, generated Compose, environment values, persistence, and feature options |
+| Guided setup and defaults | One customization fork, saved-default precedence, manual versus automatic installation, headless preflight, and staged publication failures |
+| Configuration alignment | Effective Compose equivalence, complete scoped ENV, custom-field preservation, idempotence, per-site batch failure reporting, and recoverable publication |
+| PHP runtime | Published-tag compatibility, measured runtime checks, selective INI changes, custom-directive preservation, stopped-site handling, and rollback |
+| Webserver and document root | Apache/Nginx configuration, companion mounts, routing preservation, supported root selection/moves, custom-layout refusal, and failed-change recovery |
 | Lifecycle | Enable, disable, edit, start, stop, delete, clone, permission repair, and failure preservation |
 | OpenSSH | Configuration, public keys, user settings, and lifecycle |
 | Traefik and Portainer | Templates, networks, setup, certificate storage, and lifecycle |
@@ -67,13 +83,24 @@ Separate Ubuntu CI jobs also run:
 ```bash
 bash tests/integration/clone.sh
 bash tests/integration/migration.sh
+bash tests/integration/php-runtime.sh
+bash tests/integration/web-runtime.sh
 ```
 
 These need Linux, a running Docker daemon, Docker Compose v2, network access to
 the official images, and root or passwordless sudo for container-owned bind
-mounts. Migration also requires GNU tar and gzip. Both scripts create
-temporary, uniquely labeled resources and remove those resources on exit.
-They never prune the daemon or its images.
+mounts. Migration also requires GNU tar and gzip; PHP and web runtime checks
+require `jq`, `curl`, and `sha256sum`. The scripts create temporary, uniquely
+named or labeled resources and remove their own resources on exit. They never
+prune the daemon or its images. PHP and web checks publish only ephemeral
+loopback HTTP ports.
+
+| CI job | Script | Real acceptance scope |
+| --- | --- | --- |
+| Docker clone integration | `clone.sh` | Cold database copy and independent cloned website/database |
+| Docker migration integration | `migration.sh` | Complete archive, destination realignment, source preservation, and independent destination writes |
+| Docker PHP runtime integration | `php-runtime.sh` | Published PHP-image change, effective INI values, unchanged installed-version fixture/database, and rejected-candidate preservation |
+| Docker web runtime integration | `web-runtime.sh` | Real Joomla installation, Apache/Nginx round trip, nested-root move, frontend/admin/SEF/API/assets, and preserved site data |
 
 The clone test checks a real cold database copy and confirms Apache/PHP in the
 cloned Joomla image can use its independent database after the source database
@@ -98,11 +125,28 @@ verifies the following against real Joomla/PHP and MariaDB containers:
 - Source website hashes, Compose, environment values, and database marker are
   unchanged by destination import and writes.
 
-Both use minimal JConfig/SQL fixtures. They do not run Joomla's installer,
-public routing, certificate issuance, or a real SSH transport. The portable
-flow tests verify push/pull orchestration with command stand-ins; destination
-activation tests simulate proxy, health, and HTTP/HTTPS failures. Deployment
-acceptance still needs the intended hosts, proxy, DNS, and extension settings.
+Clone and migration use minimal JConfig/SQL fixtures. The PHP runtime test
+also uses a minimal application/configuration/database fixture, with the image's
+Joomla manifest: it verifies a compatible published PHP change without changing
+that installed-version marker or database container, then measures effective
+INI settings and checks rejected-candidate preservation. These three tests do
+not run Joomla's installer or exercise a complete Joomla extension stack.
+
+The web runtime test invokes headless setup and the real Joomla installer. It
+checks the frontend, an administrator login with a real CSRF token/cookie flow,
+a rewritten SEF route, API JSON responses (including legitimate authentication
+errors), static assets, and an uploaded file. It switches Apache to Nginx/FPM,
+stops the site for an explicitly requested bind-mount move to a nested root,
+then switches back to Apache. Installed Joomla and PHP versions, site files,
+the database container, and a database marker must survive these changes.
+The real root-move fixture uses bind storage; named-volume root handling has
+portable coverage, not equivalent real-Docker move acceptance.
+
+None of these scripts proves public proxy routing, DNS, browser certificate
+trust, ACME issuance, or real SSH transport. The portable flow tests verify
+push/pull orchestration with command stand-ins; destination activation tests
+simulate proxy, health, and HTTP/HTTPS failures. Deployment acceptance still
+needs the intended hosts, proxy, DNS, and extension settings.
 
 ## Validation limits
 
@@ -124,7 +168,12 @@ the source and write the destination. Ownership and permission changes can
 require noninteractive sudo on the remote host. A failed publication retains
 the previous destination or reports the retained recovery backup.
 Joomla clone supports the generated bind-mount layout and refuses
-layouts it cannot rewrite safely, including Docker named-volume clones.
+layouts it cannot rewrite safely, including Docker named-volume clones,
+site-specific alternate project bases, and Compose-relative companion mounts.
+Complete migration can carry its supported companion files and destination
+project paths. Both clone and complete migration currently refuse Nginx/FPM
+sites and configured nested document roots before changing source files or
+services. The newer runtime/root controls do not extend those data-copy formats.
 Clones and complete migrations share a lock per Joomla repository. An
 interrupted process can leave `joomla/.clone.lock`; remove that empty directory
 only after verifying that no clone or migration is running. Other interactive operations share progress files;
@@ -136,8 +185,13 @@ legacy action; use complete Joomla migration to package them together with
 project-scoped values. Complete-migration failures/cancellation may retain
 credential-bearing recovery archives. Check the reported paths and destination
 state before retrying, then clean up archives after recovery.
-PHP overrides currently require a host `www-data` account or explicit numeric
-container UID/GID values. Validate those IDs for macOS and custom images.
+The selected-site PHP runtime controls measure the image's scan directory and
+effective configuration. Custom images and arbitrary Apache rules still need
+compatible runtime/layout checks; Nginx conversion cannot infer an equivalent
+for custom `.htaccess` rules and requires an explicit supported configuration.
+Document-root file moves are explicit and limited to supported stopped bind
+storage. Validate ownership and image-user IDs on the intended host, especially
+for macOS and custom images.
 Windows Git Bash does not enforce Unix permission bits. Protect configuration,
 credentials, and SSH directories with NTFS access controls for the deployment
 account; restrictive Unix modes in the portable tests do not verify those ACLs.
@@ -150,5 +204,7 @@ Docker packages and Compose manually before using Octojoom there.
 
 Passing workflows only block merge when branch protection requires them.
 Require `ShellCheck`, `Tests (ubuntu-latest)`, `Tests (macos-latest)`,
-`Tests (windows-latest)`, `Docker clone integration`, and
-`Docker migration integration` on protected branches.
+`Tests (windows-latest)`, `Docker clone integration`,
+`Docker migration integration`, `Docker PHP runtime integration`, and
+`Docker web runtime integration` on protected branches. A portable-suite pass
+alone does not establish the real-Docker acceptance results.
