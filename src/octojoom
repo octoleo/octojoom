@@ -6486,14 +6486,18 @@ function joomla__TRuST__exec() {
   (
     readJoomlaSiteFacts "${VDM_CONTAINER:-}" || exit 1
     local service="${VDM_SERVICE:-$VDM_SITE_SERVICE}"
+    local -a arguments=(exec -T)
     [ "${#OCTOJOOM_ARGS[@]}" -gt 0 ] || { printf 'Supply a native command after --.\n' >&2; exit 17; }
-    [[ -n "$service" && -n "$VDM_SITE_DOCROOT" ]] || {
-      printf 'Cannot resolve the website service and document root.\n' >&2; exit 1;
-    }
+    [ -n "$service" ] || { printf 'Cannot resolve the selected service.\n' >&2; exit 1; }
     printf '%s\n' "$VDM_SITE_SERVICES" | grep -qxF -- "$service" || {
       printf 'Unknown service: %s\n' "$service" >&2; exit 1;
     }
-    joomlaSiteCompose "$VDM_SITE_NAME" exec -T --workdir "$VDM_SITE_DOCROOT" "$service" "${OCTOJOOM_ARGS[@]}"
+    if [ "$service" = "$VDM_SITE_SERVICE" ]; then
+      [ -n "$VDM_SITE_DOCROOT" ] || { printf 'Cannot resolve the website document root.\n' >&2; exit 1; }
+      arguments+=(--workdir "$VDM_SITE_DOCROOT")
+    fi
+    # Database and companion services retain their own image's working directory.
+    joomlaSiteCompose "$VDM_SITE_NAME" "${arguments[@]}" "$service" "${OCTOJOOM_ARGS[@]}"
   )
 }
 

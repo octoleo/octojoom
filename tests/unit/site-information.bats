@@ -334,3 +334,13 @@ HOOK
   assert_equal "$VDM_SITE_RUNNING" partial
   assert_equal "$VDM_SITE_HEALTH" partially-checked
 }
+
+@test "native exec keeps a non-web service's own working directory" {
+  make_joomla_container alpha ALPHA first
+  VDM_CONTAINER=first.vdm.dev VDM_SERVICE=mariadbalpha
+  OCTOJOOM_ARGS=(mariadb --version)
+  run joomla__TRuST__exec
+  assert_success
+  assert_command '^docker compose .* exec -T mariadbalpha mariadb --version$'
+  refute_command '^docker compose .*exec -T --workdir .*mariadbalpha'
+}
