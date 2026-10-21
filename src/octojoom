@@ -905,6 +905,7 @@ function joomlaSetupPreflight() {
   done
   if [ -f "$shared" ]; then (loadEnvFile "$shared") || return 12; fi
   joomlaValidateSetupOptions || return $?
+  if [ "${VDM_AUTO_INSTALL:-false}" = true ]; then joomlaSetupDatabasePrefix >/dev/null || return $?; fi
   for suffix in DB DB_USER DB_PASS DB_ROOT; do
     case "$suffix" in DB) request=vdm_database_name ;; DB_USER) request=vdm_database_user ;; DB_PASS) request=vdm_database_pass ;; DB_ROOT) request=vdm_database_rootpass ;; esac
     saved=''
@@ -924,6 +925,7 @@ function joomlaSetupPreflight() {
 function joomlaValidateSetupOptions() {
   local name item
   local -a items=()
+  if [ "${VDM_J_DB_PREFIX+x}" = x ]; then joomlaValidateDatabasePrefix "$VDM_J_DB_PREFIX" || return $?; fi
   for name in VDM_AUTO_INSTALL VDM_ENABLE VDM_CUSTOMIZE VDM_SECURE VDM_SECURE_CLOUDFLARE VDM_MAILCATCHER VDM_PERSISTENCE VDM_DB_PERSISTENCE VDM_PHPMYADMIN VDM_SAVE_DEFAULTS VDM_PHP_SETTINGS; do
     [ "${!name+x}" != x ] || case "${!name}" in true|false) ;; *) printf 'ERROR: %s must be true or false.\n' "$name" >&2; return 17 ;; esac
   done
@@ -981,6 +983,26 @@ function joomlaValidateSetupOptions() {
     done
   fi
   return 0
+}
+
+# Joomla's installer accepts at most 15 ASCII letters, digits or underscores,
+# with a leading letter. Preserve requested/saved prefixes exactly; shorten
+# only the generated default, reserving one character for its final underscore.
+function joomlaValidateDatabasePrefix() {
+  [[ "$1" =~ ^[a-zA-Z][a-zA-Z0-9_]{0,14}$ ]] || {
+    printf 'ERROR: --db-prefix must start with a letter and contain at most 15 letters, digits or underscores.\n' >&2
+    return 17
+  }
+}
+
+function joomlaSetupDatabasePrefix() {
+  local prefix variable="VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_PREFIX" shared="${VDM_REPO_PATH}/joomla/.env"
+  if [ "${VDM_J_DB_PREFIX+x}" = x ]; then prefix="$VDM_J_DB_PREFIX"
+  elif [ -f "$shared" ] && migrationReadEnvValue "$shared" "$variable" prefix; then :
+  elif [ "${!variable+x}" = x ]; then prefix="${!variable}"
+  else prefix="${VDM_KEY:0:14}_"; fi
+  joomlaValidateDatabasePrefix "$prefix" || return $?
+  printf '%s\n' "$prefix"
 }
 
 function joomlaBulkPreflight() {
@@ -1379,7 +1401,9 @@ function joomla__TRuST__setup() {
     if [ "${VDM_AUTO_INSTALL:-false}" = true ] && [[ -n "${VDM_J_EMAIL}" ]]; then
       # add extra Joomla envs
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_TYPE=\"mysqli\"" || return $?
-      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_PREFIX=\"${VDM_KEY}_\"" || return $?
+      local database_prefix
+      database_prefix=$(joomlaSetupDatabasePrefix) || return $?
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_PREFIX=\"${database_prefix}\"" || return $?
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_SITE_NAME=\"${VDM_J_SITE_NAME}\"" || return $?
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USERNAME=\"${VDM_J_USERNAME}\"" || return $?
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USER=\"${VDM_J_USER}\"" || return $?
@@ -2677,7 +2701,9 @@ function joomla__TRuST__bulk() {
     if $enable_autodeploy; then
       # add extra Joomla envs
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_TYPE=\"mysqli\"" || return $?
-      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_PREFIX=\"${VDM_KEY}_\"" || return $?
+      local database_prefix
+      database_prefix=$(joomlaSetupDatabasePrefix) || return $?
+      setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_PREFIX=\"${database_prefix}\"" || return $?
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_SITE_NAME=\"${VDM_J_SITE_NAME} ${i}\"" || return $?
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USERNAME=\"${VDM_J_USERNAME}\"" || return $?
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_ADMIN_USER=\"${VDM_J_USER}\"" || return $?
@@ -10767,7 +10793,7 @@ Usage: octojoom [OPTION...]
 Setup: --key/-k, --env-key/-e, --domain/-d, --sub-domain/-s,
        --image-source, --image-tag/--joomla-version/-j, --enable BOOL,
        --customize BOOL, --auto-install BOOL, --save-defaults BOOL.
-Credentials: --db-name, --db-user, --db-password, --db-root-password,
+Credentials: --db-name, --db-user, --db-password, --db-root-password, --db-prefix,
        --admin-email, --admin-password, --site-name, --admin-user,
        --admin-username. Protected JSON files/stdin avoid shell history.
 OpenSSH: --username/-u, --port/-p, --uid, --gid, --ssh-keys,
@@ -12247,6 +12273,7 @@ function cliOptionVariable() {
     -t|--time-zone) echo VDM_TZ;; --repo-path) echo VDM_REPO_PATH;; --project-path) echo VDM_PROJECT_PATH;;
     --db-name) echo vdm_database_name;; --db-user) echo vdm_database_user;;
     --db-password) echo vdm_database_pass;; --db-root-password) echo vdm_database_rootpass;;
+    --db-prefix) echo VDM_J_DB_PREFIX;;
     --auto-install) echo VDM_AUTO_INSTALL;; --enable) echo VDM_ENABLE;;
     --customize) echo VDM_CUSTOMIZE;; --persistence) echo VDM_PERSISTENCE;;
     --db-persistence) echo VDM_DB_PERSISTENCE;; --mailcatcher) echo VDM_MAILCATCHER;;

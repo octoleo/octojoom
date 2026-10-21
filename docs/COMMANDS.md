@@ -126,7 +126,7 @@ Each new feature extends these same handlers and completion discovery.
 | Uninstall | `--uninstall` or `settings uninstall` | `--action script|complete|selected`; separate `--remove-deployments`, `--remove-config`, `--remove-data` booleans | Existing path protections; data removal requires its own explicit true choice |
 
 Setup credentials/settings include `--db-name`, `--db-user`, `--db-password`,
-`--db-root-password`, `--site-name`, `--admin-user`, `--admin-username`,
+`--db-root-password`, `--db-prefix`, `--site-name`, `--admin-user`, `--admin-username`,
 `--admin-email`, `--admin-password`, `--extensions`, `--commands`, `--mailcatcher`,
 `--phpmyadmin`, `--persistence`, `--db-persistence`, and `--save-defaults`.
 PHP setting flags are `--memory-limit`, `--max-execution-time`,

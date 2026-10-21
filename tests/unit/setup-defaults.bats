@@ -225,3 +225,51 @@ headless_setup() {
   assert_status 17
   refute_file_exists "${VDM_REPO_PATH}/joomla/.env"
 }
+
+@test "setup: long project keys produce installer-compatible table prefixes" {
+  headless_setup
+  VDM_KEY=abcdefghijklmnopq
+  VDM_AUTO_INSTALL=true
+  VDM_J_EMAIL=admin@example.test
+  VDM_J_PASSWORD=secret-supplied-for-install
+  run joomla__TRuST__setup
+  assert_success
+  assert_file_contains "${VDM_REPO_PATH}/joomla/.env" 'VDM_ABCDEFGHIJKLMNOPQ_JOOMLA_DB_PREFIX="abcdefghijklmn_"'
+}
+
+@test "setup: an existing scoped table prefix is preserved exactly" {
+  make_joomla_container bravo BRAVO bravo
+  printf '%s\n' 'VDM_BRAVO_JOOMLA_DB_PREFIX="Legacy7_"' >> "${VDM_REPO_PATH}/joomla/.env"
+  headless_setup
+  VDM_ENV_KEY=BRAVO
+  VDM_AUTO_INSTALL=true
+  VDM_J_EMAIL=admin@example.test
+  VDM_J_PASSWORD=secret-supplied-for-install
+  run joomla__TRuST__setup
+  assert_success
+  assert_file_contains "${VDM_REPO_PATH}/joomla/.env" 'VDM_BRAVO_JOOMLA_DB_PREFIX="Legacy7_"'
+}
+
+@test "setup: an explicit bulk table prefix reaches every separate database" {
+  headless_setup
+  parseCLI --db-prefix Chosen9_ --non-interactive
+  VDM_TASK=bulk
+  VDM_SUBDOMAIN=website
+  VDM_NUMBER_CONTAINERS=2
+  VDM_AUTO_INSTALL=true
+  VDM_J_EMAIL=admin@example.test
+  VDM_J_PASSWORD=secret-supplied-for-install
+  run joomla__TRuST__bulk
+  assert_success
+  [ "$(grep -c 'JOOMLA_DB_PREFIX="Chosen9_"' "${VDM_REPO_PATH}/joomla/.env")" -eq 2 ]
+}
+
+@test "setup: invalid explicit table prefixes fail before first-run filesystem changes" {
+  local prefix fresh="$SANDBOX/new-home"
+  for prefix in abcdefghijklmnop 9prefix_ invalid-prefix; do
+    run env OCTOJOOM_HOME="$fresh" bash "$OCTOJOOM_SCRIPT" --type joomla --task setup \
+      --key alpha --domain example.test --db-prefix "$prefix" --non-interactive
+    assert_status 17
+    refute_file_exists "$fresh"
+  done
+}

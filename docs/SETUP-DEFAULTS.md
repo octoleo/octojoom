@@ -41,6 +41,13 @@ them in shell history. Explicit false and empty optional extension/command
 values stay explicit. The command transport and result format are documented in
 the command guide.
 
+Automatic installation derives its database table prefix from the first 14
+characters of the project key plus an underscore. `--db-prefix` supplies an
+exact prefix; an existing scoped prefix is otherwise preserved. Prefixes must
+start with a letter and contain at most 15 letters, digits or underscores.
+Invalid explicit prefixes fail before setup creates files. In bulk setup an
+explicit prefix applies to every site's separate database.
+
 Missing identity, invalid options and conflicting shared database credentials
 are rejected before first-run directory creation in noninteractive mode. A
 shared environment key can be reused with the same database credentials. Use a
