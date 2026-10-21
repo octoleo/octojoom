@@ -136,6 +136,7 @@ setup() {
 
 @test "explicit root move includes dotfiles and can be reversed without overwrite" {
   VDM_SITE_COMPOSE="$compose"
+  # shellcheck disable=SC2317 # Called indirectly while checking other sites.
   readJoomlaSiteFacts() { return 1; }
   base="${VDM_PROJECT_PATH}/alpha/joomla"
   printf '<?php\n' > "$base/index.php"
@@ -187,4 +188,53 @@ PHP
   assert_status 255
   refute_output_contains 'unexpected flavor selection'
   refute_file_exists "${VDM_REPO_PATH}/joomla/available/alpha.vdm.dev/nginx.conf"
+}
+
+@test "explicit root move refuses symlink ancestors before creating outside directories" {
+  skip_on_windows 'symlink creation requires privileges on Windows'
+  VDM_SITE_COMPOSE="$compose"
+  # shellcheck disable=SC2317 # Called indirectly while checking other sites.
+  readJoomlaSiteFacts() { return 1; }
+  base="${VDM_PROJECT_PATH}/alpha/joomla"
+  mkdir -p "$base/source" "$work/outside"
+  printf '<?php\n' > "$base/source/index.php"
+  printf '<?php class JConfig {}\n' > "$base/source/configuration.php"
+  ln -s "$work/outside" "$base/link"
+  run joomlaMoveDocumentRoot "$base/source" "$base/link/new/deeper" "$base"
+  assert_failure
+  assert_output_contains 'symlinked paths'
+  refute_file_exists "$work/outside/new"
+  assert_file_exists "$base/source/index.php"
+  assert_file_exists "$base/source/configuration.php"
+}
+
+@test "Apache root changes preserve custom directives and unrelated directory sections" {
+  joomlaApacheConfiguration /var/www/html > "$work/apache.conf"
+  cat >> "$work/apache.conf" <<'APACHE'
+# Locally maintained hardening.
+Header always set X-Content-Type-Options nosniff
+<Directory "/private/assets">
+    Require all denied
+</Directory>
+APACHE
+  cp "$work/apache.conf" "$work/original.conf"
+  joomlaStageApacheConfiguration "$work/apache.conf" "$work/changed.conf" /var/www/html/site
+  assert_file_contains "$work/changed.conf" 'DocumentRoot "/var/www/html/site"'
+  assert_file_contains "$work/changed.conf" '<Directory "/var/www/html/site">'
+  assert_file_contains "$work/changed.conf" 'Header always set X-Content-Type-Options nosniff'
+  assert_file_contains "$work/changed.conf" '<Directory "/private/assets">'
+  joomlaStageApacheConfiguration "$work/changed.conf" "$work/restored.conf" /var/www/html
+  cmp "$work/original.conf" "$work/restored.conf"
+}
+
+@test "Apache root changes refuse ambiguous vhosts and unrecognized companions" {
+  joomlaApacheConfiguration /var/www/html > "$work/apache.conf"
+  printf 'DocumentRoot "/another/site"\n' >> "$work/apache.conf"
+  run joomlaStageApacheConfiguration "$work/apache.conf" "$work/changed.conf" /var/www/html/site
+  assert_failure
+  assert_output_contains 'ambiguous'
+  printf 'DocumentRoot "/custom/site"\n' > "$work/custom.conf"
+  run joomlaStageApacheConfiguration "$work/custom.conf" "$work/changed.conf" /var/www/html/site
+  assert_failure
+  assert_output_contains 'edited explicitly'
 }

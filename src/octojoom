@@ -1793,6 +1793,47 @@ function joomlaApacheConfiguration() {
 EOF_APACHE
 }
 
+# Keep custom Apache directives when updating the two paths we generated.
+# Unrecognized vhosts must be edited explicitly rather than overwritten.
+function joomlaStageApacheConfiguration() {
+  local source="$1" destination="$2" root="$3"
+  [[ "$root" =~ ^/[A-Za-z0-9_./-]+$ ]] || return 1
+  if [ ! -e "$source" ] && [ ! -L "$source" ]; then
+    joomlaApacheConfiguration "$root" > "$destination"
+    return $?
+  fi
+  if [ ! -f "$source" ] || [ -L "$source" ] || ! grep -qF '# Octojoom Joomla document root.' "$source"; then
+    printf 'Custom Apache configuration must have its DocumentRoot and Directory paths edited explicitly.\n' >&2
+    return 1
+  fi
+  awk -v root="$root" '
+    FNR==NR {
+      if(tolower($0) ~ /^[[:space:]]*documentroot[[:space:]]+/) {
+        count++
+        if($0 !~ /^[[:space:]]*DocumentRoot "\/[^"]+"[[:space:]]*$/) invalid=1
+        old=$0; sub(/^[[:space:]]*DocumentRoot "/,"",old); sub(/"[[:space:]]*$/,"",old)
+      }
+      next
+    }
+    FNR==1 {if(count!=1 || invalid) exit 1}
+    /^[[:space:]]*DocumentRoot / {
+      at=index($0,old); print substr($0,1,at-1) root substr($0,at+length(old)); next
+    }
+    /^[[:space:]]*<Directory "[^"]+">[[:space:]]*$/ {
+      path=$0; sub(/^[[:space:]]*<Directory "/,"",path); sub(/">[[:space:]]*$/,"",path)
+      if(path==old) {
+        directories++; at=index($0,old)
+        print substr($0,1,at-1) root substr($0,at+length(old)); next
+      }
+    }
+    {print}
+    END {if(count!=1 || invalid || directories!=1) exit 1}
+  ' "$source" "$source" > "$destination" || {
+    printf 'Apache configuration has ambiguous document-root directives; edit its paths explicitly.\n' >&2
+    return 1
+  }
+}
+
 # Add/replace only Octojoom's own companion mount. User mounts at that target
 # must be handled explicitly rather than silently overwritten.
 function joomlaWebCompanionMount() {
@@ -2105,8 +2146,8 @@ function joomla__TRuST__webserver() {
     else
       OCTOJOOM_SITE_STOP_SERVICES+=("nginx${VDM_SITE_KEY}")
       OCTOJOOM_SITE_START_SERVICES+=("$VDM_SITE_SERVICE")
-      if [ "$root" != /var/www/html ]; then
-        joomlaApacheConfiguration "$root" > "$work/apache.conf" || exit 1
+      if [ "$root" != /var/www/html ] || [ -e "$VDM_SITE_DIR/apache.conf" ] || [ -L "$VDM_SITE_DIR/apache.conf" ]; then
+        joomlaStageApacheConfiguration "$VDM_SITE_DIR/apache.conf" "$work/apache.conf" "$root" || exit 1
         joomlaWebCompanionMount "$work/docker-compose.yml" "$work/compose.next" "$VDM_SITE_SERVICE" apache.conf /etc/apache2/sites-enabled/000-default.conf "$work" && mv "$work/compose.next" "$work/docker-compose.yml" || exit 1
         OCTOJOOM_SITE_FILE_TARGETS+=("$VDM_SITE_DIR/apache.conf")
         OCTOJOOM_SITE_FILE_SOURCES+=("$work/apache.conf")
@@ -2135,6 +2176,12 @@ function joomlaCheckDocumentRoot() {
 # This intentionally does not claim a portable named-volume move operation.
 function joomlaMoveDocumentRoot() {
   local source="$1" destination="$2" base="$3" item other
+  # Check every ancestor before creating anything, including missing descendants
+  # of a symlink. A late realpath check could already have written outside base.
+  if migrationPathHasSymlink "$base" || migrationPathHasSymlink "$source" || migrationPathHasSymlink "$destination"; then
+    printf 'Document-root moves cannot traverse symlinked paths.\n' >&2
+    return 1
+  fi
   [ -d "$source" ] && [ ! -L "$source" ] && [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
   [[ "$source/" == "$base/"* && "$destination/" == "$base/"* && "$source" != "$destination" ]] || return 1
   # A parent destination would mix content; choose an empty sibling or child.
@@ -2265,7 +2312,7 @@ function joomla__TRuST__docroot() {
       docker run --rm --entrypoint sh "$VDM_SITE_IMAGE" -c 'test -d /etc/apache2/sites-enabled && command -v apache2ctl >/dev/null' || {
         printf 'The selected image does not expose the supported Apache configuration path.\n' >&2; exit 2;
       }
-      joomlaApacheConfiguration "$root" > "$work/apache.conf" || exit 1
+      joomlaStageApacheConfiguration "$VDM_SITE_DIR/apache.conf" "$work/apache.conf" "$root" || exit 1
       joomlaWebCompanionMount "$work/docker-compose.yml" "$work/compose.next" "$VDM_SITE_SERVICE" apache.conf /etc/apache2/sites-enabled/000-default.conf "$work" && mv "$work/compose.next" "$work/docker-compose.yml" || exit 1
       OCTOJOOM_SITE_FILE_TARGETS+=("$VDM_SITE_DIR/apache.conf")
       OCTOJOOM_SITE_FILE_SOURCES+=("$work/apache.conf")
