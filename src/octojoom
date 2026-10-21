@@ -10652,7 +10652,7 @@ function migrationComposeReferences() {
 }
 
 function migrationValidateScopedEnv() {
-  local compose_file="$1" env_file="$2" refs line name value seen=' ' scoped_key='' suffixes
+  local compose_file="$1" env_file="$2" refs line name value raw_value seen=' ' scoped_key='' suffixes
   refs=$(migrationComposeReferences "$compose_file") || return 1
   # Admit only recognized settings for this site's own identity in addition to
   # required Compose references. This preserves dormant restoration/defaults.
@@ -10661,12 +10661,12 @@ function migrationValidateScopedEnv() {
   refs=" ${refs//$'\n'/ } "
   while IFS= read -r line || [ -n "$line" ]; do
     [[ "$line" =~ ^(VDM_[A-Za-z0-9_]+)=(.*)$ ]] || return 1
-    name="${BASH_REMATCH[1]}"
+    name="${BASH_REMATCH[1]}" raw_value="${BASH_REMATCH[2]}"
     [[ "$seen" != *" $name "* ]] || return 1
     if [[ "$refs" != *" $name "* ]]; then
       [[ -n "$scoped_key" && "$name" =~ ^VDM_${scoped_key}_(${suffixes})$ ]] || return 1
     fi
-    decodeEnvValue "${BASH_REMATCH[2]}" value || return 1
+    decodeEnvValue "$raw_value" value || return 1
     seen+="$name "
   done < "$env_file"
   for name in $refs; do

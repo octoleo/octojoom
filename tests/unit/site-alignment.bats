@@ -226,3 +226,10 @@ YAML
   assert_equal "$choice" false
   migrationValidateScopedEnv "$ALIGN_YML" "$ALIGN_DIR/.env"
 }
+
+@test "scoped environment: malformed dormant fields cannot bypass literal validation" {
+  siteWriteScopedEnv "$ALIGN_YML" "$ALIGN_ENV" ALPHA "$SANDBOX/scoped.env"
+  printf 'VDM_ALPHA_PHPMYADMIN="unterminated\n' >> "$SANDBOX/scoped.env"
+  run migrationValidateScopedEnv "$ALIGN_YML" "$SANDBOX/scoped.env"
+  assert_failure
+}
