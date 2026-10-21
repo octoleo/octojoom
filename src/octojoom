@@ -2028,6 +2028,64 @@ APACHE_HEALTH
   cp "$current" "$destination"
 }
 
+# Validate stopped-site configuration without activating its Compose project.
+# Use the actual candidate image, environment and mounts, replacing companions
+# with their staged files. Every existing mount is read-only; temporary runtime
+# directories are private tmpfs. This is syntax validation, not a route probe.
+function joomlaValidateStagedWebConfiguration() {
+  local compose="$1" env_file="$2" directory="$3" service="$4" flavor="$5"
+  local model selected image mount type source target index value
+  command -v jq >/dev/null 2>&1 || return 1
+  model=$(migrationRunCompose "$env_file" "$compose" --project-directory "$directory" config --format json) || return 1
+  selected=$(printf '%s' "$model" | jq -ec --arg service "$service" '.services[$service]') || return 1
+  image=$(printf '%s' "$selected" | jq -er '.image') || return 1
+  if ! printf '%s' "$selected" | jq -e '((.configs // [])|length)==0 and ((.secrets // [])|length)==0' >/dev/null; then
+    printf 'Stopped-site syntax validation requires explicit file mounts for webserver configs and secrets.\n' >&2
+    return 1
+  fi
+  local -a args=(run --rm --network none --read-only --tmpfs '/tmp:rw,nosuid,noexec' --tmpfs '/var/run:rw,nosuid,noexec' --tmpfs '/var/cache/nginx:rw,nosuid,noexec' )
+  value=$(printf '%s' "$selected" | jq -r '.user // empty') || return 1
+  [ -z "$value" ] || args+=(--user "$value")
+  while IFS= read -r -d '' value; do args+=(--env "$value"); done < <(
+    printf '%s' "$selected" | jq -j '.environment // {} | to_entries[] | select(.value != null) | .key + "=" + (.value|tostring) + "\u0000"'
+  )
+  while IFS= read -r mount; do
+    type=$(printf '%s' "$mount" | jq -r '.type') || return 1
+    source=$(printf '%s' "$mount" | jq -r '.source // empty') || return 1
+    target=$(printf '%s' "$mount" | jq -er '.target') || return 1
+    case "$type" in
+      bind)
+        for ((index=0; index<${#OCTOJOOM_SITE_FILE_TARGETS[@]}; index++)); do
+          [ "$source" != "${OCTOJOOM_SITE_FILE_TARGETS[$index]}" ] || source="${OCTOJOOM_SITE_FILE_SOURCES[$index]}"
+        done
+        [ -e "$source" ] || { printf 'A required webserver mount does not exist: %s\n' "$source" >&2; return 1; }
+        ;;
+      volume)
+        if [ -z "$source" ] || ! printf '%s' "$mount" | jq -e '(.volume.subpath // "")==""' >/dev/null; then
+          printf 'Stopped-site syntax validation cannot resolve an anonymous volume or volume subpath.\n' >&2; return 1
+        fi
+        source=$(printf '%s' "$model" | jq -er --arg name "$source" '.volumes[$name].name // $name') || return 1
+        docker volume inspect "$source" >/dev/null || return 1
+        ;;
+      *) printf 'Stopped-site syntax validation does not support mount type %s.\n' "$type" >&2; return 1 ;;
+    esac
+    [[ "$source" != *','* && "$source" != *$'\n'* && "$target" != *','* && "$target" != *$'\n'* ]] || return 1
+    args+=(--mount "type=$type,source=$source,target=$target,readonly")
+  done < <(printf '%s' "$selected" | jq -c '.volumes // [] | .[]')
+  if [ "$flavor" = nginx ]; then
+    # The generated FPM service is deliberately stopped. Resolve only that
+    # known hostname for static parsing; no network or backend is contacted.
+    args+=(--add-host "${VDM_SITE_SERVICE}:127.0.0.1" --entrypoint nginx "$image" -t)
+  else
+    # shellcheck disable=SC2016 # Expanded only inside the isolated container.
+    args+=(--entrypoint sh "$image" -c 'mkdir -p "${APACHE_RUN_DIR:-/var/run/apache2}" && exec apache2ctl -t')
+  fi
+  docker "${args[@]}" || {
+    printf 'Candidate %s configuration failed native syntax validation; the stopped site is unchanged.\n' "$flavor" >&2
+    return 1
+  }
+}
+
 # Test syntax plus application paths inside the affected HTTP container. Real
 # external route/database verification is shared with the PHP action when present.
 function joomlaVerifyWebConfiguration() {
@@ -2041,18 +2099,19 @@ function joomlaVerifyWebConfiguration() {
     # shellcheck disable=SC2016 # Literal PHP executed in the selected container.
     joomlaSiteCompose "$site" exec -T "$service" php -r '
       $base=$argv[1];
+      $fail=static function($path,$code,$reason) {fwrite(STDERR,"Web verification failed for ".$path." (HTTP ".$code."): ".$reason."\n"); exit(1);};
       foreach (["/", "/administrator/", "/api/index.php/v1/content/articles", "/configuration.php", "/octojoom-missing-script.php"] as $path) {
         $context=stream_context_create(["http"=>["ignore_errors"=>true,"timeout"=>15,"follow_location"=>0]]);
         $body=@file_get_contents($base.$path,false,$context); $code=0;
         foreach($http_response_header ?? [] as $line) if(preg_match("~^HTTP/[0-9.]+ ([0-9]+)~",$line,$m)) $code=(int)$m[1];
-        if($body===false || !$code || $code>=500) exit(1);
-        if($path==="/configuration.php") { if($code!==403) exit(1); continue; }
-        if($path==="/octojoom-missing-script.php") { if($code!==404) exit(1); continue; }
+        if($body===false || !$code || $code>=500) $fail($path,$code,"request failed");
+        if($path==="/configuration.php") { if($code!==403) $fail($path,$code,"expected configuration access denial"); continue; }
+        if($path==="/octojoom-missing-script.php") { if($code!==404) $fail($path,$code,"expected missing script response"); continue; }
         if(strpos($path,"/api/")===0) {
           $json=json_decode($body,true);
-          if(!is_array($json) || (!isset($json["errors"]) && !isset($json["data"]) && !isset($json["links"]))) exit(1);
-          if(!in_array($code,[200,401,403,404],true)) exit(1);
-        } elseif($code<200 || $code>=400) exit(1);
+          if(!is_array($json) || (!isset($json["errors"]) && !isset($json["data"]) && !isset($json["links"]))) $fail($path,$code,"expected Joomla API JSON");
+          if(!in_array($code,[200,401,403,404],true)) $fail($path,$code,"unexpected API response");
+        } elseif($code<200 || $code>=400) $fail($path,$code,"expected an application page");
       }
     ' "http://nginx${VDM_SITE_KEY}" || return 1
   else
@@ -2179,6 +2238,11 @@ function joomla__TRuST__webserver() {
     fi
     local companion
     for companion in "${OCTOJOOM_SITE_FILE_SOURCES[@]}"; do chmod 644 "$companion" || exit 1; done
+    if [ "$VDM_SITE_RUNNING" = stopped ]; then
+      local syntax_service="$VDM_SITE_SERVICE"
+      [ "$choice" != nginx ] || syntax_service="nginx${VDM_SITE_KEY}"
+      joomlaValidateStagedWebConfiguration "$work/docker-compose.yml" "$work/.env" "$VDM_SITE_DIR" "$syntax_service" "$choice" || exit 1
+    fi
     # shellcheck disable=SC2034 # Consumed by the shared publication helper.
     local OCTOJOOM_SITE_VALIDATE_FUNCTION=joomlaVerifyWebConfiguration
     sitePublishConfiguration "$site" "$work/docker-compose.yml" "$work/.env" "$VDM_SITE_SERVICE" || exit 1
@@ -2352,6 +2416,11 @@ function joomla__TRuST__docroot() {
       OCTOJOOM_SITE_FILE_SOURCES+=("$work/apache.conf")
     fi
     siteValidateCompose "$work/docker-compose.yml" "$work/.env" "$VDM_SITE_DIR" || exit 1
+    if [ "$VDM_SITE_RUNNING" = stopped ]; then
+      local syntax_service="$VDM_SITE_SERVICE"
+      [ "$flavor" != nginx ] || syntax_service="nginx${VDM_SITE_KEY}"
+      joomlaValidateStagedWebConfiguration "$work/docker-compose.yml" "$work/.env" "$VDM_SITE_DIR" "$syntax_service" "$flavor" || exit 1
+    fi
     if [ "${VDM_MOVE_FILES:-false}" = true ]; then
       cp -p "$old_host/configuration.php" "$work/configuration.original.php" || exit 1
       joomlaPatchMovedRootConfiguration "$old_host/configuration.php" "$work/configuration.php" "$VDM_SITE_DOCROOT" "$root" || exit 1

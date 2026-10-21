@@ -37,7 +37,13 @@ cleanup() {
   if [ -f "$COMPOSE" ]; then
     local effective="$ENV_FILE"
     [ ! -f "$SITE/.env" ] || effective="$SITE/.env"
-    if (( status != 0 )); then docker compose --env-file "$effective" -f "$COMPOSE" logs --tail 70 >&2; fi
+    if (( status != 0 )); then
+      docker compose --env-file "$effective" -f "$COMPOSE" logs --tail 70 >&2
+      # A failed transaction restores Apache; its stopped Nginx companion is
+      # then absent from Compose logs but still useful for fixture diagnosis.
+      local companion
+      for companion in $(docker ps -aq --filter "label=com.docker.compose.service=$HTTP"); do docker logs --tail 35 "$companion" >&2; done
+    fi
     docker compose --env-file "$effective" -f "$COMPOSE" down -v --remove-orphans >/dev/null
   fi
   docker network rm "$NETWORK" >/dev/null 2>&1
@@ -171,6 +177,22 @@ joomlaVerifyWebConfiguration "$SITE_NAME"
 joomlaSiteCompose "$SITE_NAME" stop
 VDM_DOCROOT=site
 VDM_MOVE_FILES=true
+# Native syntax validation must reject an invalid stopped companion before
+# moving files, publishing settings, or starting any project service.
+readJoomlaSiteFacts "$SITE_NAME"
+cp "$COMPOSE" "$WORK/before-invalid-compose.yml"
+cp "$VDM_SITE_ENV" "$WORK/before-invalid.env"
+cp "$SITE/nginx.conf" "$WORK/valid-nginx.conf"
+printf '\ninvalid_octojoom_directive on;\n' >> "$SITE/nginx.conf"
+if joomla__TRuST__docroot; then
+  echo 'Invalid stopped Nginx configuration was accepted' >&2
+  exit 1
+fi
+cmp "$COMPOSE" "$WORK/before-invalid-compose.yml"
+cmp "$VDM_SITE_ENV" "$WORK/before-invalid.env"
+[ -f "$DATA/configuration.php" ] && [ ! -e "$DATA/site" ]
+[ -z "$(joomlaSiteCompose "$SITE_NAME" ps --status running --services)" ]
+cp "$WORK/valid-nginx.conf" "$SITE/nginx.conf"
 joomla__TRuST__docroot
 [ "$(getJoomlaDocumentRoot "$SITE_NAME")" = /var/www/html/site ]
 [ -f "$DATA/site/configuration.php" ]

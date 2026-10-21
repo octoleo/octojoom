@@ -125,3 +125,12 @@ The real integration test requires Linux, Docker Compose v2, registry/network
 access, jq/curl, and root or passwordless sudo. It covers bind storage and local
 HTTP; it is not proof of custom image entrypoint compatibility, named-volume
 moves, public proxy/TLS configuration, or browser trust.
+
+Stopped-site changes also run the candidate webserver's native syntax check in
+an isolated one-shot container. It uses the candidate image, environment and
+actual mounted files with all site storage read-only, substitutes staged
+companions, and does not start the Compose project. The known FPM service name
+is resolved only for parsing; connectivity and application checks run when the
+site is active. Missing includes fail the check. Compose configs/secrets mounts,
+anonymous volumes and volume subpaths require explicit configuration instead
+of this automatic stopped-site check.

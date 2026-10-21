@@ -278,3 +278,41 @@ APACHE
   assert_file_exists "$base/source/index.php"
   assert_file_exists "$base/source/configuration.php"
 }
+
+@test "stopped web syntax validation uses staged companions and read-only real mounts" {
+  command -v jq >/dev/null 2>&1 || skip 'jq required for semantic Compose fixtures'
+  VDM_SITE_SERVICE=joomlaalpha
+  mkdir -p "$work/website with spaces" "$work/site"
+  printf 'server { listen 80; }\n' > "$work/staged-nginx.conf"
+  OCTOJOOM_SITE_FILE_TARGETS=("$work/site/nginx.conf")
+  OCTOJOOM_SITE_FILE_SOURCES=("$work/staged-nginx.conf")
+  jq -n --arg root "$work/website with spaces" --arg conf "$work/site/nginx.conf" \
+    '{services:{nginxalpha:{image:"nginx:stable-alpine",environment:{CUSTOM_VALUE:"kept literal"},volumes:[{type:"bind",source:$root,target:"/var/www/html"},{type:"bind",source:$conf,target:"/etc/nginx/conf.d/default.conf"}]}}}' > "$work/model.json"
+  # shellcheck disable=SC2317 # Semantic model supplied to the isolated validator.
+  migrationRunCompose() { cat "$work/model.json"; }
+  run joomlaValidateStagedWebConfiguration "$compose" "$work/.env" "$work/site" nginxalpha nginx
+  assert_success
+  assert_file_contains "$STUB_DIR/commands.log" 'docker run --rm --network none --read-only'
+  assert_file_contains "$STUB_DIR/commands.log" "source=$work/staged-nginx.conf,target=/etc/nginx/conf.d/default.conf,readonly"
+  assert_file_contains "$STUB_DIR/commands.log" "source=$work/website with spaces,target=/var/www/html,readonly"
+  assert_file_contains "$STUB_DIR/commands.log" '--env CUSTOM_VALUE=kept literal'
+  refute_file_contains "$STUB_DIR/commands.log" ' compose up '
+  fail_command docker-run 1
+  run joomlaValidateStagedWebConfiguration "$compose" "$work/.env" "$work/site" nginxalpha nginx
+  assert_failure
+  assert_output_contains 'failed native syntax validation'
+}
+
+@test "stopped web syntax validation refuses missing mounted configuration" {
+  command -v jq >/dev/null 2>&1 || skip 'jq required for semantic Compose fixtures'
+  VDM_SITE_SERVICE=joomlaalpha
+  OCTOJOOM_SITE_FILE_TARGETS=() OCTOJOOM_SITE_FILE_SOURCES=()
+  jq -n --arg conf "$work/missing.conf" \
+    '{services:{nginxalpha:{image:"nginx:stable-alpine",volumes:[{type:"bind",source:$conf,target:"/etc/nginx/conf.d/default.conf"}]}}}' > "$work/model.json"
+  # shellcheck disable=SC2317 # Semantic model supplied to the isolated validator.
+  migrationRunCompose() { cat "$work/model.json"; }
+  run joomlaValidateStagedWebConfiguration "$compose" "$work/.env" "$work" nginxalpha nginx
+  assert_failure
+  assert_output_contains 'required webserver mount does not exist'
+  refute_file_contains "$STUB_DIR/commands.log" 'docker run '
+}
