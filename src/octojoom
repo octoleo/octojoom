@@ -8598,10 +8598,55 @@ function joomlaRuntimeTagCache() {
   printf '%s/cache/php-tags-%s\n' "$VDM_SRC_PATH" "${checksum%% *}"
 }
 
-# Docker Hub is queried only during an explicit runtime action. Other registries
-# remain usable through manual tags and Docker's normal credential handling.
+# Docker Hub's catalog can reject otherwise valid anonymous clients. The
+# registry fallback uses Docker's documented, repository-scoped pull token and
+# tag-list API. Credentials/tokens never enter the discovery cache.
+function joomlaRuntimeHubTags() {
+  local repository="$1" url response page=0
+  url="https://hub.docker.com/v2/repositories/${repository}/tags?page_size=100"
+  while [ -n "$url" ] && [ "$page" -lt 100 ]; do
+    response=$(curl --fail --silent --connect-timeout 10 --max-time 30 "$url") || return 1
+    jq -e '.results | type == "array" and all(.[]; .name | type == "string" and test("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"))' >/dev/null <<< "$response" || return 1
+    jq -r '.results[].name' <<< "$response" || return 1
+    url=$(jq -r '.next // empty' <<< "$response") || return 1
+    [[ -z "$url" || "$url" == "https://hub.docker.com/v2/repositories/${repository}/tags?"* ]] || return 1
+    page=$((page + 1))
+  done
+  # Do not silently publish a truncated list if a repository exceeds the bound.
+  [ -z "$url" ]
+}
+
+function joomlaRuntimeRegistryTags() {
+  local repository="$1" token response url next headers page=0 result=0
+  response=$(curl --fail --silent --show-error --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 30 \
+    "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repository}:pull") || return 1
+  token=$(jq -er '(.token // .access_token) | select(type == "string" and test("^[A-Za-z0-9._~+/=-]+$"))' <<< "$response") || return 1
+  headers=$(mktemp "${TMPDIR:-/tmp}/octojoom-tag-headers.XXXXXXXX") || return 1
+  url="https://registry-1.docker.io/v2/${repository}/tags/list?n=1000"
+  while [ -n "$url" ] && [ "$page" -lt 100 ]; do
+    response=$(curl --fail --silent --show-error --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 30 \
+      --header "Authorization: Bearer $token" --dump-header "$headers" "$url") || { result=1; break; }
+    jq -e --arg repository "$repository" '.name == $repository and (.tags | type == "array" and all(.[]; type == "string" and test("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")))' >/dev/null <<< "$response" || { result=1; break; }
+    jq -r '.tags[]' <<< "$response" || { result=1; break; }
+    next=$(sed -nE 's/^[Ll][Ii][Nn][Kk]:[[:space:]]*<([^>]*)>.*rel="?next"?.*/\1/p' "$headers" | tr -d '\r')
+    case "$next" in
+      '') url='';;
+      /v2/*) url="https://registry-1.docker.io$next";;
+      *) url="$next";;
+    esac
+    # Never forward the bearer token to a pagination URL on another origin or
+    # repository. Tags themselves contain no URL delimiters.
+    if [[ -n "$url" && "$url" != "https://registry-1.docker.io/v2/${repository}/tags/list?"* ]]; then result=1; break; fi
+    page=$((page + 1))
+  done
+  rm -f "$headers"
+  [[ "$result" = 0 && -z "$url" ]]
+}
+
+# Discovery runs only for an explicit runtime action. Other registries/private
+# repositories remain usable through manual tags and Docker's credential store.
 function joomlaRuntimeTags() {
-  local repository="$1" hub_repository url response tag cache temporary page=0
+  local repository="$1" hub_repository cache temporary
   hub_repository="${repository#docker.io/}"
   hub_repository="${hub_repository#index.docker.io/}"
   [[ "$hub_repository" == */* ]] || hub_repository="library/$hub_repository"
@@ -8611,19 +8656,15 @@ function joomlaRuntimeTags() {
   cache=$(joomlaRuntimeTagCache "$repository") || return 1
   createPrivateDirectory -p "${cache%/*}" || return 1
   temporary=$(mktemp "${cache}.tmp.XXXXXX") || return 1
-  url="https://hub.docker.com/v2/repositories/${hub_repository}/tags?page_size=100"
-  while [ -n "$url" ] && [ "$page" -lt 20 ]; do
-    response=$(curl --fail --silent --show-error --connect-timeout 10 --max-time 30 "$url") || { rm -f "$temporary"; return 1; }
-    jq -e '.results | type == "array"' >/dev/null <<< "$response" || { rm -f "$temporary"; return 1; }
-    while IFS= read -r tag; do
-      [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] && printf '%s\n' "$tag" >> "$temporary"
-    done < <(jq -r '.results[].name' <<< "$response")
-    url=$(jq -r '.next // empty' <<< "$response")
-    [[ -z "$url" || "$url" == "https://hub.docker.com/v2/repositories/${hub_repository}/tags?"* ]] || { rm -f "$temporary"; return 1; }
-    page=$((page + 1))
-  done
-  if ! sort -u "$temporary" > "$cache" || ! chmod 600 "$cache"; then rm -f "$temporary"; return 1; fi
-  rm -f "$temporary"
+  if ! joomlaRuntimeHubTags "$hub_repository" > "$temporary"; then
+    printf 'Docker Hub catalog unavailable; checking published registry tags.\n' >&2
+    if ! joomlaRuntimeRegistryTags "$hub_repository" > "$temporary"; then
+      rm -f "$temporary"
+      printf 'Published tags could not be discovered. Enter a known published tag and retry.\n' >&2
+      return 1
+    fi
+  fi
+  if ! sort -u "$temporary" -o "$temporary" || ! chmod 600 "$temporary" || ! mv -f "$temporary" "$cache"; then rm -f "$temporary"; return 1; fi
   cat "$cache"
 }
 

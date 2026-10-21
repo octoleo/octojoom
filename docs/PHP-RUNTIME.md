@@ -14,7 +14,10 @@ octojoom --type joomla --task php --container example.test --action settings \
 
 `list` discovers published candidates for the installed Joomla release and the
 current webserver. Select an actual tag returned by that command. Discovery uses
-Docker Hub; custom registries support an explicitly supplied tag using Docker's
+Docker Hub, with an authenticated public-registry fallback when the Hub catalog
+is unavailable. Discovery follows pagination and publishes its cache only after
+a complete response; transient network failures never replace it with a partial
+list. Custom registries support an explicitly supplied tag using Docker's
 normal authentication. `--image` accepts a full reference from the same repository.
 Completion reads the disposable local tag cache without starting Docker or making
 network requests. Registry and runtime actions require Docker and `jq`.

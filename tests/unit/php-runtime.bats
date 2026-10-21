@@ -265,3 +265,91 @@ SH
   assert_file_contains "$stage/docker-compose.yml" "$VDM_SITE_DIR/php.ini:/new/php/conf.d/zz-octojoom.ini:ro"
   assert_equal "$(cat "$shared")" "$(cat "$stage/php.ini")"
 }
+
+@test "published tags fall back from Hub denial to authenticated paginated registry discovery" {
+  curl() {
+    local headers='' previous='' arg
+    for arg in "$@"; do
+      [ "$previous" != --dump-header ] || headers="$arg"
+      previous="$arg"
+    done
+    case "${*: -1}" in
+      https://hub.docker.com/*) return 22;;
+      https://auth.docker.io/token\?*) printf '{"token":"anonymous-repository-token"}\n';;
+      *tags/list\?n=1000)
+        printf 'HTTP/2 200\r\nLink: </v2/library/joomla/tags/list?n=1000&last=5.4.0-php8.3-apache>; rel="next"\r\n' > "$headers"
+        printf '{"name":"library/joomla","tags":["5.4.0-php8.3-apache"]}\n';;
+      *tags/list\?n=1000\&last=*)
+        printf 'HTTP/2 200\r\n' > "$headers"
+        printf '{"name":"library/joomla","tags":["5.4.0-php8.4-apache","latest"]}\n';;
+      *) return 99;;
+    esac
+  }
+  run joomlaRuntimeTags joomla
+  assert_success
+  assert_output_contains '5.4.0-php8.4-apache'
+  local cache
+  cache=$(joomlaRuntimeTagCache joomla)
+  assert_equal "$(wc -l < "$cache" | tr -d ' ')" 3
+  assert_equal "$(file_mode "$cache")" 600
+  refute_file_contains "$cache" anonymous-repository-token
+}
+
+@test "registry pagination never forwards its token to another origin" {
+  curl() {
+    local headers='' previous='' arg
+    for arg in "$@"; do
+      [ "$previous" != --dump-header ] || headers="$arg"
+      previous="$arg"
+    done
+    case "${*: -1}" in
+      https://auth.docker.io/token\?*) printf '{"access_token":"anonymous-token"}\n';;
+      https://registry-1.docker.io/*)
+        printf 'Link: <https://untrusted.invalid/tags/list?n=1000>; rel="next"\r\n' > "$headers"
+        printf '{"name":"library/joomla","tags":["latest"]}\n';;
+      *) touch "$SANDBOX/token-forwarded"; return 99;;
+    esac
+  }
+  run joomlaRuntimeRegistryTags library/joomla
+  assert_failure
+  refute_file_exists "$SANDBOX/token-forwarded"
+}
+
+@test "failed discovery preserves the last complete cache and rejects malformed tags" {
+  local cache
+  cache=$(joomlaRuntimeTagCache joomla)
+  mkdir -p "${cache%/*}"
+  printf 'previous-complete-tag\n' > "$cache"
+  curl() {
+    local headers='' previous='' arg
+    for arg in "$@"; do
+      [ "$previous" != --dump-header ] || headers="$arg"
+      previous="$arg"
+    done
+    case "${*: -1}" in
+      https://hub.docker.com/*) return 22;;
+      https://auth.docker.io/*) printf '{"token":"anonymous-token"}\n';;
+      https://registry-1.docker.io/*)
+        : > "$headers"
+        printf '{"name":"library/joomla","tags":["valid","invalid\\nforged-tag"]}\n';;
+      *) return 99;;
+    esac
+  }
+  run joomlaRuntimeTags joomla
+  assert_failure
+  assert_equal "$(cat "$cache")" previous-complete-tag
+  [ -z "$(find "${cache%/*}" -name '*.tmp.*' -print)" ]
+}
+
+@test "successful Hub discovery uses only actual catalog names" {
+  curl() {
+    case "${*: -1}" in
+      https://hub.docker.com/*) printf '{"results":[{"name":"actual-tag"}],"next":null}\n';;
+      *) touch "$SANDBOX/unneeded-fallback"; return 99;;
+    esac
+  }
+  run joomlaRuntimeTags docker.io/joomla
+  assert_success
+  assert_equal "$output" actual-tag
+  refute_file_exists "$SANDBOX/unneeded-fallback"
+}

@@ -3,7 +3,9 @@
 # move. Needs Linux, Docker Compose v2, jq, curl, and root/passwordless sudo.
 # Only this run's unique project/network/paths are removed; no daemon pruning.
 # shellcheck disable=SC2034,SC2016
-set -e -o pipefail
+set -E -e -o pipefail
+# Preserve actionable CI failures without printing commands or credentials.
+trap 'printf "WEB integration failed at line %s (exit %s).\\n" "$LINENO" "$?" >&2' ERR
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 for tool in docker jq curl sha256sum; do command -v "$tool" >/dev/null || { echo "Missing $tool" >&2; exit 1; }; done
@@ -30,7 +32,7 @@ DATA="$VDM_PROJECT_PATH/$KEY/joomla"
 privileged() { if (( EUID == 0 )); then "$@"; else sudo -n "$@"; fi; }
 cleanup() {
   local status=$?
-  trap - EXIT INT TERM
+  trap - EXIT INT TERM ERR
   set +e
   if [ -f "$COMPOSE" ]; then
     local effective="$ENV_FILE"
