@@ -5102,7 +5102,9 @@ function sitePublishConfiguration() {
     fi
     if ! "$failed" && [ "${#active[@]}" -gt 0 ]; then
       runtime_changed=true
-      migrationRunCompose "$directory/.env" "$compose_file" --project-directory "$directory" up -d --no-deps --wait --wait-timeout 90 "${active[@]}" >&2 || failed=true
+      # Companion contents can change without changing the Compose model. A
+      # renamed bind file also leaves an existing container on the old inode.
+      migrationRunCompose "$directory/.env" "$compose_file" --project-directory "$directory" up -d --no-deps --force-recreate --wait --wait-timeout 90 "${active[@]}" >&2 || failed=true
       if ! "$failed" && [ -n "$callback" ]; then
         if ! isFunc "$callback" || ! "$callback" "$site"; then failed=true; fi
       fi
@@ -5127,7 +5129,7 @@ function sitePublishConfiguration() {
           if printf '%s\n' "$running" | grep -qxF "$service"; then restore+=("$service"); fi
         done
         if [ "${#restore[@]}" -gt 0 ]; then
-          migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" up -d --no-deps --wait --wait-timeout 90 "${restore[@]}" >&2 || rollback_failed=true
+          migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" up -d --no-deps --force-recreate --wait --wait-timeout 90 "${restore[@]}" >&2 || rollback_failed=true
         fi
       fi
       printf 'Configuration change failed for %s. Originals retained in %s.\n' "$site" "$recovery" >&2

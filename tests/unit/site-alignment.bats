@@ -151,7 +151,27 @@ EXTRA
   run grep -E ' up .*mariadbalpha' "$STUB_DIR/runtime-commands"
   assert_failure
   [ "$(grep -c ' up ' "$STUB_DIR/runtime-commands")" -eq 2 ]
+  [ "$(grep -c ' up .*--force-recreate' "$STUB_DIR/runtime-commands")" -eq 2 ]
   [ ! -e "$ALIGN_DIR/.octojoom-change.lock" ]
+}
+
+@test "publication: companion-only changes recreate the running web service" {
+  printf 'memory_limit = 128M\n' > "$ALIGN_DIR/php.ini"
+  printf 'memory_limit = 512M\n' > "$SANDBOX/php.ini"
+  siteWriteScopedEnv "$ALIGN_YML" "$ALIGN_ENV" ALPHA "$SANDBOX/candidate.env"
+  cp "$ALIGN_YML" "$SANDBOX/candidate.yml"
+  OCTOJOOM_SITE_FILE_TARGETS=("$ALIGN_DIR/php.ini")
+  OCTOJOOM_SITE_FILE_SOURCES=("$SANDBOX/php.ini")
+  migrationRunCompose() {
+    printf '%s\n' "$*" >> "$STUB_DIR/runtime-commands"
+    case " $* " in *' ps '*) printf 'joomlaalpha\nmariadbalpha\n' ;; esac
+  }
+  run sitePublishConfiguration alpha.example.test "$SANDBOX/candidate.yml" "$SANDBOX/candidate.env" joomlaalpha
+  assert_success
+  assert_equal "$(cat "$ALIGN_DIR/php.ini")" 'memory_limit = 512M'
+  [ "$(grep -c ' up .*--force-recreate.*joomlaalpha' "$STUB_DIR/runtime-commands")" -eq 1 ]
+  run grep -E ' up .*mariadbalpha' "$STUB_DIR/runtime-commands"
+  assert_failure
 }
 
 @test "publication: unavailable runtime state refuses mutation; stopped site saves without activation" {
