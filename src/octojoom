@@ -2317,7 +2317,7 @@ function joomlaSetupWebChoices() {
 }
 
 # A published candidate is selected by its observed Joomla and PHP versions,
-# never by inventing a suffix. The runtime agent owns registry discovery.
+# using the shared published-tag discovery and runtime probes.
 function joomlaRuntimeSelectSetupFlavor() {
   local flavor="$1" selected="${VDM_J_REPO}:${VDM_JV}"
   joomlaRuntimeSelectImageForFlavor "$selected" "$flavor"
