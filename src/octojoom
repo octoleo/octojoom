@@ -11956,8 +11956,20 @@ function cliConfigPath() {
   esac
 }
 
+# Read the normalized Compose identity without a jq dependency. A replacement
+# may change options, but must not silently select a different Docker project.
+function cliComposeProjectName() {
+  local model name
+  model=$(migrationRunCompose "$1" "$2" --project-directory "$3" config) || return 1
+  name=$(printf '%s\n' "$model" | awk '/^name:[[:space:]]/ {count++; sub(/^name:[[:space:]]*/, ""); value=$0} END {if (count != 1) exit 1; print value}') || return 1
+  decodeEnvValue "$name" name || return 1
+  [[ "$name" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || return 1
+  printf '%s\n' "$name"
+}
+
 function cliConfiguration() {
   local file kind="${VDM_CONFIG_KIND:-compose}" candidate backup compose='' env_file='' running='' service status=0
+  local candidate_compose candidate_env project_directory original_project candidate_project
   file=$(cliConfigPath) || return $?
   [ -n "$file" ] || return 1
   case "${VDM_ACTION:-path}" in
@@ -11974,24 +11986,33 @@ function cliConfiguration() {
         elif [[ "$VDM_CONTAINER_TYPE" == traefik || "$VDM_CONTAINER_TYPE" == portainer ]]; then compose="$VDM_REPO_PATH/$VDM_CONTAINER_TYPE/docker-compose.yml"; fi
         if [ -n "$compose" ]; then
           env_file=$(getContainerEnvFile "$VDM_CONTAINER_TYPE" "${VDM_CONTAINER:-}" available)
-          [ "$kind" != env ] || env_file="$candidate"
-          [ "$kind" != compose ] || compose="$candidate"
-          if ! migrationRunCompose "$env_file" "$compose" config --quiet; then rm -f "$candidate"; return 1; fi
-          # Observe state before publishing; Docker errors must not become stopped.
-          running=$(migrationRunCompose "$env_file" "$compose" ps --status running --services) || { rm -f "$candidate"; return 1; }
+          project_directory="${compose%/*}"
+          candidate_compose="$compose" candidate_env="$env_file"
+          [ "$kind" != env ] || candidate_env="$candidate"
+          [ "$kind" != compose ] || candidate_compose="$candidate"
+          if ! original_project=$(cliComposeProjectName "$env_file" "$compose" "$project_directory") ||
+            ! candidate_project=$(cliComposeProjectName "$candidate_env" "$candidate_compose" "$project_directory"); then
+            echo >&2 'ERROR: Cannot validate the original and replacement Compose project identities.'
+            rm -f "$candidate"; return 1
+          fi
+          if [ "$original_project" != "$candidate_project" ]; then
+            echo >&2 'ERROR: Configuration replacement cannot change the Compose project name.'
+            rm -f "$candidate"; return 17
+          fi
+          # Observe the ORIGINAL configuration before publishing. A candidate
+          # must never redirect discovery to a different project or service set.
+          running=$(migrationRunCompose "$env_file" "$compose" --project-directory "$project_directory" ps --status running --services) || { rm -f "$candidate"; return 1; }
         fi
       fi
       backup=$(mktemp "${file}.backup.XXXXXX") || { rm -f "$candidate"; return 1; }
       if ! cp -p "$file" "$backup" || ! mv -f "$candidate" "$file"; then rm -f "$candidate" "$backup"; return 1; fi
       if [ -n "$compose" ] && [ -n "$running" ]; then
-        [ "$kind" != compose ] || compose="$file"
-        [ "$kind" != env ] || env_file="$file"
         local -a services=()
         while IFS= read -r service; do [ -z "$service" ] || services+=("$service"); done <<<"$running"
-        migrationRunCompose "$env_file" "$compose" up -d --no-deps "${services[@]}" || status=$?
+        migrationRunCompose "$env_file" "$compose" --project-directory "$project_directory" up -d --no-deps "${services[@]}" || status=$?
         if [ "$status" -ne 0 ]; then
           cp -p "$backup" "$file" || { echo >&2 "ERROR: Restore the retained configuration: $backup"; return "$status"; }
-          migrationRunCompose "$env_file" "$compose" up -d --no-deps "${services[@]}" || echo >&2 "ERROR: Configuration restored; runtime recovery failed. Backup: $backup"
+          migrationRunCompose "$env_file" "$compose" --project-directory "$project_directory" up -d --no-deps "${services[@]}" || echo >&2 "ERROR: Configuration restored; runtime recovery failed. Backup: $backup"
           return "$status"
         fi
       fi

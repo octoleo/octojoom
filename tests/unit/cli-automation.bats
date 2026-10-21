@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 # Each Bats test is isolated; quoted command-like inputs are intentional data.
-# shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2016
+# Runtime stand-ins below are called indirectly by the loaded application.
+# shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2016,SC2317
 load ../helpers/common
 
 setup() {
@@ -187,4 +188,123 @@ JSON
   assert_success
   assert_file_exists "$VDM_REPO_PATH/traefik/docker-compose.yml"
   [ ! -s "$STUB_DIR/dialogs.log" ]
+}
+
+@test "configuration: a changed Compose project name is refused before publication" {
+  make_joomla_container alpha ALPHA alpha
+  local original="$VDM_REPO_PATH/joomla/available/alpha.vdm.dev/docker-compose.yml"
+  printf 'name: replacement-project\n' >"$SANDBOX/replacement.yml"
+  cat "$original" >>"$SANDBOX/replacement.yml"
+  cp "$original" "$SANDBOX/original.yml"
+  VDM_CONTAINER_TYPE=joomla VDM_CONTAINER=alpha.vdm.dev VDM_ACTION=replace
+  VDM_CONFIG_KIND=compose VDM_INPUT_FILE="$SANDBOX/replacement.yml"
+  migrationRunCompose() {
+    printf '%s\n' "$*" >>"$STUB_DIR/config-calls"
+    case " $* " in
+      *' config '*)
+        if grep -q '^name:' "$2"; then sed -n '/^name:/p' "$2"
+        else printf 'name: alpha-vdm-dev\n'; fi;;
+    esac
+  }
+  run cliConfiguration
+  assert_status 17
+  assert_output_contains 'cannot change the Compose project name'
+  cmp "$original" "$SANDBOX/original.yml"
+  refute_file_contains "$STUB_DIR/config-calls" ' ps '
+  refute_file_contains "$STUB_DIR/config-calls" ' up '
+  [ -z "$(find "${original%/*}" -name '*.candidate.*' -o -name '*.backup.*')" ]
+}
+
+@test "configuration: an environment replacement cannot redirect Compose identity" {
+  make_joomla_container alpha ALPHA alpha
+  local directory="$VDM_REPO_PATH/joomla/available/alpha.vdm.dev"
+  printf 'VDM_ALPHA_PROJECT=original\n' >"$directory/.env"
+  printf 'VDM_ALPHA_PROJECT=changed\n' >"$SANDBOX/replacement.env"
+  VDM_CONTAINER_TYPE=joomla VDM_CONTAINER=alpha.vdm.dev VDM_ACTION=replace
+  VDM_CONFIG_KIND=env VDM_INPUT_FILE="$SANDBOX/replacement.env"
+  migrationRunCompose() {
+    local project
+    printf '%s\n' "$*" >>"$STUB_DIR/config-calls"
+    case " $* " in
+      *' config '*) migrationReadEnvValue "$1" VDM_ALPHA_PROJECT project || return 1; printf 'name: %s\n' "$project";;
+    esac
+  }
+  run cliConfiguration
+  assert_status 17
+  assert_file_contains "$directory/.env" 'VDM_ALPHA_PROJECT=original'
+  refute_file_contains "$STUB_DIR/config-calls" ' ps '
+  refute_file_contains "$STUB_DIR/config-calls" ' up '
+}
+
+@test "configuration: running services are discovered using only the original published files" {
+  make_joomla_container alpha ALPHA alpha
+  local directory="$VDM_REPO_PATH/joomla/available/alpha.vdm.dev" kind
+  for kind in compose env; do
+    VDM_CONTAINER_TYPE=joomla VDM_CONTAINER=alpha.vdm.dev VDM_ACTION=replace VDM_CONFIG_KIND="$kind"
+    if [ "$kind" = compose ]; then
+      cp "$directory/docker-compose.yml" "$SANDBOX/replacement"
+    else
+      cp "$VDM_REPO_PATH/joomla/.env" "$directory/.env"
+      cp "$directory/.env" "$SANDBOX/replacement"
+    fi
+    printf '\n# replacement marker\n' >>"$SANDBOX/replacement"
+    VDM_INPUT_FILE="$SANDBOX/replacement"
+    migrationRunCompose() {
+      printf '%s\n' "$*" >>"$STUB_DIR/config-calls"
+      case " $* " in
+        *' config '*) printf 'name: alpha-vdm-dev\n';;
+        *' ps '*)
+          [[ "$1" != *'.candidate.'* && "$2" != *'.candidate.'* ]] || return 12
+          if [ "$VDM_CONFIG_KIND" = env ]; then ! grep -q 'replacement marker' "$1" || return 13
+          else ! grep -q 'replacement marker' "$2" || return 13; fi
+          printf 'joomlaalpha\n';;
+        *' up '*)
+          if [ "$VDM_CONFIG_KIND" = env ]; then grep -q 'replacement marker' "$1"
+          else grep -q 'replacement marker' "$2"; fi;;
+      esac
+    }
+    run cliConfiguration
+    assert_success
+    if [ "$kind" = compose ]; then
+      assert_file_contains "$directory/docker-compose.yml" 'replacement marker'
+      # Restore for the second iteration's original-state assertion.
+      sed '/replacement marker/d' "$directory/docker-compose.yml" >"$SANDBOX/reset"
+      cp "$SANDBOX/reset" "$directory/docker-compose.yml"
+    else
+      assert_file_contains "$directory/.env" 'replacement marker'
+    fi
+  done
+  assert_equal "$(grep -c ' up -d --no-deps joomlaalpha$' "$STUB_DIR/config-calls")" 2
+  assert_file_contains "$STUB_DIR/config-calls" "--project-directory $directory ps"
+  refute_file_contains "$STUB_DIR/config-calls" ' up -d --no-deps mariadbalpha'
+}
+
+@test "configuration: stopped sites stay stopped and failed running updates restore previous content" {
+  make_joomla_container alpha ALPHA alpha
+  local original="$VDM_REPO_PATH/joomla/available/alpha.vdm.dev/docker-compose.yml"
+  cp "$original" "$SANDBOX/original.yml"
+  cp "$original" "$SANDBOX/replacement.yml"
+  printf '\n# replacement marker\n' >>"$SANDBOX/replacement.yml"
+  VDM_CONTAINER_TYPE=joomla VDM_CONTAINER=alpha.vdm.dev VDM_ACTION=replace
+  VDM_CONFIG_KIND=compose VDM_INPUT_FILE="$SANDBOX/replacement.yml"
+  migrationRunCompose() {
+    printf '%s\n' "$*" >>"$STUB_DIR/config-calls"
+    case " $* " in *' config '*) printf 'name: alpha-vdm-dev\n';; esac
+  }
+  run cliConfiguration
+  assert_success
+  refute_file_contains "$STUB_DIR/config-calls" ' up '
+  cp "$SANDBOX/original.yml" "$original"
+  migrationRunCompose() {
+    printf '%s\n' "$*" >>"$STUB_DIR/config-calls"
+    case " $* " in
+      *' config '*) printf 'name: alpha-vdm-dev\n';;
+      *' ps '*) printf 'joomlaalpha\n';;
+      *' up '*) if grep -q 'replacement marker' "$2"; then return 9; fi;;
+    esac
+  }
+  run cliConfiguration
+  assert_status 9
+  cmp "$original" "$SANDBOX/original.yml"
+  assert_equal "$(grep -c ' up -d --no-deps joomlaalpha$' "$STUB_DIR/config-calls")" 2
 }

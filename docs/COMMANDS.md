@@ -115,7 +115,7 @@ Each new feature extends these same handlers and completion discovery.
 | OpenSSH → Setup | `openssh setup` | domain, username, key, port, `--ssh-keys`, `--mount-base`, `--mount-dirs`; UID/GID default to current numeric IDs | Same setup function; scoped saved key/mount directories |
 | Traefik / Portainer → Setup | `traefik setup`, `portainer setup` | domain; HTTPS requires secure email for Traefik, optional Cloudflare token | Existing templates; explicit `--enable` |
 | Traefik / Portainer lifecycle | respective `enable`, `disable`, `delete` | Type/task | Original singleton service behavior |
-| Expert Compose/ENV edit | existing `edit` task (TTY); automation uses `config` | `--action path|read|replace`, `--config-kind compose|env`, replacement `--file` | Selected effective path; validation before replacement; recoverable previous file |
+| Expert Compose/ENV edit | existing `edit` task (TTY); automation uses `config` | `--action path|read|replace`, `--config-kind compose|env`, replacement `--file` | Selected effective path; validation and unchanged Compose project name before replacement; original running state preserved; recoverable previous file |
 | Settings → Edit Config | `settings config` | same config actions; global `.env` | Literal ENV validation; no shell execution |
 | Settings → Basic/expert mode | `settings mode` | `--mode basic|expert` | Same `setMode` persistence |
 | Settings → Paths/help/about/report issue | `settings paths`, `help`, `about`, `issues` | None | Read-only text/link output; no implicit browser launch |
