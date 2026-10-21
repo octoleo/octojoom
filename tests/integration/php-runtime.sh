@@ -171,6 +171,16 @@ joomla__TRuST__php
 grep -q 'VDM_memory_limit="128M"' "$VDM_SRC_PATH/.env"
 [ "$(docker exec "$DB" mariadb -uroot -ptest-root-password --batch --skip-column-names runtime -e 'SELECT message FROM runtime_marker')" = preserved-data ]
 
+# A second edit changes only the already-mounted file. PHP must reload the new
+# startup value even when the Compose service definition itself is unchanged.
+VDM_memory_limit=768M
+OCTOJOOM_CLI_KEYS=(VDM_memory_limit)
+OCTOJOOM_CLI_VALUES=(768M)
+joomla__TRuST__php
+[ "$(joomlaSiteCompose "$VDM_CONTAINER" exec -T "$WEB" php -r 'echo get_cfg_var("memory_limit");')" = 768M ]
+[ "$(joomlaSiteCompose "$VDM_CONTAINER" exec -T "$WEB" php -r 'echo get_cfg_var("max_execution_time");')" = 180 ]
+[ "$(docker inspect --format '{{.Id}}' "$DB")" = "$original_db" ]
+
 # An invalid proposed image leaves every published configuration untouched.
 previous=$(sha256sum "$COMPOSE" "$SITE/.env")
 VDM_ACTION=switch
