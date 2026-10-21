@@ -6461,6 +6461,405 @@ function setImageSource() {
   export VDM_JV
 }
 
+# Inspect published PHP runtimes without invoking their installation entrypoint
+# or giving them access to a live website. JSON is transient inspection data.
+function joomlaRuntimeProbeImage() {
+  local image="$1"
+  docker run --rm --network none --read-only --entrypoint sh "$image" -c '
+    if command -v apache2 >/dev/null 2>&1 || command -v httpd >/dev/null 2>&1; then
+      OCTOJOOM_FLAVOR=apache
+    elif command -v php-fpm >/dev/null 2>&1; then
+      OCTOJOOM_FLAVOR=fpm
+    else
+      OCTOJOOM_FLAVOR=unknown
+    fi
+    export OCTOJOOM_FLAVOR
+    exec php -r '\''$version = null;
+      foreach (["/usr/src/joomla/administrator/manifests/files/joomla.xml", "/var/www/html/administrator/manifests/files/joomla.xml"] as $path) {
+        if (is_file($path)) { $xml = @simplexml_load_file($path, "SimpleXMLElement", LIBXML_NONET); if ($xml) { $version = (string) $xml->version; break; } }
+      }
+      $scan = getenv("PHP_INI_SCAN_DIR") !== false ? getenv("PHP_INI_SCAN_DIR") : (defined("PHP_CONFIG_FILE_SCAN_DIR") ? PHP_CONFIG_FILE_SCAN_DIR : "");
+      echo json_encode(["joomla" => $version, "php" => PHP_VERSION, "flavor" => getenv("OCTOJOOM_FLAVOR"), "ini_dir" => $scan, "extensions" => get_loaded_extensions()], JSON_UNESCAPED_SLASHES), "\n";'\'''
+}
+
+# Full image references retain registry ports. Switching never changes source.
+function joomlaRuntimeRepository() {
+  local image="${1%%@*}" tail
+  tail="${image##*/}"
+  [[ "$tail" != *:* ]] || image="${image%:*}"
+  printf '%s\n' "$image"
+}
+
+function joomlaRuntimeRequireTools() {
+  command -v jq >/dev/null 2>&1 || { printf 'PHP runtime changes require jq; install jq and retry.\n' >&2; return 1; }
+  command -v docker >/dev/null 2>&1 || { printf 'Docker is required for PHP runtime inspection.\n' >&2; return 1; }
+}
+
+function joomlaRuntimeTagCache() {
+  local checksum
+  checksum=$(printf '%s' "$1" | cksum) || return 1
+  printf '%s/cache/php-tags-%s\n' "$VDM_SRC_PATH" "${checksum%% *}"
+}
+
+# Docker Hub is queried only during an explicit runtime action. Other registries
+# remain usable through manual tags and Docker's normal credential handling.
+function joomlaRuntimeTags() {
+  local repository="$1" hub_repository url response tag cache temporary page=0
+  hub_repository="${repository#docker.io/}"
+  hub_repository="${hub_repository#index.docker.io/}"
+  [[ "$hub_repository" == */* ]] || hub_repository="library/$hub_repository"
+  [[ "$hub_repository" =~ ^[a-z0-9_-]+/[a-z0-9_.-]+$ ]] || {
+    printf 'Automatic tag discovery supports Docker Hub. Enter a published tag for %s.\n' "$repository" >&2; return 1;
+  }
+  cache=$(joomlaRuntimeTagCache "$repository") || return 1
+  createPrivateDirectory -p "${cache%/*}" || return 1
+  temporary=$(mktemp "${cache}.tmp.XXXXXX") || return 1
+  url="https://hub.docker.com/v2/repositories/${hub_repository}/tags?page_size=100"
+  while [ -n "$url" ] && [ "$page" -lt 20 ]; do
+    response=$(curl --fail --silent --show-error --connect-timeout 10 --max-time 30 "$url") || { rm -f "$temporary"; return 1; }
+    jq -e '.results | type == "array"' >/dev/null <<< "$response" || { rm -f "$temporary"; return 1; }
+    while IFS= read -r tag; do
+      [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] && printf '%s\n' "$tag" >> "$temporary"
+    done < <(jq -r '.results[].name' <<< "$response")
+    url=$(jq -r '.next // empty' <<< "$response")
+    [[ -z "$url" || "$url" == "https://hub.docker.com/v2/repositories/${hub_repository}/tags?"* ]] || { rm -f "$temporary"; return 1; }
+    page=$((page + 1))
+  done
+  if ! sort -u "$temporary" > "$cache" || ! chmod 600 "$cache"; then rm -f "$temporary"; return 1; fi
+  rm -f "$temporary"
+  cat "$cache"
+}
+
+# Read only the installed manifest, including on stopped sites and named volumes.
+function joomlaRuntimeInstalledVersion() {
+  local site="$1" mount source relative
+  readJoomlaSiteFacts "$site" || return 1
+  relative="${VDM_SITE_DOCROOT#"$VDM_SITE_MOUNT_TARGET"}"
+  [[ "$VDM_SITE_DOCROOT" == "$VDM_SITE_MOUNT_TARGET" || "$VDM_SITE_DOCROOT" == "$VDM_SITE_MOUNT_TARGET/"* ]] || return 1
+  source="$VDM_SITE_MOUNT_SOURCE"
+  [[ "$source" != *,* && -n "$source" ]] || { printf 'Cannot safely inspect this website mount.\n' >&2; return 1; }
+  case "$VDM_SITE_MOUNT_TYPE" in bind|volume) mount="type=${VDM_SITE_MOUNT_TYPE},src=$source,dst=/octojoom-site,readonly";; *) return 1;; esac
+  docker run --rm --network none --read-only --entrypoint php --mount "$mount" "$VDM_SITE_IMAGE" -r '
+    $path = $argv[1] . "/administrator/manifests/files/joomla.xml";
+    $xml = is_file($path) ? @simplexml_load_file($path, "SimpleXMLElement", LIBXML_NONET) : false;
+    if (!$xml || !preg_match("/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/", (string) $xml->version)) { fwrite(STDERR, "Installed Joomla manifest is unavailable.\n"); exit(1); }
+    echo (string) $xml->version, "\n";' -- "/octojoom-site${relative}"
+}
+
+# Candidates are discovered tags, not synthesized names. They are verified by
+# running the selected image before any deployment file is touched.
+function joomlaRuntimeChooseTag() {
+  local repository="$1" version="$2" flavor="$3" tag answer tags
+  local choices=(keep 'Keep current selection' manual 'Enter a published tag')
+  tags=$(joomlaRuntimeTags "$repository") || tags=''
+  while IFS= read -r tag; do
+    [[ "$tag" == "$version"-* && "$tag" == *"$flavor"* ]] || continue
+    choices+=("$tag" "$repository:$tag")
+  done <<< "$tags"
+  answer=$(whiptail --title 'Published PHP runtimes' --backtitle "$BACK_TITLE" --menu \
+    'Choose a candidate. Its Joomla version, PHP extensions and architecture will be verified.' 22 112 14 \
+    "${choices[@]}" 3>&1 1>&2 2>&3) || return $?
+  case "$answer" in
+    keep) return 3;;
+    manual) getInput 'Enter an existing published image tag from the same repository' '' 'Published tag';;
+    *) printf '%s\n' "$answer";;
+  esac
+}
+
+function joomlaRuntimeSelectImage() {
+  local site="$1" flavor="$2" tag="${3:-}" installed repository candidate old_probe probe old_arch new_arch current_php
+  joomlaRuntimeRequireTools || return 1
+  readJoomlaSiteFacts "$site" || return 1
+  repository=$(joomlaRuntimeRepository "$VDM_SITE_IMAGE") || return 1
+  installed=$(joomlaRuntimeInstalledVersion "$site") || return 1
+  old_probe=$(joomlaRuntimeProbeImage "$VDM_SITE_IMAGE") || return 1
+  jq -e '.php and .extensions' >/dev/null <<< "$old_probe" || return 1
+  current_php=$(jq -r '.php | split(".")[0:2] | join(".")' <<< "$old_probe")
+  [ -n "$flavor" ] || flavor=$(jq -r '.flavor' <<< "$old_probe")
+  case "$flavor" in apache|fpm) ;; *) printf 'The selected image webserver could not be identified.\n' >&2; return 1;; esac
+  if [ -z "$tag" ]; then
+    if [ "$(jq -r '.flavor' <<< "$old_probe")" != "$flavor" ]; then
+      candidate=$(joomlaRuntimeSelectImageForFlavor "$VDM_SITE_IMAGE" "$flavor") || return $?
+      tag="${candidate#"$repository:"}"
+    else
+      [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] || { printf 'Supply --image-tag for this runtime change.\n' >&2; return 2; }
+      tag=$(joomlaRuntimeChooseTag "$repository" "$installed" "$flavor") || return $?
+    fi
+  fi
+  if [[ "$tag" == */* || "$tag" == *:* ]]; then
+    candidate="$tag"
+    [ "$(joomlaRuntimeRepository "$candidate")" = "$repository" ] || { printf 'Runtime changes must retain image repository %s.\n' "$repository" >&2; return 2; }
+  else
+    [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { printf 'Invalid image tag.\n' >&2; return 2; }
+    candidate="$repository:$tag"
+  fi
+  docker pull "$candidate" >&2 || return 1
+  probe=$(joomlaRuntimeProbeImage "$candidate") || return 1
+  jq -e --arg installed "$installed" --arg flavor "$flavor" '
+    .joomla == $installed and .flavor == $flavor and
+    (["json", "session", "dom", "SimpleXML", "xml", "mbstring", "mysqli"] - .extensions | length == 0)
+  ' >/dev/null <<< "$probe" || { printf 'Candidate must contain Joomla %s, %s and the required PHP extensions.\n' "$installed" "$flavor" >&2; return 1; }
+  if [ "$(jq -r '.flavor' <<< "$old_probe")" != "$flavor" ]; then
+    [ "$(jq -r '.php | split(".")[0:2] | join(".")' <<< "$probe")" = "$current_php" ] || {
+      printf 'A webserver change must retain PHP %s; choose another published tag.\n' "$current_php" >&2; return 1;
+    }
+  fi
+  old_arch=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$VDM_SITE_IMAGE") || return 1
+  new_arch=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$candidate") || return 1
+  [[ -n "$old_arch" && "$old_arch" = "$new_arch" ]] || { printf 'Candidate architecture does not match the current runtime.\n' >&2; return 1; }
+  printf '%s\n' "$candidate"
+}
+
+# Select a published flavor for a new site, preserving its probed Joomla/PHP.
+# The tag list supplies candidate names; every chosen candidate is pulled and
+# inspected. This also handles --webserver nginx without a duplicate tag prompt.
+function joomlaRuntimeSelectImageForFlavor() {
+  local image="$1" flavor="$2" tag="${3:-}" probe version php repository tags candidate candidate_probe old_arch new_arch
+  joomlaRuntimeRequireTools || return 1
+  probe=$(joomlaRuntimeProbeImage "$image") || return 1
+  version=$(jq -r '.joomla // empty' <<< "$probe")
+  php=$(jq -r '.php // empty' <<< "$probe")
+  [[ -n "$version" && -n "$php" ]] || { printf 'The selected image Joomla/PHP release is unavailable.\n' >&2; return 1; }
+  repository=$(joomlaRuntimeRepository "$image") || return 1
+  if [ -z "$tag" ]; then
+    tags=$(joomlaRuntimeTags "$repository") || return 1
+    while IFS= read -r candidate; do
+      [[ "$candidate" == "$version"-* && "$candidate" == *"php${php%.*}-"* && "$candidate" == *"$flavor"* ]] || continue
+      tag="$candidate"; break
+    done <<< "$tags"
+    [ -n "$tag" ] || {
+      if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+        printf 'No published matching %s tag was discovered; supply --image-tag.\n' "$flavor" >&2; return 1
+      fi
+      tag=$(joomlaRuntimeChooseTag "$repository" "$version" "$flavor") || return $?
+    }
+  fi
+  [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || return 2
+  candidate="$repository:$tag"
+  docker pull "$candidate" >&2 || return 1
+  candidate_probe=$(joomlaRuntimeProbeImage "$candidate") || return 1
+  jq -e --arg version "$version" --arg php "$php" --arg flavor "$flavor" '
+    .joomla == $version and .php == $php and .flavor == $flavor and
+    (["json", "session", "dom", "SimpleXML", "xml", "mbstring", "mysqli"] - .extensions | length == 0)
+  ' >/dev/null <<< "$candidate_probe" || { printf 'The candidate must retain Joomla %s and PHP %s with %s.\n' "$version" "$php" "$flavor" >&2; return 1; }
+  old_arch=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image") || return 1
+  new_arch=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$candidate") || return 1
+  [[ -n "$old_arch" && "$old_arch" == "$new_arch" ]] || { printf 'Candidate architecture does not match.\n' >&2; return 1; }
+  printf '%s\n' "$candidate"
+}
+
+function joomlaRuntimeIniTarget() {
+  local probe directory
+  probe=$(joomlaRuntimeProbeImage "$1") || return 1
+  directory=$(jq -r '.ini_dir // empty' <<< "$probe") || return 1
+  [[ "$directory" == /* && "$directory" != *:* && "$directory" != *$'\n'* && "$directory" != *'..'* ]] || {
+    printf 'This image does not expose one supported PHP configuration scan directory.\n' >&2; return 1;
+  }
+  printf '%s/zz-octojoom.ini\n' "${directory%/}"
+}
+
+function joomlaSetupPHPChoices() {
+  local probe version flavor tag candidate
+  [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] || return 0
+  joomlaRuntimeRequireTools || return 1
+  probe=$(joomlaRuntimeProbeImage "${VDM_J_REPO}:${VDM_JV}") || {
+    printf 'PHP image details are unavailable; the manually selected image is retained.\n' >&2; return 0;
+  }
+  version=$(jq -r '.joomla // empty' <<< "$probe")
+  flavor=$(jq -r '.flavor // "unknown"' <<< "$probe")
+  if getInputYesNo "Selected image: ${VDM_J_REPO}:${VDM_JV}\nPHP $(jq -r '.php' <<< "$probe"), $flavor.\nWould you like a different available PHP version?" 'PHP version' 12 112 defaultno; then
+    :
+  else
+    local answer_status=$?
+    [ "$answer_status" -eq 1 ] && return 0
+    return "$answer_status"
+  fi
+  [ -n "$version" ] || { printf 'The image Joomla release could not be inspected. Use manual image tag selection.\n' >&2; return 1; }
+  tag=$(joomlaRuntimeChooseTag "$VDM_J_REPO" "$version" "$flavor") || { local choose_status=$?; [ "$choose_status" -eq 3 ] && return 0; return "$choose_status"; }
+  candidate="${VDM_J_REPO}:$tag"
+  docker pull "$candidate" >&2 || return 1
+  probe=$(joomlaRuntimeProbeImage "$candidate") || return 1
+  jq -e --arg version "$version" --arg flavor "$flavor" '.joomla == $version and .flavor == $flavor' >/dev/null <<< "$probe" || {
+    printf 'Choose a published tag with the same Joomla release and webserver.\n' >&2; return 1;
+  }
+  VDM_JV="$tag"
+}
+
+# Safe edits are deliberately limited to the ordinary block-style service.
+# Compose's semantic model is checked separately; arbitrary YAML is never
+# regenerated from resolved values (which would expose credentials).
+function joomlaPHPReplaceMount() {
+  local source="$1" destination="$2" service="$3" old_target="$4" host_file="$5" target="$6"
+  [[ "$service" =~ ^[A-Za-z0-9_-]+$ && "$target" == /* && "$host_file" == /* ]] || return 1
+  [[ "$host_file" != *$'\n'* && "$host_file" != *'"'* && "$host_file" != *\\* && "$host_file" != *'$'* ]] || return 1
+  awk -v service="$service" -v old="$old_target" -v host="$host_file" -v target="$target" '
+    /^  [A-Za-z0-9_-]+: *$/ { inside=($0 == "  " service ":"); volumes=0 }
+    inside && /^    volumes: *$/ { volumes=1; print; if (old == "") { print "      - \"" host ":" target ":ro\""; changed++ }; next }
+    inside && /^    [A-Za-z_]/ && !/^    volumes:/ { volumes=0 }
+    inside && volumes && old != "" && index($0, ":" old) {
+      if ($0 !~ /^      - /) { bad=1; exit }
+      print "      - \"" host ":" target ":ro\""; changed++; next
+    }
+    { print }
+    END { if (bad || changed != 1) exit 1 }
+  ' "$source" > "$destination" || { rm -f "$destination"; printf 'PHP mount editing requires one ordinary service volumes block; use the Compose editor for this layout.\n' >&2; return 1; }
+}
+
+function joomlaPHPValidateValue() {
+  local setting="$1" value="$2"
+  case "$setting" in
+    max_execution_time|max_input_vars) [[ "$value" =~ ^[0-9]{1,9}$ ]];;
+    max_input_time) [[ "$value" == -1 || "$value" =~ ^[0-9]{1,9}$ ]];;
+    memory_limit) [[ "$value" == -1 || "$value" =~ ^[0-9]{1,9}[KMGkmg]?$ ]];;
+    upload_max_filesize|post_max_size) [[ "$value" =~ ^[0-9]{1,9}[KMGkmg]?$ ]];;
+    error_reporting) [[ -n "$value" && "$value" != *[!A-Z0-9_\ \&\|\~\(\)]* ]];;
+    *) return 1;;
+  esac
+}
+
+# Preserve unrelated directives and comments, including shared bulk php.ini.
+function joomlaPHPPatchIni() {
+  local source="$1" destination="$2" setting value temporary
+  shift 2
+  if [ -n "$source" ]; then cp "$source" "$destination" || return 1; else : > "$destination" || return 1; fi
+  while [ "$#" -gt 0 ]; do
+    setting="$1"; value="$2"; shift 2
+    joomlaPHPValidateValue "$setting" "$value" || { printf 'Invalid PHP value for %s.\n' "$setting" >&2; return 2; }
+    temporary=$(mktemp "${destination}.tmp.XXXXXX") || return 1
+    if ! awk -v key="$setting" '$0 !~ ("^[[:space:]]*" key "[[:space:]]*=")' "$destination" > "$temporary" ||
+      ! printf '%s = %s\n' "$setting" "$value" >> "$temporary" || ! mv -f "$temporary" "$destination"; then rm -f "$temporary"; return 1; fi
+  done
+  chmod 644 "$destination"
+}
+
+# The application credentials stay inside its container. HTTP and effective PHP
+# checks run only for a service which was already running before the change.
+# PHP fragments below intentionally use literal PHP variable names.
+# shellcheck disable=SC2016
+function joomlaRuntimeValidatePublished() {
+  local site="$1" actual setting value
+  readJoomlaSiteFacts "$site" || return 1
+  actual=$(joomlaSiteCompose "$site" exec -T "$VDM_SITE_SERVICE" php -r 'echo PHP_VERSION;') || return 1
+  if [ -n "${OCTOJOOM_EXPECTED_PHP:-}" ] && [ "$actual" != "$OCTOJOOM_EXPECTED_PHP" ]; then
+    printf 'The recreated service did not load the selected PHP runtime.\n' >&2; return 1
+  fi
+  for setting in ${OCTOJOOM_PHP_CHANGED_SETTINGS:-}; do
+    value="VDM_$setting"
+    # get_cfg_var reports startup configuration even where the CLI SAPI
+    # overrides a value (notably max_execution_time). parse_ini_string uses
+    # PHP's INI expression parser, never eval, for error_reporting constants.
+    joomlaSiteCompose "$site" exec -T "$VDM_SITE_SERVICE" php -r '
+      $expected = parse_ini_string($argv[1] . "=" . $argv[2]);
+      $actual = get_cfg_var($argv[1]);
+      exit($expected !== false && isset($expected[$argv[1]]) && strcasecmp((string)$actual, (string)$expected[$argv[1]]) === 0 ? 0 : 1);
+    ' -- "$setting" "${!value}" || {
+      printf 'PHP did not load the requested %s value.\n' "$setting" >&2; return 1;
+    }
+  done
+  joomlaSiteCompose "$site" exec -T "$VDM_SITE_SERVICE" php -r '
+    $root=$argv[1]; if (!is_file($root . "/configuration.php")) { fwrite(STDERR,"Joomla is not installed; application verification is unavailable.\n"); exit(1); }
+    require $root . "/configuration.php"; $c=new JConfig;
+    if ($c->dbtype === "mysqli") { mysqli_report(MYSQLI_REPORT_OFF); $host=explode(":",$c->host,2); $db=@new mysqli($host[0],$c->user,$c->password,$c->db,isset($host[1])?(int)$host[1]:3306); exit($db->connect_errno?1:0); }
+    if ($c->dbtype === "pdomysql") { try { new PDO("mysql:host=".$c->host.";dbname=".$c->db,$c->user,$c->password); exit(0); } catch (Throwable $e) { exit(1); } }
+    fwrite(STDERR,"This database driver requires manual application verification.\n"); exit(1);' -- "$VDM_SITE_DOCROOT" || return 1
+  [[ "$VDM_SITE_URL" == http://* || "$VDM_SITE_URL" == https://* ]] || { printf 'No HTTP route was identified for application verification.\n' >&2; return 1; }
+  curl --fail --silent --show-error --location --max-redirs 5 --connect-timeout 5 --max-time 30 --output /dev/null "$VDM_SITE_URL"
+}
+
+# shellcheck disable=SC2016
+function joomlaPHPSettingsAction() {
+  local site="$1" stage="$2" model mounts source='' old_target='' ini_target setting variable saved default answer has_values=false
+  local -a changes=()
+  model=$(joomlaSiteCompose "$site" config --format json) || return 1
+  mounts=$(jq -c --arg service "$VDM_SITE_SERVICE" '[.services[$service].volumes[]? | select(.type == "bind" and ((.target | endswith("/php.ini")) or (.target | endswith("/zz-octojoom.ini"))))]' <<< "$model") || return 1
+  [ "$(jq 'length' <<< "$mounts")" -le 1 ] || { printf 'Several PHP override mounts exist; select the intended file in the Compose editor.\n' >&2; return 1; }
+  if [ "$(jq 'length' <<< "$mounts")" -eq 1 ]; then
+    source=$(jq -r '.[0].source' <<< "$mounts")
+    old_target=$(jq -r '.[0].target' <<< "$mounts")
+    [[ -f "$source" && -r "$source" ]] || { printf 'The existing PHP overrides are not readable.\n' >&2; return 1; }
+  fi
+  ini_target=$(joomlaRuntimeIniTarget "$VDM_SITE_IMAGE") || return 1
+  OCTOJOOM_PHP_CHANGED_SETTINGS=''
+  for setting in max_execution_time max_input_time max_input_vars error_reporting upload_max_filesize post_max_size memory_limit; do
+    variable="VDM_$setting"
+    if cliHasValue "$variable"; then
+      answer="${!variable}"
+      has_values=true
+    elif [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+      continue
+    else
+      case "$setting" in
+        max_execution_time) default=124;; max_input_time) default=1500;; max_input_vars) default=3000;;
+        error_reporting) default='E_ALL & ~E_DEPRECATED & ~E_STRICT';; *) default=256M;;
+      esac
+      saved=''
+      [ -z "$source" ] || saved=$(awk -v key="$setting" '$0 ~ ("^[[:space:]]*" key "[[:space:]]*=") { sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]*;.*$/, ""); value=$0 } END { print value }' "$source")
+      if [ -z "$saved" ] && [ "$VDM_SITE_RUNNING" = running ]; then
+        saved=$(joomlaSiteCompose "$site" exec -T "$VDM_SITE_SERVICE" php -r 'echo ini_get($argv[1]);' -- "$setting") || return 1
+      fi
+      answer=$(joomlaPHPQuestion "$setting" "${saved:-$default}") || return $?
+      has_values=true
+    fi
+    joomlaPHPValidateValue "$setting" "$answer" || { printf 'Invalid PHP value for %s.\n' "$setting" >&2; return 2; }
+    printf -v "$variable" '%s' "$answer"
+    changes+=("$setting" "$answer")
+    OCTOJOOM_PHP_CHANGED_SETTINGS+="$setting "
+    writeEnvVariable "$stage/.env" "VDM_${VDM_SITE_ENV_KEY}_PHP_${setting^^}=$answer" true || return 1
+  done
+  "$has_values" || { printf 'Supply at least one PHP setting.\n' >&2; return 2; }
+  joomlaPHPPatchIni "$source" "$stage/php.ini" "${changes[@]}" || return 1
+  joomlaPHPReplaceMount "$VDM_SITE_COMPOSE" "$stage/docker-compose.yml" "$VDM_SITE_SERVICE" "$old_target" "$VDM_SITE_DIR/php.ini" "$ini_target" || return 1
+  OCTOJOOM_SITE_FILE_TARGETS=("$VDM_SITE_DIR/php.ini")
+  OCTOJOOM_SITE_FILE_SOURCES=("$stage/php.ini")
+}
+
+# Callback and companion arrays are consumed by sitePublishConfiguration.
+# shellcheck disable=SC2034
+function joomla__TRuST__php() {
+  (
+    local site="${VDM_CONTAINER:-}" action="${VDM_ACTION:-list}" repository version flavor tags tag stage candidate probe result=0
+    local OCTOJOOM_SITE_VALIDATE_FUNCTION=joomlaRuntimeValidatePublished OCTOJOOM_EXPECTED_PHP='' OCTOJOOM_PHP_CHANGED_SETTINGS=''
+    local -a OCTOJOOM_SITE_FILE_TARGETS=() OCTOJOOM_SITE_FILE_SOURCES=()
+    [ -n "$site" ] || { printf 'Select a website with --container.\n' >&2; exit 2; }
+    joomlaRuntimeRequireTools || exit 1
+    readJoomlaSiteFacts "$site" || exit 1
+    [[ -n "$VDM_SITE_SERVICE" && -n "$VDM_SITE_IMAGE" ]] || { printf 'The website PHP service could not be identified.\n' >&2; exit 1; }
+    case "$action" in
+      list)
+        repository=$(joomlaRuntimeRepository "$VDM_SITE_IMAGE") || exit 1
+        version=$(joomlaRuntimeInstalledVersion "$site") || exit 1
+        probe=$(joomlaRuntimeProbeImage "$VDM_SITE_IMAGE") || exit 1
+        flavor=$(jq -r '.flavor' <<< "$probe")
+        tags=$(joomlaRuntimeTags "$repository") || exit 1
+        printf 'Current image: %s\nInstalled Joomla: %s\nPHP: %s (%s)\nPublished candidates (verified on selection):\n' "$VDM_SITE_IMAGE" "$version" "$(jq -r '.php' <<< "$probe")" "$flavor"
+        while IFS= read -r tag; do [[ "$tag" != "$version"-* || "$tag" != *"$flavor"* ]] || printf '%s:%s\n' "$repository" "$tag"; done <<< "$tags"
+        exit 0;;
+      switch|settings) ;;
+      *) printf 'Unknown PHP action: %s\n' "$action" >&2; exit 2;;
+    esac
+    [[ "$VDM_SITE_ENV_KEY" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]] || { printf 'This site has no unambiguous scoped environment key.\n' >&2; exit 1; }
+    if [ "$action" = switch ]; then
+      tag=''
+      if cliHasValue VDM_PHP_IMAGE; then tag="$VDM_PHP_IMAGE"; elif cliHasValue VDM_JV; then tag="$VDM_JV"; fi
+      candidate=$(joomlaRuntimeSelectImage "$site" '' "$tag") || { result=$?; [ "$result" -eq 3 ] && exit 0; exit "$result"; }
+      probe=$(joomlaRuntimeProbeImage "$candidate") || exit 1
+      OCTOJOOM_EXPECTED_PHP=$(jq -r '.php' <<< "$probe")
+      printf 'PHP image: %s -> %s\n' "$VDM_SITE_IMAGE" "$candidate" >&2
+    fi
+    stage=$(mktemp -d "$VDM_SITE_DIR/.php-stage.XXXXXX") || exit 1
+    trap 'rm -rf "$stage"' EXIT
+    siteWriteScopedEnv "$VDM_SITE_COMPOSE" "$VDM_SITE_ENV" "$VDM_SITE_ENV_KEY" "$stage/.env" || exit 1
+    if [ "$action" = switch ]; then
+      siteReplaceServiceScalar "$VDM_SITE_COMPOSE" "$stage/docker-compose.yml" "$VDM_SITE_SERVICE" image "$candidate" || exit 1
+      writeEnvVariable "$stage/.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE=$candidate" true || exit 1
+    else
+      joomlaPHPSettingsAction "$site" "$stage" || exit $?
+    fi
+    sitePublishConfiguration "$site" "$stage/docker-compose.yml" "$stage/.env" "$VDM_SITE_SERVICE" || exit $?
+    printf 'PHP %s saved for %s.\n' "$action" "$site"
+  )
+}
+
 # check version
 function isVersionAbove() {
   local tag="$1" target_version="$2" tag_major tag_minor target_major target_minor
@@ -6495,6 +6894,10 @@ function setPersistence() {
 # must never be confused with declining the customization.
 function setPHPSettings() {
   local customization_status
+  case "${VDM_PHP_SETTINGS:-}" in
+    false) return 1;;
+    true) configurePHPSettings; customization_status=$?; [ "$customization_status" -ne 1 ] || customization_status=2; return "$customization_status";;
+  esac
   # ask the question
   if getInputYesNo "Would you like to set some PHP overrides for the Joomla container.\n\nTo make these changes we need sudo privileges." \
     "PHP.ini values" 9 112; then
@@ -6510,51 +6913,61 @@ function setPHPSettings() {
   fi
 }
 
+# One question collector for new-site defaults and selected-site overrides.
+function joomlaPHPQuestion() {
+  local setting="$1" default="$2" answer variable="VDM_$1"
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    if cliHasValue "$variable"; then answer="${!variable}"; else answer="$default"; fi
+  else
+    answer=$(getInputNow "Enter ${setting//_/ }" "$default" "$setting") || return $?
+  fi
+  joomlaPHPValidateValue "$setting" "$answer" || { printf 'Invalid PHP value for %s.\n' "$setting" >&2; return 2; }
+  printf '%s\n' "$answer"
+}
+
 function configurePHPSettings() {
     local default_error_reporting edit_status
     # max_execution_time
-    VDM_max_execution_time=$(getInputNow "Enter max execution time" \
-        "${VDM_max_execution_time:-124}" 'max_execution_time') || return $?
+    VDM_max_execution_time=$(joomlaPHPQuestion max_execution_time "${VDM_max_execution_time:-124}") || return $?
     # remember this for next time
     setUniqueEnvVariable "VDM_max_execution_time=${VDM_max_execution_time}" || return $?
 
     # max_input_time
-    VDM_max_input_time=$(getInputNow "Enter max input time" \
-        "${VDM_max_input_time:-1500}" 'max_input_time') || return $?
+    VDM_max_input_time=$(joomlaPHPQuestion max_input_time "${VDM_max_input_time:-1500}") || return $?
     # remember this for next time
     setUniqueEnvVariable "VDM_max_input_time=${VDM_max_input_time}" || return $?
 
     # max_input_vars
-    VDM_max_input_vars=$(getInputNow "Enter max_input_vars" \
-        "${VDM_max_input_vars:-3000}" 'max_input_vars') || return $?
+    VDM_max_input_vars=$(joomlaPHPQuestion max_input_vars "${VDM_max_input_vars:-3000}") || return $?
     # remember this for next time
     setUniqueEnvVariable "VDM_max_input_vars=${VDM_max_input_vars}" || return $?
 
     # error_reporting
     default_error_reporting="E_ALL & ~E_DEPRECATED & ~E_STRICT"
-    VDM_error_reporting=$(getInputNow "Enter error reporting" \
-        "${VDM_error_reporting:-$default_error_reporting}" 'error_reporting') || return $?
+    VDM_error_reporting=$(joomlaPHPQuestion error_reporting "${VDM_error_reporting:-$default_error_reporting}") || return $?
     # remember this for next time
     setUniqueEnvVariable "VDM_error_reporting=\"${VDM_error_reporting}\"" || return $?
 
     # upload_max_filesize
-    VDM_upload_max_filesize=$(getInputNow "Enter upload max filesize" \
-        "${VDM_upload_max_filesize:-256M}" 'upload_max_filesize') || return $?
+    VDM_upload_max_filesize=$(joomlaPHPQuestion upload_max_filesize "${VDM_upload_max_filesize:-256M}") || return $?
     # remember this for next time
     setUniqueEnvVariable "VDM_upload_max_filesize=\"${VDM_upload_max_filesize}\"" || return $?
 
     # post_max_size
-    VDM_post_max_size=$(getInputNow "Enter post max size" \
-        "${VDM_post_max_size:-256M}" 'post_max_size') || return $?
+    VDM_post_max_size=$(joomlaPHPQuestion post_max_size "${VDM_post_max_size:-256M}") || return $?
     # remember this for next time
     setUniqueEnvVariable "VDM_post_max_size=\"${VDM_post_max_size}\"" || return $?
 
     # memory_limit
-    VDM_memory_limit=$(getInputNow "Enter memory limit" \
-        "${VDM_memory_limit:-256M}" 'memory_limit') || return $?
+    VDM_memory_limit=$(joomlaPHPQuestion memory_limit "${VDM_memory_limit:-256M}") || return $?
     # remember this for next time
     setUniqueEnvVariable "VDM_memory_limit=\"${VDM_memory_limit}\"" || return $?
 
+    if [ -n "${VDM_J_REPO:-}" ] && [ -n "${VDM_JV:-}" ]; then
+      joomlaRuntimeRequireTools || return 2
+      VDM_PHP_INI_TARGET=$(joomlaRuntimeIniTarget "${VDM_J_REPO}:${VDM_JV}") || return 2
+      export VDM_PHP_INI_TARGET
+    fi
     # make sure the directory exist
     mkdir -p "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}" || return $?
 
