@@ -8181,6 +8181,10 @@ function joomlaRuntimeSelectImageForFlavor() {
   local image="$1" flavor="$2" tag="${3:-}" probe version php repository tags candidate candidate_probe old_arch new_arch
   joomlaRuntimeRequireTools || return 1
   probe=$(joomlaRuntimeProbeImage "$image") || return 1
+  if [ -z "$tag" ] && [ "$(jq -r '.flavor // empty' <<< "$probe")" = "$flavor" ]; then
+    printf '%s\n' "$image"
+    return 0
+  fi
   version=$(jq -r '.joomla // empty' <<< "$probe")
   php=$(jq -r '.php // empty' <<< "$probe")
   [[ -n "$version" && -n "$php" ]] || { printf 'The selected image Joomla/PHP release is unavailable.\n' >&2; return 1; }
@@ -8290,10 +8294,39 @@ function joomlaPHPPatchIni() {
     setting="$1"; value="$2"; shift 2
     joomlaPHPValidateValue "$setting" "$value" || { printf 'Invalid PHP value for %s.\n' "$setting" >&2; return 2; }
     temporary=$(mktemp "${destination}.tmp.XXXXXX") || return 1
-    if ! awk -v key="$setting" '$0 !~ ("^[[:space:]]*" key "[[:space:]]*=")' "$destination" > "$temporary" ||
-      ! printf '%s = %s\n' "$setting" "$value" >> "$temporary" || ! mv -f "$temporary" "$destination"; then rm -f "$temporary"; return 1; fi
+    # Ordinary INI headings are grouping comments to PHP, while HOST/PATH
+    # sections have their own scope. Keep those intentional overrides intact.
+    if ! awk -v key="$setting" -v value="$value" '
+      BEGIN { print key " = " value; scoped=0 }
+      /^[[:space:]]*\[/ { scoped=($0 ~ /^[[:space:]]*\[(HOST|PATH)[[:space:]]*=/) }
+      !scoped && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") { next }
+      { print }
+    ' "$destination" > "$temporary" || ! mv -f "$temporary" "$destination"; then rm -f "$temporary"; return 1; fi
   done
   chmod 644 "$destination"
+}
+
+# Validate proposed startup settings in the selected image before publication.
+# This catches invalid INI expressions and unreadable configuration without
+# interrupting a running service or changing stopped-site data.
+# shellcheck disable=SC2016
+function joomlaPHPValidateIni() {
+  local image="$1" file="$2" target="$3"
+  shift 3
+  [[ "$file" != *,* && "$target" != *,* && "$file" != *$'\n'* ]] || return 2
+  docker run --rm --network none --read-only --entrypoint php \
+    --mount "type=bind,source=$file,target=$target,readonly" "$image" -r '
+      if (!is_file($argv[1]) || @parse_ini_file($argv[1]) === false || strpos((string)php_ini_scanned_files(), $argv[1]) === false) {
+        fwrite(STDERR,"PHP could not load the proposed override file.\n"); exit(1);
+      }
+      for ($i=2; $i<count($argv); $i+=2) {
+        $expected=parse_ini_string($argv[$i]."=".$argv[$i+1]);
+        $actual=get_cfg_var($argv[$i]);
+        if ($expected===false || !isset($expected[$argv[$i]]) || strcasecmp((string)$actual,(string)$expected[$argv[$i]])!==0) {
+          fwrite(STDERR,"PHP did not accept the proposed ".$argv[$i]." setting.\n"); exit(1);
+        }
+      }
+    ' -- "$target" "$@"
 }
 
 # The application credentials stay inside its container. HTTP and effective PHP
@@ -8324,7 +8357,7 @@ function joomlaRuntimeValidatePublished() {
     $root=$argv[1]; if (!is_file($root . "/configuration.php")) { fwrite(STDERR,"Joomla is not installed; application verification is unavailable.\n"); exit(1); }
     require $root . "/configuration.php"; $c=new JConfig;
     if ($c->dbtype === "mysqli") { mysqli_report(MYSQLI_REPORT_OFF); $host=explode(":",$c->host,2); $db=@new mysqli($host[0],$c->user,$c->password,$c->db,isset($host[1])?(int)$host[1]:3306); exit($db->connect_errno?1:0); }
-    if ($c->dbtype === "pdomysql") { try { new PDO("mysql:host=".$c->host.";dbname=".$c->db,$c->user,$c->password); exit(0); } catch (Throwable $e) { exit(1); } }
+    if ($c->dbtype === "pdomysql") { try { $host=explode(":",$c->host,2); new PDO("mysql:host=".$host[0].";port=".(isset($host[1])?(int)$host[1]:3306).";dbname=".$c->db,$c->user,$c->password); exit(0); } catch (Throwable $e) { exit(1); } }
     fwrite(STDERR,"This database driver requires manual application verification.\n"); exit(1);' -- "$VDM_SITE_DOCROOT" || return 1
   [[ "$VDM_SITE_URL" == http://* || "$VDM_SITE_URL" == https://* ]] || { printf 'No HTTP route was identified for application verification.\n' >&2; return 1; }
   curl --fail --silent --show-error --location --max-redirs 5 --connect-timeout 5 --max-time 30 --output /dev/null "$VDM_SITE_URL"
@@ -8357,7 +8390,7 @@ function joomlaPHPSettingsAction() {
         error_reporting) default='E_ALL & ~E_DEPRECATED & ~E_STRICT';; *) default=256M;;
       esac
       saved=''
-      [ -z "$source" ] || saved=$(awk -v key="$setting" '$0 ~ ("^[[:space:]]*" key "[[:space:]]*=") { sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]*;.*$/, ""); value=$0 } END { print value }' "$source")
+      [ -z "$source" ] || saved=$(awk -v key="$setting" '/^[[:space:]]*\[/ { scoped=($0 ~ /^[[:space:]]*\[(HOST|PATH)[[:space:]]*=/) } !scoped && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") { sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]*;.*$/, ""); value=$0 } END { print value }' "$source")
       if [ -z "$saved" ] && [ "$VDM_SITE_RUNNING" = running ]; then
         saved=$(joomlaSiteCompose "$site" exec -T "$VDM_SITE_SERVICE" php -r 'echo ini_get($argv[1]);' -- "$setting") || return 1
       fi
@@ -8372,7 +8405,31 @@ function joomlaPHPSettingsAction() {
   done
   "$has_values" || { printf 'Supply at least one PHP setting.\n' >&2; return 2; }
   joomlaPHPPatchIni "$source" "$stage/php.ini" "${changes[@]}" || return 1
+  joomlaPHPValidateIni "$VDM_SITE_IMAGE" "$stage/php.ini" "$ini_target" "${changes[@]}" || return 1
   joomlaPHPReplaceMount "$VDM_SITE_COMPOSE" "$stage/docker-compose.yml" "$VDM_SITE_SERVICE" "$old_target" "$VDM_SITE_DIR/php.ini" "$ini_target" || return 1
+  OCTOJOOM_SITE_FILE_TARGETS=("$VDM_SITE_DIR/php.ini")
+  OCTOJOOM_SITE_FILE_SOURCES=("$stage/php.ini")
+}
+
+# A PHP image switch retains existing overrides and relocates their mount to
+# the measured scan directory. Copy shared bulk files before changing one site.
+function joomlaPHPStageExistingOverrides() {
+  local site="$1" stage="$2" candidate="$3" model mounts source old_target target
+  model=$(joomlaSiteCompose "$site" config --format json) || return 1
+  mounts=$(jq -c --arg service "$VDM_SITE_SERVICE" '[.services[$service].volumes[]? | select(.type == "bind" and ((.target | endswith("/php.ini")) or (.target | endswith("/zz-octojoom.ini"))))]' <<< "$model") || return 1
+  case "$(jq 'length' <<< "$mounts")" in
+    0) return 0;;
+    1) ;;
+    *) printf 'Several PHP override mounts exist; choose the intended file in the Compose editor.\n' >&2; return 1;;
+  esac
+  source=$(jq -r '.[0].source' <<< "$mounts")
+  old_target=$(jq -r '.[0].target' <<< "$mounts")
+  [[ -f "$source" && -r "$source" ]] || { printf 'Existing PHP overrides are not readable.\n' >&2; return 1; }
+  target=$(joomlaRuntimeIniTarget "$candidate") || return 1
+  if ! cp "$source" "$stage/php.ini" || ! chmod 644 "$stage/php.ini"; then return 1; fi
+  joomlaPHPValidateIni "$candidate" "$stage/php.ini" "$target" || return 1
+  joomlaPHPReplaceMount "$stage/docker-compose.yml" "$stage/compose.next" "$VDM_SITE_SERVICE" "$old_target" "$VDM_SITE_DIR/php.ini" "$target" || return 1
+  mv "$stage/compose.next" "$stage/docker-compose.yml" || return 1
   OCTOJOOM_SITE_FILE_TARGETS=("$VDM_SITE_DIR/php.ini")
   OCTOJOOM_SITE_FILE_SOURCES=("$stage/php.ini")
 }
@@ -8424,6 +8481,7 @@ function joomla__TRuST__php() {
     if [ "$action" = switch ]; then
       siteReplaceServiceScalar "$VDM_SITE_COMPOSE" "$stage/docker-compose.yml" "$VDM_SITE_SERVICE" image "$candidate" || exit 1
       writeEnvVariable "$stage/.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE=$candidate" true || exit 1
+      joomlaPHPStageExistingOverrides "$site" "$stage" "$candidate" || exit 1
     else
       joomlaPHPSettingsAction "$site" "$stage" || exit $?
     fi

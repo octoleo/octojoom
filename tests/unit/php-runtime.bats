@@ -206,3 +206,62 @@ SH
   assert_command '^docker volume inspect project_webfiles$'
   refute_command '^docker run'
 }
+
+@test "PHP global INI changes retain deliberate HOST and PATH overrides" {
+  local source="$SANDBOX/scoped.ini" target="$SANDBOX/patched.ini"
+  printf '; settings\nmemory_limit = 128M\n[PATH=/var/www/html/admin]\nmemory_limit = 1G\n[Date]\ndate.timezone = UTC\n' > "$source"
+  run joomlaPHPPatchIni "$source" "$target" memory_limit 512M
+  assert_success
+  assert_equal "$(head -n 1 "$target")" 'memory_limit = 512M'
+  assert_file_contains "$target" 'memory_limit = 1G'
+  refute_file_contains "$target" 'memory_limit = 128M'
+  assert_file_contains "$target" 'date.timezone = UTC'
+}
+
+@test "keeping the current webserver preserves its floating tag without registry lookup" {
+  joomlaRuntimeProbeImage() { echo '{"joomla":"6.1.4","php":"8.3.1","flavor":"apache"}'; }
+  joomlaRuntimeTags() { echo 'Registry must not be queried' >&2; return 99; }
+  run joomlaRuntimeSelectImageForFlavor vendor/custom:latest apache
+  assert_success
+  assert_equal "$output" vendor/custom:latest
+}
+
+@test "invalid native PHP settings stop before a proposed mount is published" {
+  local stage="$SANDBOX/stage"
+  mkdir -p "$stage" "$SANDBOX/site"
+  VDM_SITE_DIR="$SANDBOX/site"
+  VDM_SITE_COMPOSE="$VDM_SITE_DIR/docker-compose.yml"
+  VDM_SITE_SERVICE=web
+  VDM_SITE_ENV_KEY=EXAMPLE
+  VDM_SITE_IMAGE=custom/php:tag
+  VDM_SITE_RUNNING=stopped
+  VDM_error_reporting='E_ALL &'
+  OCTOJOOM_TEST_REQUEST=VDM_error_reporting
+  printf 'services:\n  web:\n    volumes:\n      - "website:/var/www/html"\n' > "$VDM_SITE_COMPOSE"
+  : > "$stage/.env"
+  joomlaRuntimeIniTarget() { echo /php/conf.d/zz-octojoom.ini; }
+  joomlaSiteCompose() { echo '{"services":{"web":{"volumes":[]}}}'; }
+  joomlaPHPValidateIni() { return 1; }
+  run joomlaPHPSettingsAction example.test "$stage"
+  assert_failure
+  refute_file_exists "$stage/docker-compose.yml"
+  refute_file_exists "$VDM_SITE_DIR/php.ini"
+  assert_file_contains "$VDM_SITE_COMPOSE" '"website:/var/www/html"'
+}
+
+@test "PHP switches preserve bulk overrides while moving only this site's scan mount" {
+  local stage="$SANDBOX/stage" shared="$SANDBOX/shared.ini"
+  mkdir -p "$stage" "$SANDBOX/site"
+  VDM_SITE_DIR="$SANDBOX/site"
+  VDM_SITE_SERVICE=web
+  printf 'memory_limit = 512M\ndate.timezone = Africa/Windhoek\n' > "$shared"
+  printf 'services:\n  web:\n    image: custom/php:new\n    volumes:\n      - "%s:/var/www/html/php.ini"\n' "$shared" > "$stage/docker-compose.yml"
+  joomlaSiteCompose() { printf '{"services":{"web":{"volumes":[{"type":"bind","source":"%s/shared.ini","target":"/var/www/html/php.ini"}]}}}\n' "$SANDBOX"; }
+  joomlaRuntimeIniTarget() { echo /new/php/conf.d/zz-octojoom.ini; }
+  joomlaPHPValidateIni() { return 0; }
+  run joomlaPHPStageExistingOverrides example.test "$stage" custom/php:new
+  assert_success
+  assert_file_contains "$stage/docker-compose.yml" 'image: custom/php:new'
+  assert_file_contains "$stage/docker-compose.yml" "$VDM_SITE_DIR/php.ini:/new/php/conf.d/zz-octojoom.ini:ro"
+  assert_equal "$(cat "$shared")" "$(cat "$stage/php.ini")"
+}
