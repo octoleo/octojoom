@@ -225,6 +225,8 @@ HOOK
 }
 
 @test "site permission repair targets the selected nested root and uses noninteractive sudo" {
+  # Exercise Unix privilege delegation with the sandboxed sudo stand-in.
+  OS_NUMBER=1
   make_joomla_container alpha ALPHA first
   mkdir -p "${VDM_PROJECT_PATH}/alpha/joomla/site"
   printf 'private' >"${VDM_PROJECT_PATH}/alpha/joomla/site/configuration.php"
@@ -271,6 +273,8 @@ HOOK
 }
 
 @test "original project permission repair has headless parity including database storage" {
+  # Exercise Unix privilege delegation with the sandboxed sudo stand-in.
+  OS_NUMBER=1
   make_joomla_container alpha ALPHA first
   make_joomla_container beta BETA second
   VDM_PROJECT=alpha VDM_PUID=1000 VDM_PGID=1000 OCTOJOOM_NON_INTERACTIVE=true

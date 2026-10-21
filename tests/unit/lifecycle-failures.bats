@@ -154,6 +154,8 @@ make_single_container() {
 }
 
 @test "permission repair: sudo authentication failure stops before changing owners" {
+  # Exercise Unix privilege delegation with the sandboxed sudo stand-in.
+  OS_NUMBER=1
   mkdir -p "${VDM_PROJECT_PATH}/abc/joomla" "${VDM_PROJECT_PATH}/abc/db"
   fail_command sudo-v 12
   answers '"abc"' yes
@@ -164,6 +166,8 @@ make_single_container() {
 }
 
 @test "permission repair: failed background ownership changes are returned before later stages" {
+  # Exercise Unix privilege delegation with the sandboxed sudo stand-in.
+  OS_NUMBER=1
   mkdir -p "${VDM_PROJECT_PATH}/abc/joomla" "${VDM_PROJECT_PATH}/abc/db"
   VDM_PUID=1000
   VDM_PGID=1000
@@ -182,6 +186,8 @@ EOF
 }
 
 @test "permission repair: failed chmod stops subsequent file and database changes" {
+  # Exercise Unix privilege delegation with the sandboxed sudo stand-in.
+  OS_NUMBER=1
   mkdir -p "${VDM_PROJECT_PATH}/abc/joomla" "${VDM_PROJECT_PATH}/abc/db"
   hook_command sudo <<'EOF'
 if [ "$1" = find ]; then exit 14; fi

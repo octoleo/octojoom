@@ -243,6 +243,8 @@ make_fix_project() {
 }
 
 @test "fixContainersPermissions: sets the owners and modes of the selected project" {
+  # Exercise Unix privilege delegation with the sandboxed sudo stand-in.
+  OS_NUMBER=1
   make_fix_project abc
   local p="${VDM_PROJECT_PATH}/abc"
   showProgress() { while inProgress; do sleep 0.05; done; }
@@ -274,6 +276,8 @@ make_fix_project() {
 }
 
 @test "fixContainersPermissions: nothing happens without sudo consent" {
+  # Exercise Unix privilege delegation with the sandboxed sudo stand-in.
+  OS_NUMBER=1
   make_fix_project abc
   answers '"abc"' no
   run fixContainersPermissions
