@@ -21,15 +21,15 @@ setup() {
 }
 
 @test "Apache to Nginx keeps data and unrelated service configuration" {
-  printf '    command: ["keep", "literal"]\n' > "$work/command"
-  joomlaSetServiceProperty "$compose" "$work/custom.yml" joomlaalpha command "$work/command"
+  printf '    entrypoint: ["/custom-entrypoint", "literal"]\n' > "$work/command"
+  joomlaSetServiceProperty "$compose" "$work/custom.yml" joomlaalpha entrypoint "$work/command"
   printf '    ports:\n      - "127.0.0.1:9123:80"\n' > "$work/ports"
   joomlaSetServiceProperty "$work/custom.yml" "$work/ports.yml" joomlaalpha ports "$work/ports"
   run joomlaRewriteWebserverCompose "$work/ports.yml" "$work/result.yml" joomlaalpha nginxalpha nginx example/joomla:verified-fpm nginx:stable-alpine "$work"
   assert_success
   joomlaServiceBlock "$work/result.yml" joomlaalpha > "$work/php.yml"
   joomlaServiceBlock "$work/result.yml" nginxalpha > "$work/http.yml"
-  assert_file_contains "$work/php.yml" 'command: ["keep", "literal"]'
+  assert_file_contains "$work/php.yml" 'entrypoint: ["/custom-entrypoint", "literal"]'
   assert_file_contains "$work/php.yml" 'JOOMLA_DB_HOST=mariadbalpha:3306'
   assert_file_contains "$work/php.yml" '/var/www/html'
   refute_file_contains "$work/php.yml" '127.0.0.1:9123:80'
@@ -86,7 +86,7 @@ setup() {
   assert_success
   assert_output_contains 'root /var/www/html/site;'
   assert_output_contains 'location /api/ { try_files $uri $uri/ /api/index.php?$query_string; }'
-  assert_output_contains 'try_files $uri =404;'
+  assert_output_contains 'try_files $fastcgi_script_name =404;'
   assert_output_contains 'fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;'
   assert_output_contains 'configuration\.php'
   assert_output_contains 'fastcgi_pass joomlaalpha:9000;'
@@ -122,6 +122,7 @@ setup() {
   joomlaRuntimeSelectImageForFlavor() { printf 'joomla:verified-fpm\n'; }
   joomlaSetupWebPrepare
   joomlaContainer > "$work/generated.yml"
+  docker compose --env-file "$VDM_REPO_PATH/joomla/.env" --file "$work/generated.yml" config --quiet
   joomlaServiceBlock "$work/generated.yml" joomlaalpha > "$work/php.yml"
   joomlaServiceBlock "$work/generated.yml" nginxalpha > "$work/http.yml"
   assert_file_contains "$work/php.yml" 'working_dir: "/var/www/html/site"'
@@ -147,4 +148,31 @@ setup() {
   assert_file_exists "$base/index.php"
   assert_file_exists "$base/.htaccess"
   refute_file_exists "$base/site"
+}
+
+@test "web switching maps only the image default command and rejects custom commands" {
+  printf '    command: ["apache2-foreground"]\n' > "$work/command"
+  joomlaSetServiceProperty "$compose" "$work/command.yml" joomlaalpha command "$work/command"
+  joomlaRewriteWebserverCompose "$work/command.yml" "$work/fpm.yml" joomlaalpha nginxalpha nginx joomla:fpm nginx:stable-alpine "$work"
+  assert_file_contains "$work/fpm.yml" 'command: ["php-fpm"]'
+  printf '    command: ["custom-daemon", "--settings"]\n' > "$work/command"
+  joomlaSetServiceProperty "$compose" "$work/command.yml" joomlaalpha command "$work/command"
+  run joomlaRewriteWebserverCompose "$work/command.yml" "$work/fpm.yml" joomlaalpha nginxalpha nginx joomla:fpm nginx:stable-alpine "$work"
+  assert_failure
+  assert_output_contains 'custom command'
+}
+
+@test "explicit root move realigns only log and temporary paths below old root" {
+  cat > "$work/configuration.php" <<'PHP'
+<?php
+class JConfig {
+  public $log_path = '/var/www/html/administrator/logs';
+  public $tmp_path = '/external/private/tmp';
+  public $password = 'unchanged-secret';
+}
+PHP
+  joomlaPatchMovedRootConfiguration "$work/configuration.php" "$work/changed.php" /var/www/html /var/www/html/site
+  assert_file_contains "$work/changed.php" "public \$log_path = '/var/www/html/site/administrator/logs';"
+  assert_file_contains "$work/changed.php" "public \$tmp_path = '/external/private/tmp';"
+  assert_file_contains "$work/changed.php" "public \$password = 'unchanged-secret';"
 }
