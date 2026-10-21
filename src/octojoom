@@ -1134,6 +1134,14 @@ function joomlaContainer() {
       - APACHE_RUN_GROUP=\${VDM_${VDM_ENV_KEY^^}_PGID}"
   fi
 
+  local web_health web_labels
+  web_health='["CMD", "curl", "-f", "http://localhost/"]'
+  web_health="${VDM_WEB_HEALTH:-$web_health}"
+  web_labels=$(getYMLine3 '- "traefik.enable=true"')
+  web_labels+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}.${VDM_DOMAIN}\`)\"")
+  web_labels+="${VDM_JOOMLA_SECURE_LABELS}"
+  web_labels="${VDM_WEB_LABELS:-$web_labels}"
+
   cat <<EOF
 services:
   mariadb${VDM_KEY}:
@@ -1161,11 +1169,11 @@ services:
   joomla${VDM_KEY}:
     image: ${VDM_J_REPO}:${VDM_JV}
     container_name: joomla${VDM_KEY}
-    restart: unless-stopped
+    restart: unless-stopped${VDM_WEB_WORKING_DIR:-}
 
-    # Implicit internal Traefik only.
+    # Internal service port; FPM is never published to the host.
     expose:
-      - "80"
+      - "${VDM_WEB_EXPOSE:-80}"
 
     environment:${vdm_container_user}
       - JOOMLA_DB_HOST=mariadb${VDM_KEY}:3306
@@ -1192,14 +1200,15 @@ services:
 #          memory: 512M
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/"]
+      test: ${web_health}
       interval: 30s
       timeout: 5s
       retries: 5
 
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.joomla${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}.${VDM_DOMAIN}\`)"${VDM_JOOMLA_SECURE_LABELS}
+    labels:${web_labels}${VDM_WEB_SERVICE:-}
+EOF
+  if [ "${VDM_PHPMYADMIN:-true}" = true ]; then
+    cat <<EOF
 
   phpmyadmin${VDM_KEY}:
     image: phpmyadmin/phpmyadmin
@@ -1224,7 +1233,11 @@ services:
 
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.phpmyadmin${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}db.${VDM_DOMAIN}\`)"${VDM_PHPMYADMIN_SECURE_LABELS}${VDM_EXTRA_CONTAINER_STUFF}
+      - "traefik.http.routers.phpmyadmin${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}db.${VDM_DOMAIN}\`)"${VDM_PHPMYADMIN_SECURE_LABELS}
+EOF
+  fi
+  cat <<EOF
+${VDM_EXTRA_CONTAINER_STUFF}
 
 networks:
   traefik:
@@ -1234,6 +1247,728 @@ networks:
 ${VDM_VOLUMES}
 
 EOF
+}
+
+# Webserver changes edit the block style emitted by Octojoom. These readers
+# deliberately reject aliases/flow service definitions; they are not YAML parsers.
+function joomlaServiceBlock() {
+  local file="$1" service="$2"
+  [[ "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || return 1
+  awk -v service="$service" '
+    /^services:[[:space:]]*$/ {services=1; next}
+    /^[^[:space:]#][^:]*:/ {services=0; active=0}
+    services && /^  [^[:space:]#][^:]*:/ {
+      active=($0 == "  " service ":")
+      if(active) found++
+    }
+    active {print; if($0 ~ /\t|[[:space:]][&*][A-Za-z]|^[[:space:]]*<<:/) unsafe=1}
+    END {if(found!=1 || unsafe) exit 1}
+  ' "$file"
+}
+
+# Read one direct service property, retaining its comments and nested content.
+function joomlaServiceProperty() {
+  local file="$1" service="$2" property="$3" block
+  block=$(joomlaServiceBlock "$file" "$service") || return 1
+  printf '%s\n' "$block" | awk -v property="$property" '
+    /^    [A-Za-z_][A-Za-z0-9_-]*:/ {
+      name=$0; sub(/^    /,"",name); sub(/:.*/,"",name)
+      active=(name==property); if(active) found++
+    }
+    active {print}
+    END {if(found>1) exit 1}
+  '
+}
+
+# Replace/add/remove one direct property, leaving other service text untouched.
+# An empty replacement removes the property. SOURCE and DEST must differ.
+function joomlaSetServiceProperty() {
+  local source="$1" destination="$2" service="$3" property="$4" replacement="$5" block
+  [ "$source" != "$destination" ] && [ ! "$source" -ef "$destination" ] || return 1
+  block=$(joomlaServiceBlock "$source" "$service") || return 1
+  [ -n "$block" ] || return 1
+  awk -v service="$service" -v property="$property" -v replacement="$replacement" '
+    function emit( line) {
+      while((getline line < replacement)>0) print line
+      close(replacement); emitted=1
+    }
+    function finish() {if(active && !emitted) emit(); active=0; skip=0}
+    /^services:[[:space:]]*$/ {services=1}
+    /^[^[:space:]#][^:]*:/ && !/^services:/ {finish(); services=0}
+    services && /^  [^[:space:]#][^:]*:/ {
+      finish(); active=($0=="  " service ":"); if(active) found++
+    }
+    active && /^    [A-Za-z_][A-Za-z0-9_-]*:/ {
+      name=$0; sub(/^    /,"",name); sub(/:.*/,"",name)
+      skip=(name==property)
+      if(skip) {count++; if(!emitted) emit()}
+    }
+    !skip {print}
+    END {finish(); if(found!=1 || count>1) exit 1}
+  ' "$source" > "$destination"
+}
+
+# Replace a complete service block or insert a new one at the end of services.
+function joomlaSetServiceBlock() {
+  local source="$1" destination="$2" service="$3" replacement="$4"
+  [ "$source" != "$destination" ] && [ ! "$source" -ef "$destination" ] || return 1
+  awk -v service="$service" -v replacement="$replacement" '
+    function emit( line) {
+      while((getline line < replacement)>0) print line
+      close(replacement); emitted=1
+    }
+    /^services:[[:space:]]*$/ {services=1; section++}
+    /^[^[:space:]#][^:]*:/ && !/^services:/ {
+      if(services && !emitted) emit()
+      services=0; skip=0
+    }
+    services && /^  [^[:space:]#][^:]*:/ {
+      skip=($0=="  " service ":")
+      if(skip) {count++; if(!emitted) emit()}
+    }
+    !skip {print}
+    END {if(services && !emitted) emit(); if(section!=1 || count>1) exit 1}
+  ' "$source" > "$destination"
+}
+
+# Root paths are deliberately project-relative and cannot escape the data mount.
+function joomlaValidateDocumentRoot() {
+  local root="${1:-.}" part
+  [ "$root" = . ] && return 0
+  [[ "$root" != /* && "$root" != */ && "$root" != *'//'*
+    && "$root" =~ ^[A-Za-z0-9_./-]+$ ]] || return 1
+  local -a parts=()
+  IFS=/ read -r -a parts <<< "$root"
+  for part in "${parts[@]}"; do
+    [[ "$part" != . && "$part" != .. && -n "$part" ]] || return 1
+  done
+}
+
+function getJoomlaDocumentRoot() {
+  (
+    readJoomlaSiteFacts "$1" || exit 1
+    [ -n "${VDM_SITE_DOCROOT:-}" ] || exit 1
+    printf '%s\n' "$VDM_SITE_DOCROOT"
+  )
+}
+
+# Keep PHP handling separate from SEF routing: a missing .php file must return
+# 404, and /api/ requests must use Joomla's API front controller.
+function joomlaNginxConfiguration() {
+  local service="$1" root="$2"
+  [[ "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && "$root" =~ ^/[A-Za-z0-9_./-]+$ ]] || return 1
+  cat <<EOF_NGINX
+# Octojoom Joomla webserver. Editable; preserve the root and FPM service together.
+server {
+    listen 80;
+    server_name _;
+    root ${root};
+    index index.php index.html;
+    client_max_body_size 256m;
+
+    location = /__octojoom_health { access_log off; return 204; }
+    location ~ /\\. { deny all; }
+    location ~* (configuration\\.php|\\.(ini|log|sql|bak|dist|sh)|composer\\.(json|lock))$ { deny all; }
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location /administrator/ { try_files \$uri \$uri/ /administrator/index.php?\$query_string; }
+    location /api/ { try_files \$uri \$uri/ /api/index.php?\$query_string; }
+    location ~ \\.php$ {
+        try_files \$uri =404;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param HTTP_PROXY "";
+        fastcgi_pass ${service}:9000;
+    }
+ }
+EOF_NGINX
+}
+
+function joomlaApacheConfiguration() {
+  local root="$1"
+  [[ "$root" =~ ^/[A-Za-z0-9_./-]+$ ]] || return 1
+  cat <<EOF_APACHE
+# Octojoom Joomla document root. Other Apache configuration stays in the image.
+<VirtualHost *:80>
+    DocumentRoot "${root}"
+    <Directory "${root}">
+        Options FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+    ErrorLog /proc/self/fd/2
+    CustomLog /proc/self/fd/1 combined
+</VirtualHost>
+EOF_APACHE
+}
+
+# Add/replace only Octojoom's own companion mount. User mounts at that target
+# must be handled explicitly rather than silently overwritten.
+function joomlaWebCompanionMount() {
+  local source="$1" destination="$2" service="$3" filename="$4" target="$5" directory="$6"
+  local property="$directory/mounts" line filtered="$directory/mounts.next"
+  joomlaServiceProperty "$source" "$service" volumes > "$property" || return 1
+  [ -s "$property" ] || printf '    volumes:\n' > "$property"
+  : > "$filtered"
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" == *":${target}"* || "$line" == *"target: ${target}"* ]]; then
+      [[ "$line" == *"./${filename}:${target}:ro"* ]] || {
+        printf 'A custom mount already controls %s; edit that configuration explicitly.\n' "$target" >&2
+        return 1
+      }
+    else
+      printf '%s\n' "$line" >> "$filtered"
+    fi
+  done < "$property"
+  printf '      - "./%s:%s:ro"\n' "$filename" "$target" >> "$filtered"
+  joomlaSetServiceProperty "$source" "$destination" "$service" volumes "$filtered"
+}
+
+# Split ordinary list-style labels without moving application/tooling metadata
+# from the PHP service to Nginx. Unfamiliar label syntax is operation-specific.
+function joomlaWebRouteLabels() {
+  local source="$1" service="$2" routes="$3" retained="$4" line found=false
+  local block
+  block=$(joomlaServiceProperty "$source" "$service" labels) || return 1
+  : > "$routes"; : > "$retained"
+  [ -n "$block" ] || return 0
+  printf '    labels:\n' > "$routes"
+  printf '    labels:\n' > "$retained"
+  while IFS= read -r line; do
+    [[ "$line" = '    labels:' || "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+    [[ "$line" =~ ^[[:space:]]+-[[:space:]]+ ]] || {
+      printf 'Webserver switching currently requires list-style labels; convert only this property before retrying.\n' >&2
+      return 1
+    }
+    if [[ "$line" = *traefik.* ]]; then
+      printf '%s\n' "$line" >> "$routes"
+    else
+      printf '%s\n' "$line" >> "$retained"; found=true
+    fi
+  done <<< "$block"
+  "$found" || : > "$retained"
+}
+
+# Convert only recognized service structure, preserving the original image's
+# environment, entrypoint, commands, mounts, resources and unrelated services.
+# Traffic-bearing properties move to HTTP Nginx; FPM never inherits host ports.
+function joomlaRewriteWebserverCompose() {
+  local source="$1" destination="$2" service="$3" nginx="$4" flavor="$5" image="$6" nginx_image="$7" work="$8"
+  local current="$work/compose.current" next="$work/compose.next" property web="$work/nginx-service" mount="$work/web-mount"
+  [[ "$flavor" == apache || "$flavor" == nginx ]] || return 1
+  [[ "$image" =~ ^[A-Za-z0-9][A-Za-z0-9./:@_-]+$ && "$nginx_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:@_-]+$ ]] || return 1
+  cp "$source" "$current" || return 1
+  joomlaServiceBlock "$current" "$service" > "$work/php-service" || {
+    printf 'Webserver changes require a block-style web service without YAML anchors.\n' >&2; return 1;
+  }
+  printf '    image: %s\n' "$image" > "$work/property"
+  joomlaSetServiceProperty "$current" "$next" "$service" image "$work/property" && mv "$next" "$current" || return 1
+  if [ "$flavor" = nginx ]; then
+    # Keep the original HTTP healthcheck available for the return to Apache.
+    joomlaServiceProperty "$source" "$service" healthcheck > "$work/apache-healthcheck.yml" || return 1
+    # A pre-existing service with this name is user configuration, unless it was
+    # generated by this operation (repeat setting the same flavor is a no-op).
+    if joomlaServiceBlock "$current" "$nginx" >/dev/null 2>&1; then
+      printf 'The service %s already exists; refusing to replace it.\n' "$nginx" >&2; return 1
+    fi
+    joomlaServiceProperty "$current" "$service" volumes > "$work/volumes" || return 1
+    # Root short syntax is intentionally bounded; spaces in quoted bind paths work.
+    # Long-syntax mounts are supported through their semantic facts below.
+    if command -v jq >/dev/null 2>&1 && [ -n "${VDM_SITE_MOUNT_TYPE:-}" ] && [ -n "${VDM_SITE_MOUNT_SOURCE:-}" ]; then
+      printf '      - type: %s\n        source: %s\n        target: %s\n        read_only: true\n' \
+        "$VDM_SITE_MOUNT_TYPE" "$(printf '%s' "$VDM_SITE_MOUNT_SOURCE" | jq -Rs .)" \
+        "$(printf '%s' "$VDM_SITE_MOUNT_TARGET" | jq -Rs .)" > "$mount"
+    else
+      awk '
+        /^[[:space:]]*-/ && /:\/var\/www\/html(:[a-z,]+)?"?[[:space:]]*$/ {
+          line=$0; sub(/:[a-z,]+"?[[:space:]]*$/,"\"",line)
+          sub(/"?[[:space:]]*$/,"",line); sub(/^[[:space:]]*-[[:space:]]*"?/,"",line)
+          print "      - \"" line ":ro\""; found++
+        }
+        END {if(found!=1) exit 1}
+      ' "$work/volumes" > "$mount" || {
+        printf 'Cannot resolve the website mount for Nginx; inspect its Compose volume.\n' >&2; return 1;
+      }
+    fi
+    joomlaWebRouteLabels "$current" "$service" "$work/route-labels" "$work/retained-labels" || return 1
+    {
+      printf '  %s:\n    # Octojoom managed HTTP companion\n    image: %s\n    restart: unless-stopped\n' "$nginx" "$nginx_image"
+      printf '    depends_on:\n      %s:\n        condition: service_healthy\n' "$service"
+      printf '    volumes:\n'; cat "$mount"
+      printf '      - "./nginx.conf:/etc/nginx/conf.d/default.conf:ro"\n'
+      for property in networks ports expose; do
+        joomlaServiceProperty "$current" "$service" "$property" || return 1
+      done
+      cat "$work/route-labels"
+      printf '    healthcheck:\n      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/__octojoom_health"]\n      interval: 10s\n      timeout: 5s\n      retries: 12\n'
+    } > "$web" || return 1
+    [ -s "$work/retained-labels" ] || printf '    labels:\n' > "$work/retained-labels"
+    printf '      - "traefik.enable=false"\n' >> "$work/retained-labels"
+    joomlaSetServiceProperty "$current" "$next" "$service" labels "$work/retained-labels" && mv "$next" "$current" || return 1
+    for property in ports expose; do
+      : > "$work/property"
+      joomlaSetServiceProperty "$current" "$next" "$service" "$property" "$work/property" && mv "$next" "$current" || return 1
+    done
+    cat > "$work/property" <<'FPM_HEALTH'
+    healthcheck:
+      test: ["CMD", "php", "-r", "exit(@fsockopen('127.0.0.1', 9000) ? 0 : 1);"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+FPM_HEALTH
+    joomlaSetServiceProperty "$current" "$next" "$service" healthcheck "$work/property" && mv "$next" "$current" || return 1
+    joomlaSetServiceBlock "$current" "$next" "$nginx" "$web" && mv "$next" "$current" || return 1
+  else
+    joomlaServiceBlock "$current" "$nginx" > "$web" || return 1
+    grep -qF '# Octojoom managed HTTP companion' "$web" || {
+      printf 'This Nginx service was configured manually; retain it and edit its routing explicitly.\n' >&2; return 1;
+    }
+    joomlaWebRouteLabels "$current" "$nginx" "$work/route-labels" "$work/nginx-extra-labels" || return 1
+    [ ! -s "$work/nginx-extra-labels" ] || {
+      printf 'The Nginx companion has custom non-routing labels; retain those explicitly before removing it.\n' >&2; return 1;
+    }
+    joomlaWebRouteLabels "$current" "$service" "$work/disabled-labels" "$work/php-labels" || return 1
+    if [ -s "$work/php-labels" ]; then
+      tail -n +2 "$work/route-labels" >> "$work/php-labels"
+    else
+      cp "$work/route-labels" "$work/php-labels" || return 1
+    fi
+    joomlaSetServiceProperty "$current" "$next" "$service" labels "$work/php-labels" && mv "$next" "$current" || return 1
+    for property in ports expose; do
+      joomlaServiceProperty "$current" "$nginx" "$property" > "$work/property" || return 1
+      joomlaSetServiceProperty "$current" "$next" "$service" "$property" "$work/property" && mv "$next" "$current" || return 1
+    done
+    if [ -f "$work/restore-healthcheck.yml" ]; then
+      cp "$work/restore-healthcheck.yml" "$work/property" || return 1
+    else
+      cat > "$work/property" <<'APACHE_HEALTH'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+APACHE_HEALTH
+    fi
+    joomlaSetServiceProperty "$current" "$next" "$service" healthcheck "$work/property" && mv "$next" "$current" || return 1
+    : > "$web"
+    joomlaSetServiceBlock "$current" "$next" "$nginx" "$web" && mv "$next" "$current" || return 1
+  fi
+  cp "$current" "$destination"
+}
+
+# Test syntax plus application paths inside the affected HTTP container. Real
+# external route/database verification is shared with the PHP action when present.
+function joomlaVerifyWebConfiguration() {
+  local site="$1" service root flavor
+  readJoomlaSiteFacts "$site" || return 1
+  service="$VDM_SITE_SERVICE" root="$VDM_SITE_DOCROOT" flavor="$VDM_SITE_WEBSERVER"
+  if [ "$flavor" = nginx ]; then
+    joomlaSiteCompose "$site" exec -T "nginx${VDM_SITE_KEY}" nginx -t >/dev/null || return 1
+    # Observe response status AND Joomla API JSON; a generic Nginx 404 is not
+    # evidence that the API front controller works. Also test denial paths.
+    # shellcheck disable=SC2016 # Literal PHP executed in the selected container.
+    joomlaSiteCompose "$site" exec -T "$service" php -r '
+      $base=$argv[1];
+      foreach (["/", "/administrator/", "/api/index.php/v1/content/articles", "/configuration.php", "/octojoom-missing-script.php"] as $path) {
+        $context=stream_context_create(["http"=>["ignore_errors"=>true,"timeout"=>15,"follow_location"=>0]]);
+        $body=@file_get_contents($base.$path,false,$context); $code=0;
+        foreach($http_response_header ?? [] as $line) if(preg_match("~^HTTP/[0-9.]+ ([0-9]+)~",$line,$m)) $code=(int)$m[1];
+        if($body===false || !$code || $code>=500) exit(1);
+        if($path==="/configuration.php") { if($code!==403) exit(1); continue; }
+        if($path==="/octojoom-missing-script.php") { if($code!==404) exit(1); continue; }
+        if(strpos($path,"/api/")===0) {
+          $json=json_decode($body,true);
+          if(!is_array($json) || (!isset($json["errors"]) && !isset($json["data"]) && !isset($json["links"]))) exit(1);
+          if(!in_array($code,[200,401,403,404],true)) exit(1);
+        } elseif($code<200 || $code>=400) exit(1);
+      }
+    ' "http://nginx${VDM_SITE_KEY}" || return 1
+  else
+    joomlaSiteCompose "$site" exec -T "$service" apache2ctl -t >/dev/null || return 1
+    joomlaSiteCompose "$site" exec -T "$service" curl --fail --silent --output /dev/null http://127.0.0.1/ || return 1
+  fi
+  # shellcheck disable=SC2016 # Literal PHP, not shell variables.
+  joomlaSiteCompose "$site" exec -T "$service" php -r \
+    'exit(is_file($argv[1]."/index.php") && is_file($argv[1]."/configuration.php") ? 0 : 1);' "$root" || return 1
+  if isFunc joomlaRuntimeValidatePublished; then
+    joomlaRuntimeValidatePublished "$site" || return 1
+  fi
+}
+
+# Inspect website content in a non-installing, network-isolated PHP process.
+function joomlaReadOnlyRootPHP() {
+  local site="$1" source="$VDM_SITE_MOUNT_SOURCE" type="$VDM_SITE_MOUNT_TYPE" config
+  shift
+  [[ "$type" = bind || "$type" = volume ]] || return 1
+  if [ "$type" = volume ]; then
+    command -v jq >/dev/null 2>&1 || return 1
+    config=$(joomlaSiteCompose "$site" config --format json) || return 1
+    source=$(printf '%s' "$config" | jq -er --arg name "$source" '.volumes[$name].name // $name') || return 1
+    docker volume inspect "$source" >/dev/null || return 1
+  fi
+  [[ "$source" != *','* && "$source" != *$'\n'* && "$VDM_SITE_MOUNT_TARGET" != *','* ]] || return 1
+  docker run --rm --network none --read-only --mount "type=${type},source=${source},target=${VDM_SITE_MOUNT_TARGET},readonly" \
+    --entrypoint php "$VDM_SITE_IMAGE" "$@"
+}
+
+function joomlaHasCustomHtaccess() {
+  local site="$1" root="$3" status
+  # 0 custom, 1 distributed/no file, 2 unreadable: failures must not mean safe.
+  # shellcheck disable=SC2016 # Literal PHP, not shell variables.
+  joomlaReadOnlyRootPHP "$site" -r \
+    '$root=$argv[1]; if(!is_file($root."/.htaccess")) exit(0); if(!is_readable($root."/.htaccess")) exit(2); if(!is_file($root."/htaccess.txt")) exit(10); $normalize=function($file){$lines=preg_split("~\\R~",file_get_contents($file)); return implode("\n",array_filter(array_map("trim",$lines),function($line){return $line !== "" && strpos($line,"#") !== 0 && strpos($line,"Options -Indexes") !== 0;}));}; exit($normalize($root."/.htaccess") === $normalize($root."/htaccess.txt") ? 0 : 10);' "$root" >/dev/null 2>&1
+  status=$?
+  case "$status" in 0) return 1 ;; 10) return 0 ;; *) return 2 ;; esac
+}
+
+function joomla__TRuST__webserver() {
+  (
+    local site="${VDM_CONTAINER:-}" choice="${VDM_WEBSERVER:-}" action="${VDM_ACTION:-show}" work image flavor root nginx_image
+    [ -n "$site" ] || { printf 'Select a website with --container.\n' >&2; exit 2; }
+    readJoomlaSiteFacts "$site" || exit 1
+    [ "$action" = show ] && { printf '%s\n' "$VDM_SITE_WEBSERVER"; exit 0; }
+    [ "$action" = set ] || { printf 'Unknown webserver action: %s\n' "$action" >&2; exit 2; }
+    if [ -z "$choice" ]; then
+      [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] || { printf '%s\n' '--webserver is required.' >&2; exit 2; }
+      choice=$(whiptail --title 'Website webserver' --backtitle "$BACK_TITLE" --menu "Current: ${VDM_SITE_WEBSERVER}" 15 80 3 \
+        apache 'Apache' nginx 'Nginx with PHP-FPM' 3>&1 1>&2 2>&3) || exit 0
+    fi
+    [[ "$choice" = apache || "$choice" = nginx ]] || { printf 'Choose apache or nginx.\n' >&2; exit 2; }
+    [ "$choice" != "$VDM_SITE_WEBSERVER" ] || { printf 'Webserver is already %s.\n' "$choice"; exit 0; }
+    [[ -n "$VDM_SITE_KEY" && -n "$VDM_SITE_ENV_KEY" && -n "$VDM_SITE_SERVICE" ]] || exit 1
+    root="$VDM_SITE_DOCROOT" nginx_image="${VDM_NGINX_IMAGE:-nginx:stable-alpine}"
+    flavor=apache; [ "$choice" != nginx ] || flavor=fpm
+    image=$(joomlaRuntimeSelectImage "$site" "$flavor" "${VDM_IMAGE_TAG:-${VDM_JV:-}}") || exit 1
+    if [ "$choice" = nginx ]; then
+      docker pull "$nginx_image" >&2 || exit 1
+      if [ -z "${VDM_NGINX_CONFIG:-}" ]; then
+        local htaccess_status=0
+        joomlaHasCustomHtaccess "$site" "$VDM_SITE_SERVICE" "$root" || htaccess_status=$?
+        if [ "$htaccess_status" -eq 0 ]; then
+          printf 'Custom Apache .htaccess rules need an explicit Nginx equivalent (--nginx-config FILE). The existing site is unchanged.\n' >&2
+          exit 2
+        elif [ "$htaccess_status" -ne 1 ]; then
+          printf 'Unable to inspect Apache rules safely; the existing site is unchanged.\n' >&2
+          exit 1
+        fi
+      fi
+    fi
+    work=$(mktemp -d "$VDM_SITE_DIR/.webserver.XXXXXX") || exit 1
+    trap 'rm -rf "$work"' EXIT
+    if [ "$choice" = apache ] && [ -f "$VDM_SITE_DIR/apache-healthcheck.yml" ]; then
+      cp "$VDM_SITE_DIR/apache-healthcheck.yml" "$work/restore-healthcheck.yml" || exit 1
+    fi
+    joomlaRewriteWebserverCompose "$VDM_SITE_COMPOSE" "$work/docker-compose.yml" "$VDM_SITE_SERVICE" "nginx${VDM_SITE_KEY}" \
+      "$choice" "$image" "$nginx_image" "$work" || exit 1
+    siteWriteScopedEnv "$VDM_SITE_COMPOSE" "$VDM_SITE_ENV" "$VDM_SITE_ENV_KEY" "$work/.env" || exit 1
+    writeEnvVariable "$work/.env" "VDM_${VDM_SITE_ENV_KEY}_WEBSERVER=$choice" true || exit 1
+    local -a OCTOJOOM_SITE_FILE_TARGETS=() OCTOJOOM_SITE_FILE_SOURCES=() OCTOJOOM_SITE_START_SERVICES=() OCTOJOOM_SITE_STOP_SERVICES=()
+    if [ "$choice" = nginx ]; then
+      if [ -n "${VDM_NGINX_CONFIG:-}" ]; then
+        [ -f "$VDM_NGINX_CONFIG" ] && [ ! -L "$VDM_NGINX_CONFIG" ] || exit 1
+        cp "$VDM_NGINX_CONFIG" "$work/nginx.conf" || exit 1
+      else
+        joomlaNginxConfiguration "$VDM_SITE_SERVICE" "$root" > "$work/nginx.conf" || exit 1
+      fi
+      OCTOJOOM_SITE_FILE_TARGETS+=("$VDM_SITE_DIR/nginx.conf" "$VDM_SITE_DIR/apache-healthcheck.yml")
+      OCTOJOOM_SITE_FILE_SOURCES+=("$work/nginx.conf" "$work/apache-healthcheck.yml")
+      # Official FPM uses its pool user, not Apache's environment variables.
+      local puid='' pgid=''
+      migrationReadEnvValue "$VDM_SITE_ENV" "VDM_${VDM_SITE_ENV_KEY}_PUID" puid || :
+      migrationReadEnvValue "$VDM_SITE_ENV" "VDM_${VDM_SITE_ENV_KEY}_PGID" pgid || :
+      if [ -n "$puid$pgid" ]; then
+        puid="${puid#\#}" pgid="${pgid#\#}"
+        [[ "$puid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ ]] || exit 1
+        docker run --rm --entrypoint sh "$image" -c 'test -d /usr/local/etc/php-fpm.d' || exit 1
+        printf '[www]\nuser = %s\ngroup = %s\n' "$puid" "$pgid" > "$work/php-fpm-user.conf"
+        joomlaWebCompanionMount "$work/docker-compose.yml" "$work/compose.next" "$VDM_SITE_SERVICE" php-fpm-user.conf /usr/local/etc/php-fpm.d/zz-octojoom-user.conf "$work" && mv "$work/compose.next" "$work/docker-compose.yml" || exit 1
+        OCTOJOOM_SITE_FILE_TARGETS+=("$VDM_SITE_DIR/php-fpm-user.conf")
+        OCTOJOOM_SITE_FILE_SOURCES+=("$work/php-fpm-user.conf")
+      fi
+      OCTOJOOM_SITE_START_SERVICES+=("nginx${VDM_SITE_KEY}")
+    else
+      OCTOJOOM_SITE_STOP_SERVICES+=("nginx${VDM_SITE_KEY}")
+      if [ "$root" != /var/www/html ]; then
+        joomlaApacheConfiguration "$root" > "$work/apache.conf" || exit 1
+        joomlaWebCompanionMount "$work/docker-compose.yml" "$work/compose.next" "$VDM_SITE_SERVICE" apache.conf /etc/apache2/sites-enabled/000-default.conf "$work" && mv "$work/compose.next" "$work/docker-compose.yml" || exit 1
+        OCTOJOOM_SITE_FILE_TARGETS+=("$VDM_SITE_DIR/apache.conf")
+        OCTOJOOM_SITE_FILE_SOURCES+=("$work/apache.conf")
+      fi
+    fi
+    local companion
+    for companion in "${OCTOJOOM_SITE_FILE_SOURCES[@]}"; do chmod 644 "$companion" || exit 1; done
+    # shellcheck disable=SC2034 # Consumed by the shared publication helper.
+    local OCTOJOOM_SITE_VALIDATE_FUNCTION=joomlaVerifyWebConfiguration
+    sitePublishConfiguration "$site" "$work/docker-compose.yml" "$work/.env" "$VDM_SITE_SERVICE" || exit 1
+    printf 'Webserver set to %s using %s.\n' "$choice" "$image"
+  )
+}
+
+# A stopped one-shot PHP process reads the mount without invoking installation.
+# Selecting a root never creates it or moves content.
+function joomlaCheckDocumentRoot() {
+  local site="$1" root="$3"
+  # shellcheck disable=SC2016 # Literal PHP, not shell variables.
+  joomlaReadOnlyRootPHP "$site" -r \
+    '$root=$argv[1]; $base=realpath($argv[2]); $path=realpath($root); exit($base !== false && $path !== false && ($path === $base || strpos($path,$base."/")===0) && is_file($path."/index.php") && is_file($path."/configuration.php") ? 0 : 1);' "$root" "$VDM_SITE_MOUNT_TARGET" >/dev/null
+}
+
+# Explicit moves use a private staging directory in the same bind mount, then
+# rename complete entries. Existing destinations and shared mounts are refused.
+# This intentionally does not claim a portable named-volume move operation.
+function joomlaMoveDocumentRoot() {
+  local source="$1" destination="$2" base="$3" item other
+  [ -d "$source" ] && [ ! -L "$source" ] && [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
+  [[ "$source/" == "$base/"* && "$destination/" == "$base/"* && "$source" != "$destination" ]] || return 1
+  # A parent destination would mix content; choose an empty sibling or child.
+  [[ "$source/" != "$destination/"* ]] || return 1
+  [ -f "$source/index.php" ] && [ -f "$source/configuration.php" ] || return 1
+  for other in "$VDM_REPO_PATH/joomla/available"/*/docker-compose.yml; do
+    if [ ! -f "$other" ] || [ "$other" = "$VDM_SITE_COMPOSE" ]; then continue; fi
+    if (
+      readJoomlaSiteFacts "$(basename "$(dirname "$other")")" || exit 1
+      [[ "$VDM_SITE_MOUNT_TYPE" = bind && "$VDM_SITE_MOUNT_SOURCE" = "$base" ]]
+    ); then
+      printf 'Another site shares this bind mount. Move its data explicitly after separating the sites.\n' >&2
+      return 1
+    fi
+  done
+  local parent="${destination%/*}" canonical ancestor
+  if [[ "$destination/" = "$source/"* ]]; then
+    ancestor="${destination#"$source/"}"; ancestor="${ancestor%%/*}"
+    [ ! -e "$source/$ancestor" ] && [ ! -L "$source/$ancestor" ] || return 1
+  fi
+  mkdir -p "$parent" || return 1
+  canonical=$(cd "$parent" && pwd -P) || return 1
+  [[ "$canonical/" == "$base/"* || "$canonical" = "$base" ]] || return 1
+  mkdir "$destination" || return 1
+  local -a moved=()
+  while IFS= read -r -d '' item; do
+    # The target may be a nested child. Keep its ancestors in place.
+    [[ "$destination/" == "$item/"* ]] && continue
+    if ! mv "$item" "$destination/"; then
+      for item in "${moved[@]}"; do mv "$destination/${item##*/}" "$source/" || return 1; done
+      rmdir "$destination" 2>/dev/null || :
+      return 1
+    fi
+    moved+=("$item")
+  done < <(find "$source" -mindepth 1 -maxdepth 1 -print0)
+  return 0
+}
+
+# Only literal Joomla path properties below the old root are realigned. Keep
+# custom external log/tmp directories and every other configuration property.
+function joomlaPatchMovedRootConfiguration() {
+  local source="$1" destination="$2" old_root="$3" new_root="$4"
+  awk -v old="$old_root" -v new="$new_root" '
+    /^[[:space:]]*public[[:space:]]+[$](log_path|tmp_path)[[:space:]]*=/ {
+      line=$0; quote=sprintf("%c",39)
+      pattern="^[[:space:]]*public[[:space:]]+[$](log_path|tmp_path)[[:space:]]*=[[:space:]]*" quote
+      if(line !~ pattern) {print; next}
+      value=line; sub(pattern,"",value)
+      if(value !~ quote ";[[:space:]]*$") {print; next}
+      sub(quote ";[[:space:]]*$","",value)
+      if(value==old || index(value,old "/")==1) {
+        before=line; sub(quote ".*$","",before)
+        print before quote new substr(value,length(old)+1) quote ";"; next
+      }
+    }
+    {print}
+  ' "$source" > "$destination"
+}
+
+function joomlaRestoreMovedRoot() {
+  local source="$1" destination="$2" item failed=0
+  while IFS= read -r -d '' item; do
+    [ ! -e "$source/${item##*/}" ] && mv "$item" "$source/" || failed=1
+  done < <(find "$destination" -mindepth 1 -maxdepth 1 -print0)
+  [ "$failed" -eq 0 ] && rmdir "$destination"
+}
+
+function joomla__TRuST__docroot() {
+  (
+    local site="${VDM_CONTAINER:-}" requested="${VDM_DOCROOT-}" action="${VDM_ACTION:-show}" work root flavor current_relative files_moved=false old_host new_host
+    [ -n "$site" ] || { printf 'Select a website with --container.\n' >&2; exit 2; }
+    readJoomlaSiteFacts "$site" || exit 1
+    [ "$action" = show ] && { printf '%s\n' "$VDM_SITE_DOCROOT"; exit 0; }
+    [ "$action" = set ] || { printf 'Unknown document-root action: %s\n' "$action" >&2; exit 2; }
+    if [ -z "${VDM_SITE_MOUNT_TARGET:-}" ] || [ -z "${VDM_SITE_ENV_KEY:-}" ]; then
+      printf 'Cannot resolve the website mount or ENV key.\n' >&2; exit 1
+    fi
+    current_relative="${VDM_SITE_DOCROOT#"${VDM_SITE_MOUNT_TARGET}/"}"
+    [ "$VDM_SITE_DOCROOT" != "$VDM_SITE_MOUNT_TARGET" ] || current_relative=.
+    if [ -z "$requested" ]; then
+      [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] || { printf '%s\n' '--docroot is required.' >&2; exit 2; }
+      requested=$(getInput 'Select an existing Joomla directory relative to the website mount (. keeps its root). Files are not moved.' "$current_relative" 'Website document root') || exit 0
+    fi
+    joomlaValidateDocumentRoot "$requested" || { printf 'Document root must stay inside the website mount (no absolute paths, . or .. components).\n' >&2; exit 2; }
+    [ "$requested" != "$current_relative" ] || { printf 'Document root is unchanged.\n'; exit 0; }
+    root="${VDM_SITE_MOUNT_TARGET%/}"; [ "$requested" = . ] || root+="/$requested"
+    flavor="$VDM_SITE_WEBSERVER"
+    [[ "$flavor" = apache || "$flavor" = nginx ]] || { printf 'Document-root changes require an identified Apache or Nginx service.\n' >&2; exit 1; }
+    if [ "${VDM_MOVE_FILES:-false}" = true ]; then
+      if [ "$VDM_SITE_MOUNT_TYPE" != bind ] || [ -z "$VDM_SITE_HOST_PATH" ]; then
+        printf 'Automatic moves support independent bind mounts. For named volumes, move files explicitly and select the resulting root.\n' >&2; exit 2
+      fi
+      old_host="$VDM_SITE_HOST_PATH" new_host="$VDM_SITE_MOUNT_SOURCE"
+      [ "$requested" = . ] || new_host+="/$requested"
+      if [ -e "$new_host" ] || [ -L "$new_host" ]; then
+        printf 'Move destination already exists: %s\n' "$new_host" >&2; exit 2
+      fi
+      # Do not move an application while it is serving requests.
+      [ "$VDM_SITE_RUNNING" = stopped ] || { printf 'Stop this website before explicitly moving its files.\n' >&2; exit 2; }
+    else
+      joomlaCheckDocumentRoot "$site" "$VDM_SITE_SERVICE" "$root" || { printf 'The selected directory is not an existing installed Joomla root inside this mount.\n' >&2; exit 2; }
+    fi
+    work=$(mktemp -d "$VDM_SITE_DIR/.docroot.XXXXXX") || exit 1
+    trap 'rm -rf "$work"' EXIT
+    cp "$VDM_SITE_COMPOSE" "$work/docker-compose.yml" || exit 1
+    siteWriteScopedEnv "$VDM_SITE_COMPOSE" "$VDM_SITE_ENV" "$VDM_SITE_ENV_KEY" "$work/.env" || exit 1
+    writeEnvVariable "$work/.env" "VDM_${VDM_SITE_ENV_KEY}_DOCROOT=$requested" true || exit 1
+    printf '    working_dir: "%s"\n' "$root" > "$work/property"
+    joomlaSetServiceProperty "$work/docker-compose.yml" "$work/compose.next" "$VDM_SITE_SERVICE" working_dir "$work/property" && mv "$work/compose.next" "$work/docker-compose.yml" || exit 1
+    local -a OCTOJOOM_SITE_FILE_TARGETS=() OCTOJOOM_SITE_FILE_SOURCES=()
+    if [ "$flavor" = nginx ]; then
+      if [ ! -f "$VDM_SITE_DIR/nginx.conf" ] || ! grep -qF '# Octojoom Joomla webserver.' "$VDM_SITE_DIR/nginx.conf"; then
+        printf 'This site uses custom Nginx configuration. Change its root and FastCGI paths explicitly.\n' >&2; exit 2
+      fi
+      # Preserve user directives; only the one plain root declaration changes.
+      awk -v root="$root" '/^[[:space:]]*root[[:space:]]+[^;]+;[[:space:]]*$/ {print "    root " root ";"; count++; next} {print} END {if(count!=1) exit 1}' \
+        "$VDM_SITE_DIR/nginx.conf" > "$work/nginx.conf" || exit 1
+      OCTOJOOM_SITE_FILE_TARGETS+=("$VDM_SITE_DIR/nginx.conf")
+      OCTOJOOM_SITE_FILE_SOURCES+=("$work/nginx.conf")
+    else
+      # Verify the published Apache layout before mounting a vhost into it.
+      docker run --rm --entrypoint sh "$VDM_SITE_IMAGE" -c 'test -d /etc/apache2/sites-enabled && command -v apache2ctl >/dev/null' || {
+        printf 'The selected image does not expose the supported Apache configuration path.\n' >&2; exit 2;
+      }
+      joomlaApacheConfiguration "$root" > "$work/apache.conf" || exit 1
+      joomlaWebCompanionMount "$work/docker-compose.yml" "$work/compose.next" "$VDM_SITE_SERVICE" apache.conf /etc/apache2/sites-enabled/000-default.conf "$work" && mv "$work/compose.next" "$work/docker-compose.yml" || exit 1
+      OCTOJOOM_SITE_FILE_TARGETS+=("$VDM_SITE_DIR/apache.conf")
+      OCTOJOOM_SITE_FILE_SOURCES+=("$work/apache.conf")
+    fi
+    siteValidateCompose "$work/docker-compose.yml" "$work/.env" "$VDM_SITE_DIR" || exit 1
+    if [ "${VDM_MOVE_FILES:-false}" = true ]; then
+      cp -p "$old_host/configuration.php" "$work/configuration.original.php" || exit 1
+      joomlaPatchMovedRootConfiguration "$old_host/configuration.php" "$work/configuration.php" "$VDM_SITE_DOCROOT" "$root" || exit 1
+      joomlaMoveDocumentRoot "$old_host" "$new_host" "$VDM_SITE_MOUNT_SOURCE" || exit 1
+      files_moved=true
+      if ! runPrivileged tee "$new_host/configuration.php" < "$work/configuration.php" >/dev/null; then
+        runPrivileged tee "$new_host/configuration.php" < "$work/configuration.original.php" >/dev/null || :
+        joomlaRestoreMovedRoot "$old_host" "$new_host" || printf 'Moved files need recovery at %s.\n' "$new_host" >&2
+        exit 1
+      fi
+    fi
+    local companion
+    for companion in "${OCTOJOOM_SITE_FILE_SOURCES[@]}"; do chmod 644 "$companion" || exit 1; done
+    # shellcheck disable=SC2034 # Consumed by the shared publication helper.
+    local OCTOJOOM_SITE_VALIDATE_FUNCTION=joomlaVerifyWebConfiguration
+    local -a affected=("$VDM_SITE_SERVICE")
+    [ "$flavor" != nginx ] || affected+=("nginx${VDM_SITE_KEY}")
+    if ! sitePublishConfiguration "$site" "$work/docker-compose.yml" "$work/.env" "${affected[@]}"; then
+      if "$files_moved"; then
+        runPrivileged tee "$new_host/configuration.php" < "$work/configuration.original.php" >/dev/null || :
+        if ! joomlaRestoreMovedRoot "$old_host" "$new_host"; then
+          printf 'Configuration was not applied. File recovery needs attention: %s -> %s\n' "$new_host" "$old_host" >&2
+        fi
+      fi
+      exit 1
+    fi
+    printf 'Document root set to %s.\n' "$root"
+  )
+}
+
+# Setup hooks keep new choices within the existing questionnaire and generator.
+function joomlaSetupWebChoices() {
+  local choice image probe discovered
+  VDM_WEBSERVER="${VDM_WEBSERVER:-apache}"
+  VDM_DOCROOT="${VDM_DOCROOT:-.}"
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ]; then
+    probe=$(joomlaRuntimeProbeImage "${VDM_J_REPO}:${VDM_JV}") || return 1
+    discovered=$(printf '%s' "$probe" | jq -er '.flavor + " / PHP " + .php') || return 1
+    if ! getInputYesNo "Selected image: ${discovered}. Keep the selected webserver (${VDM_WEBSERVER})?" 'Joomla webserver' 8 80; then
+      choice=$(whiptail --title 'Joomla webserver' --backtitle "$BACK_TITLE" --menu 'Select the webserver' 15 80 2 apache 'Apache' nginx 'Nginx with PHP-FPM' 3>&1 1>&2 2>&3) || return 2
+      VDM_WEBSERVER="$choice"
+    fi
+    if ! getInputYesNo "Use the usual Joomla document root (${VDM_DOCROOT})?" 'Joomla document root' 8 80; then
+      VDM_DOCROOT=$(getInput 'Project-relative directory, or . for the website mount root' "$VDM_DOCROOT" 'Joomla document root') || return 2
+    fi
+  fi
+  [[ "$VDM_WEBSERVER" = apache || "$VDM_WEBSERVER" = nginx ]] && joomlaValidateDocumentRoot "$VDM_DOCROOT" || return 2
+  # Setup has no installed site yet; compare the selected image directly.
+  if [ "$VDM_WEBSERVER" = nginx ]; then
+    image=$(joomlaRuntimeSelectSetupFlavor fpm) || return 1
+  else
+    image=$(joomlaRuntimeSelectSetupFlavor apache) || return 1
+  fi
+  VDM_J_REPO="${image%:*}" VDM_JV="${image##*:}"
+}
+
+# A published candidate is selected by its observed Joomla and PHP versions,
+# never by inventing a suffix. The runtime agent owns registry discovery.
+function joomlaRuntimeSelectSetupFlavor() {
+  local flavor="$1" selected="${VDM_J_REPO}:${VDM_JV}"
+  joomlaRuntimeSelectImageForFlavor "$selected" "$flavor"
+}
+
+function joomlaSetupWebPrepare() {
+  local dir="${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}" root=/var/www/html
+  VDM_WEBSERVER="${VDM_WEBSERVER:-apache}" VDM_DOCROOT="${VDM_DOCROOT:-.}"
+  [[ "$VDM_WEBSERVER" = apache || "$VDM_WEBSERVER" = nginx ]] && joomlaValidateDocumentRoot "$VDM_DOCROOT" || return 2
+  [ "$VDM_DOCROOT" = . ] || root+="/${VDM_DOCROOT}"
+  VDM_WEB_WORKING_DIR='' VDM_WEB_SERVICE='' VDM_WEB_HEALTH='' VDM_WEB_LABELS='' VDM_WEB_EXPOSE='80'
+  if [ "$root" != /var/www/html ]; then
+    VDM_WEB_WORKING_DIR=$(getYMLine2 "working_dir: \"${root}\"")
+  fi
+  if [ "$VDM_WEBSERVER" = nginx ]; then
+    local selected_image
+    selected_image=$(joomlaRuntimeSelectSetupFlavor fpm) || return 1
+    VDM_J_REPO="${selected_image%:*}" VDM_JV="${selected_image##*:}"
+    createPrivateDirectory -p "$dir" || return 1
+    joomlaNginxConfiguration "joomla${VDM_KEY}" "$root" > "$dir/nginx.conf" || return 1
+    VDM_WEB_EXPOSE=9000
+    # shellcheck disable=SC2089 # Serialized YAML consumed by the generator.
+    VDM_WEB_HEALTH='["CMD", "php", "-r", "exit(@fsockopen('\''127.0.0.1'\'', 9000) ? 0 : 1);"]'
+    VDM_WEB_LABELS=$(getYMLine3 '- "traefik.enable=false"')
+    VDM_WEB_SERVICE=$(getYMLine1 "nginx${VDM_KEY}:")
+    VDM_WEB_SERVICE+=$(getYMLine2 "# Octojoom managed HTTP companion")
+    VDM_WEB_SERVICE+=$(getYMLine2 "image: ${VDM_NGINX_IMAGE:-nginx:stable-alpine}")
+    VDM_WEB_SERVICE+=$(getYMLine2 'restart: unless-stopped')
+    VDM_WEB_SERVICE+=$(getYMLine2 'depends_on:')
+    VDM_WEB_SERVICE+=$(getYMLine3 "joomla${VDM_KEY}:")
+    VDM_WEB_SERVICE+=$'\n        condition: service_healthy'
+    VDM_WEB_SERVICE+=$(getYMLine2 'volumes:')
+    # Only the root data mount is shared with the HTTP server, read-only.
+    local root_mount
+    root_mount=$(printf '%s\n' "$VDM_JOOMLA_VOLUMES_MOUNT" | sed -nE 's#^([[:space:]]*-[[:space:]]*"?[^\n]*:/var/www/html)"?[[:space:]]*$#\1:ro"#p')
+    [ -n "$root_mount" ] || return 1
+    # Standardize quoting for both bind and named short-syntax root mounts.
+    root_mount=$(printf '%s' "$root_mount" | sed -E 's/^([[:space:]]*-[[:space:]]*)([^"])/\1"\2/')
+    VDM_WEB_SERVICE+=$'\n'"$root_mount"
+    VDM_WEB_SERVICE+=$(getYMLine3 '- "./nginx.conf:/etc/nginx/conf.d/default.conf:ro"')
+    VDM_WEB_SERVICE+=$(getYMLine2 'networks:')
+    VDM_WEB_SERVICE+=$(getYMLine3 '- traefik')
+    VDM_WEB_SERVICE+=$(getYMLine2 'labels:')
+    VDM_WEB_SERVICE+=$(getYMLine3 '- "traefik.enable=true"')
+    VDM_WEB_SERVICE+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}.${VDM_DOMAIN}\`)\"")
+    VDM_WEB_SERVICE+="${VDM_JOOMLA_SECURE_LABELS}"
+    VDM_WEB_SERVICE+=$(getYMLine3 "- \"traefik.http.services.joomla${VDM_KEY}.loadbalancer.server.port=80\"")
+    VDM_WEB_SERVICE+=$(getYMLine2 'healthcheck:')
+    VDM_WEB_SERVICE+=$(getYMLine3 'test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/__octojoom_health"]')
+    VDM_WEB_SERVICE+=$(getYMLine3 'interval: 10s')
+    VDM_WEB_SERVICE+=$(getYMLine3 'timeout: 5s')
+    VDM_WEB_SERVICE+=$(getYMLine3 'retries: 12')
+  elif [ "$root" != /var/www/html ]; then
+    docker run --rm --entrypoint sh "${VDM_J_REPO}:${VDM_JV}" -c 'test -d /etc/apache2/sites-enabled && command -v apache2ctl >/dev/null' || return 1
+    createPrivateDirectory -p "$dir" || return 1
+    joomlaApacheConfiguration "$root" > "$dir/apache.conf" || return 1
+    VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 '- "./apache.conf:/etc/apache2/sites-enabled/000-default.conf:ro"')
+  fi
+  local companion
+  for companion in "$dir/nginx.conf" "$dir/apache.conf"; do
+    [ ! -f "$companion" ] || chmod 644 "$companion" || return 1
+  done
+  # shellcheck disable=SC2090 # Data exported to the generator, never executed.
+  export VDM_WEB_WORKING_DIR VDM_WEB_SERVICE VDM_WEB_HEALTH VDM_WEB_LABELS VDM_WEB_EXPOSE
 }
 
 #####################################################################################################################VDM
