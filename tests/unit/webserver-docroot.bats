@@ -238,3 +238,43 @@ APACHE
   assert_failure
   assert_output_contains 'edited explicitly'
 }
+
+@test "root moves refuse nested and parent bind mounts used by another site" {
+  VDM_SITE_COMPOSE="$compose"
+  base="${VDM_PROJECT_PATH}/alpha/joomla"
+  mkdir -p "$base/source/images" "$VDM_REPO_PATH/joomla/available/other.vdm.dev"
+  printf '<?php\n' > "$base/source/index.php"
+  printf '<?php class JConfig {}\n' > "$base/source/configuration.php"
+  printf 'other site upload\n' > "$base/source/images/other-site.txt"
+  touch "$VDM_REPO_PATH/joomla/available/other.vdm.dev/docker-compose.yml"
+  # shellcheck disable=SC2317 # Called indirectly while checking other sites.
+  readJoomlaSiteFacts() { VDM_SITE_MOUNT_TYPE=bind; VDM_SITE_MOUNT_SOURCE="$shared_root"; }
+  for shared_root in "$base/source/images" "${VDM_PROJECT_PATH}/alpha"; do
+    run joomlaMoveDocumentRoot "$base/source" "$base/new/target" "$base"
+    assert_failure
+    assert_output_contains 'shares or overlaps'
+    refute_file_exists "$base/new"
+    assert_file_contains "$base/source/images/other-site.txt" 'other site upload'
+    assert_file_exists "$base/source/index.php"
+    assert_file_exists "$base/source/configuration.php"
+  done
+}
+
+@test "root moves recognize shared bind storage through another site host alias" {
+  skip_on_windows 'symlink creation requires privileges on Windows'
+  VDM_SITE_COMPOSE="$compose"
+  base="${VDM_PROJECT_PATH}/alpha/joomla"
+  mkdir -p "$base/source" "$VDM_REPO_PATH/joomla/available/other.vdm.dev"
+  printf '<?php\n' > "$base/source/index.php"
+  printf '<?php class JConfig {}\n' > "$base/source/configuration.php"
+  ln -s "$base" "$work/host-alias"
+  touch "$VDM_REPO_PATH/joomla/available/other.vdm.dev/docker-compose.yml"
+  # shellcheck disable=SC2317 # Called indirectly while checking other sites.
+  readJoomlaSiteFacts() { VDM_SITE_MOUNT_TYPE=bind; VDM_SITE_MOUNT_SOURCE="$work/host-alias/source"; }
+  run joomlaMoveDocumentRoot "$base/source" "$base/new/target" "$base"
+  assert_failure
+  assert_output_contains 'shares or overlaps'
+  refute_file_exists "$base/new"
+  assert_file_exists "$base/source/index.php"
+  assert_file_exists "$base/source/configuration.php"
+}

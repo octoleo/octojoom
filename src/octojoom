@@ -2187,20 +2187,27 @@ function joomlaMoveDocumentRoot() {
   # A parent destination would mix content; choose an empty sibling or child.
   [[ "$source/" != "$destination/"* ]] || return 1
   [ -f "$source/index.php" ] && [ -f "$source/configuration.php" ] || return 1
-  for other in "$VDM_REPO_PATH/joomla/available"/*/docker-compose.yml; do
-    if [ ! -f "$other" ] || [ "$other" = "$VDM_SITE_COMPOSE" ]; then continue; fi
-    if (
-      readJoomlaSiteFacts "$(basename "$(dirname "$other")")" || exit 1
-      [[ "$VDM_SITE_MOUNT_TYPE" = bind && "$VDM_SITE_MOUNT_SOURCE" = "$base" ]]
-    ); then
-      printf 'Another site shares this bind mount. Move its data explicitly after separating the sites.\n' >&2
-      return 1
-    fi
-  done
   local parent="${destination%/*}" canonical canonical_base ancestor
   # macOS exposes /var and /tmp through standard /private aliases. Compare
   # physical paths on both sides after the ancestor safety check above.
   canonical_base=$(cd "$base" && pwd -P) || return 1
+  for other in "$VDM_REPO_PATH/joomla/available"/*/docker-compose.yml; do
+    if [ ! -f "$other" ] || [ "$other" = "$VDM_SITE_COMPOSE" ]; then continue; fi
+    if (
+      readJoomlaSiteFacts "$(basename "$(dirname "$other")")" || exit 1
+      [ "$VDM_SITE_MOUNT_TYPE" = bind ] || exit 1
+      local shared="$VDM_SITE_MOUNT_SOURCE"
+      # Check both lexical nesting (including not-yet-created roots) and
+      # existing physical paths, which may use a different host alias.
+      [[ "$shared/" == "$base/"* || "$base/" == "$shared/"* ]] && exit 0
+      [ -d "$shared" ] || exit 1
+      shared=$(cd "$shared" && pwd -P) || exit 1
+      [[ "$shared/" == "$canonical_base/"* || "$canonical_base/" == "$shared/"* ]]
+    ); then
+      printf 'Another site shares or overlaps this bind mount. Move its data explicitly after separating the sites.\n' >&2
+      return 1
+    fi
+  done
   if [[ "$destination/" = "$source/"* ]]; then
     ancestor="${destination#"$source/"}"; ancestor="${ancestor%%/*}"
     [ ! -e "$source/$ancestor" ] && [ ! -L "$source/$ancestor" ] || return 1
