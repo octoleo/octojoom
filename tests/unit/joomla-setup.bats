@@ -44,14 +44,11 @@ expert_bulk_answers() {
   answers "${JOOMENGINE_SOURCE}" 4.2 site no bulk_db bulk_user bulkpass 1001 1002 "$@"
 }
 
-fail_php_ownership() {
-  hook_command sudo <<'EOF'
-if [ "$1" = chown ]; then
-  [[ "${*: -1}" != */php.ini ]] || exit 1
-  exit 0
-fi
-exec "$@"
-EOF
+fail_php_publication() {
+  mv() {
+    [[ "${*: -1}" != */php.ini ]] || return 1
+    command mv "$@"
+  }
 }
 
 ###############################################################################
@@ -173,9 +170,9 @@ EOF
   assert_file_contains "${VDM_PROJECT_PATH}/abc/entrypoint.sh" 'custom entrypoint'
 }
 
-@test "joomla setup: PHP ownership failure stops before Compose publication or launch" {
+@test "joomla setup: PHP publication failure stops before Compose publication or launch" {
   octojoom_config 'VDM_EXPERT_MODE=true'
-  fail_php_ownership
+  fail_php_publication
   expert_single_answers yes 300 2000 5000 E_ALL 128M 64M 1G no
   run joomla__TRuST__setup
   assert_status 2
@@ -247,9 +244,9 @@ EOF
   refute_file_exists "$(compose_yml site4.vdm.dev)"
 }
 
-@test "joomla bulk: PHP ownership failure prevents every Compose publication and launch" {
+@test "joomla bulk: PHP publication failure prevents every Compose publication and launch" {
   octojoom_config 'VDM_EXPERT_MODE=true'
-  fail_php_ownership
+  fail_php_publication
   expert_bulk_answers yes 300 2000 5000 E_ALL 128M 64M 1G no
   run joomla__TRuST__bulk
   assert_status 2
@@ -390,7 +387,7 @@ EOF
   refute_command 'curl '
 }
 
-@test "setPHPSettings: cancellation at the additional edit prompt stops ownership changes" {
+@test "setPHPSettings: cancellation at the additional edit prompt leaves no published PHP file" {
   octojoom_config 'VDM_EXPERT_MODE=true'
   VDM_PHP_PROJECT_PATH=abc
   answers yes 300 2000 5000 E_ALL 128M 64M 1G '<esc>'
@@ -411,7 +408,8 @@ EOF
   assert_file_contains "${ini}" 'max_execution_time = 300'
   assert_file_contains "${ini}" 'memory_limit = 1G'
   assert_file_contains "${VDM_SRC_PATH}/.env" 'VDM_memory_limit="1G"'
-  assert_command "^sudo chmod 600 ${ini}$"
+  if [ "$OS_NUMBER" -ne 3 ]; then assert_equal "$(file_mode "$ini")" 644; fi
+  refute_command '^sudo (chown|chmod)'
 }
 
 @test "setPHPSettings: failed config persistence stops before generating php.ini" {
@@ -424,17 +422,16 @@ EOF
   refute_file_exists "${VDM_PROJECT_PATH}/abc/php.ini"
 }
 
-@test "setPHPSettings: ownership failure is not reported as usable overrides" {
+@test "setPHPSettings: publication failure preserves the previous override" {
   octojoom_config
   VDM_PHP_PROJECT_PATH=abc
-  hook_command sudo <<'EOF'
-[ "$1" != chown ] || exit 7
-exit 0
-EOF
+  mkdir -p "${VDM_PROJECT_PATH}/abc"
+  printf 'date.timezone = UTC\n' > "${VDM_PROJECT_PATH}/abc/php.ini"
+  mv() { [[ "${*: -1}" != */php.ini ]] || return 7; command mv "$@"; }
   answers yes 300 2000 5000 E_ALL 128M 64M 1G
   run setPHPSettings
   assert_status 7
-  refute_command '^sudo chmod'
+  assert_equal "$(cat "${VDM_PROJECT_PATH}/abc/php.ini")" 'date.timezone = UTC'
 }
 
 ###############################################################################

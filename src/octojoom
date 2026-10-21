@@ -835,7 +835,7 @@ EOF
 # Resolve future-site defaults without changing saved settings or prompting.
 # Explicit request presence is retained by the CLI until setup has finished.
 function joomlaSetupDefaults() {
-  local persistence_default=true
+  local persistence_default=true setting variable
   [ "${VDM_TASK:-}" != bulk ] || persistence_default=false
   if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || ! isExpert; then
     [ -n "${VDM_J_REPO:-}" ] || VDM_J_REPO="${VDM_DEFAULT_JOOMLA_IMAGE_SOURCE:-}"
@@ -843,7 +843,22 @@ function joomlaSetupDefaults() {
   [ "${VDM_WEBSERVER+x}" = x ] || VDM_WEBSERVER="${VDM_DEFAULT_JOOMLA_WEBSERVER:-apache}"
   [ "${VDM_DOCROOT+x}" = x ] || VDM_DOCROOT="${VDM_DEFAULT_JOOMLA_DOCROOT:-.}"
   [ "${VDM_PHPMYADMIN+x}" = x ] || VDM_PHPMYADMIN="${VDM_DEFAULT_JOOMLA_PHPMYADMIN:-true}"
+  # A concrete PHP value requests its relevant operation directly. It must not
+  # silently disappear or enable unrelated webserver customization questions.
+  if isFunc cliHasValue; then
+    for setting in max_execution_time max_input_time max_input_vars error_reporting upload_max_filesize post_max_size memory_limit; do
+      variable="VDM_${setting}"
+      if cliHasValue "$variable"; then
+        if cliHasValue VDM_PHP_SETTINGS && [ "${VDM_PHP_SETTINGS}" = false ]; then
+          printf 'ERROR: PHP values conflict with --php-settings false.\n' >&2
+          return 17
+        fi
+        VDM_PHP_SETTINGS=true
+      fi
+    done
+  fi
   if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    : "${VDM_PHP_SETTINGS:=false}"
     : "${VDM_J_REPO:=joomla}" "${VDM_JV:=${VDM_DEFAULT_JOOMLA_IMAGE_TAG:-latest}}"
     : "${VDM_ENV_KEY:=${VDM_KEY^^}}" "${VDM_SUBDOMAIN:=${VDM_KEY,,}}"
     : "${VDM_AUTO_INSTALL:=${VDM_DEFAULT_JOOMLA_AUTO_INSTALL:-false}}" "${VDM_ENABLE:=false}"
@@ -919,10 +934,21 @@ function joomlaValidateSetupOptions() {
   if [[ -z "${VDM_DOCROOT:-}" || "$VDM_DOCROOT" == /* || "$VDM_DOCROOT" == *\\* || "$VDM_DOCROOT" == *$'\n'* || "$VDM_DOCROOT" == *$'\r'* ]]; then
     printf 'ERROR: --docroot must be a relative project directory.\n' >&2; return 17
   fi
+  if isFunc joomlaValidateDocumentRoot && ! joomlaValidateDocumentRoot "$VDM_DOCROOT"; then
+    printf 'ERROR: --docroot must use supported relative directory components.\n' >&2; return 17
+  fi
   IFS='/' read -r -a items <<< "$VDM_DOCROOT"
   for item in "${items[@]}"; do
     [ "$item" != .. ] || { printf 'ERROR: --docroot cannot leave the project directory.\n' >&2; return 17; }
   done
+  if isFunc cliHasValue && isFunc joomlaPHPValidateValue; then
+    for item in max_execution_time max_input_time max_input_vars error_reporting upload_max_filesize post_max_size memory_limit; do
+      name="VDM_${item}"
+      if cliHasValue "$name" && ! joomlaPHPValidateValue "$item" "${!name}"; then
+        printf 'ERROR: Invalid PHP value for %s.\n' "$item" >&2; return 17
+      fi
+    done
+  fi
   for name in VDM_PUID VDM_PGID; do
     [ -z "${!name:-}" ] || [[ "${!name}" =~ ^[0-9]+$ ]] || {
       printf 'ERROR: %s must be a numeric user/group ID.\n' "$name" >&2; return 17;
@@ -932,15 +958,15 @@ function joomlaValidateSetupOptions() {
     : "${VDM_PUID:=1000}" "${VDM_PGID:=1000}"
   fi
   if [ "${VDM_AUTO_INSTALL}" = true ]; then
-    if ! isVersionAbove "$VDM_JV" 4.3; then
-      printf 'ERROR: Automatic installation is not supported for this image tag; choose manual installation.\n' >&2; return 17
-    fi
     [[ "${VDM_J_USERNAME}" =~ ^[a-zA-Z]{2,}$ && ${#VDM_J_SITE_NAME} -gt 2 && ${#VDM_J_USER} -gt 2 ]] || {
       printf 'ERROR: Invalid Joomla site/administrator name.\n' >&2; return 17;
     }
     [[ "${VDM_J_EMAIL:-}" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ && ${#VDM_J_PASSWORD} -gt 12 ]] || {
       printf 'ERROR: Automatic installation requires --admin-email and an administrator password longer than 12 characters (JSON input may carry the password).\n' >&2; return 17;
     }
+    if ! joomlaImageSupportsAutoInstall; then
+      printf 'ERROR: Could not verify Joomla 4.3 or newer for automatic installation; choose a supported image or manual installation.\n' >&2; return 17
+    fi
   fi
   if [ -n "${VDM_J_EXTENSIONS_URLS:-}" ]; then
     IFS=';' read -r -a items <<< "$VDM_J_EXTENSIONS_URLS"
@@ -1012,7 +1038,7 @@ function joomlaSetupCustomization() {
   # Supplying a specific optional runtime setting opens its relevant branch
   # without requiring automation to imitate the question sequence.
   if isFunc cliHasValue; then
-    if cliHasValue VDM_WEBSERVER || cliHasValue VDM_DOCROOT || cliHasValue VDM_PHP_SETTINGS; then VDM_CUSTOMIZE=true; fi
+    if cliHasValue VDM_WEBSERVER || cliHasValue VDM_DOCROOT; then VDM_CUSTOMIZE=true; fi
   fi
   if joomlaSetupBoolean VDM_CUSTOMIZE 'Would you like to change the default configurations of your Joomla site?' 'Site Configuration' defaultno; then
     if isFunc joomlaSetupPHPChoices; then joomlaSetupPHPChoices || return $?; fi
@@ -1127,6 +1153,7 @@ function joomlaPublishSetup() {
     else status=1; fi
   fi
   rm -f "$env_stage" "$compose_stage"
+  if [ "$status" -ne 0 ]; then rmdir "${compose_file%/*}" 2>/dev/null || true; fi
   # Keep a recovery copy only when restoring the previous ENV failed.
   if [ "$status" -eq 0 ] || cmp -s "$backup" "$env_file" || [ ! -s "$backup" ]; then rm -f "$backup"; fi
   return "$status"
@@ -1346,10 +1373,10 @@ function joomla__TRuST__setup() {
   # add this value if not set variable
   [ ${#vdm_database_rootpass} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_ROOT=\"${vdm_database_rootpass}\"" || return $?
   # we only do autodeploy for Joomla 4.3 and above
-  if isVersionAbove "$VDM_JV" "4.3"; then
+  if joomlaImageSupportsAutoInstall; then
     # setup the website auto deploy details
     setJoomlaWebsiteDetails || return $?
-    if [[ -n "${VDM_J_EMAIL}" ]]; then
+    if [ "${VDM_AUTO_INSTALL:-false}" = true ] && [[ -n "${VDM_J_EMAIL}" ]]; then
       # add extra Joomla envs
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_TYPE=\"mysqli\"" || return $?
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_JOOMLA_DB_PREFIX=\"${VDM_KEY}_\"" || return $?
@@ -1427,8 +1454,8 @@ function joomla__TRuST__setup() {
   export vdm_database_rootpass
   # Persist chosen values separately from defaults for future websites.
   joomlaValidateSetupOptions || return $?
-  joomlaSaveSetupChoices || return $?
   if isFunc joomlaSetupWebPrepare; then joomlaSetupWebPrepare || return $?; fi
+  joomlaSaveSetupChoices || return $?
   joomlaPublishSetup || return $?
   # Update hosts only after the complete configuration was validated and saved.
   updateHostFile || return $?
@@ -2526,10 +2553,10 @@ function joomla__TRuST__bulk() {
   enable_autodeploy=false
   enable_extension_autodeploy=false
   enable_command_autodeploy=false
-  if isVersionAbove "$VDM_JV" "4.3"; then
+  if joomlaImageSupportsAutoInstall; then
     # get website setup details
     setJoomlaWebsiteDetails || return $?
-    if [[ -n "${VDM_J_EMAIL}" ]]; then
+    if [ "${VDM_AUTO_INSTALL:-false}" = true ] && [[ -n "${VDM_J_EMAIL}" ]]; then
       enable_autodeploy=true
       if [[ -n "${VDM_J_EXTENSIONS_URLS}" && "${#VDM_J_EXTENSIONS_URLS}" -gt 2 ]]; then
         enable_extension_autodeploy=true
@@ -2696,8 +2723,8 @@ function joomla__TRuST__bulk() {
     export vdm_database_user
     export vdm_database_pass
     export vdm_database_rootpass
-    joomlaSaveSetupChoices || return $?
     if isFunc joomlaSetupWebPrepare; then joomlaSetupWebPrepare || return $?; fi
+    joomlaSaveSetupChoices || return $?
     joomlaPublishSetup || return $?
     OCTOJOOM_SETUP_ASSIGNMENTS=("VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\"")
     # enable the container
@@ -8971,6 +8998,24 @@ function isVersionAbove() {
   (( tag_major > target_major || (tag_major == target_major && tag_minor >= target_minor) ))
 }
 
+# Alias tags (for example php8.3-apache) do not identify the Joomla release.
+# Inspect their published contents only when installation might be requested;
+# manual setup remains usable without requiring an extra Docker inspection.
+function joomlaImageSupportsAutoInstall() {
+  local image="${VDM_J_REPO}:${VDM_JV}" probe version
+  isVersionAbove "$VDM_JV" 4.3 && return 0
+  [[ "$VDM_JV" =~ ^[0-9]+(\.[0-9]+)*(\-[a-zA-Z0-9_.-]+)?$ ]] && return 1
+  [ "${VDM_AUTO_INSTALL:-}" != false ] || return 1
+  if [ "${VDM_SETUP_JOOMLA_IMAGE:-}" != "$image" ]; then
+    joomlaRuntimeRequireTools || return 1
+    probe=$(joomlaRuntimeProbeImage "$image") || return 1
+    version=$(printf '%s' "$probe" | jq -er '.joomla | select(type == "string")') || return 1
+    VDM_SETUP_JOOMLA_IMAGE="$image"
+    VDM_SETUP_JOOMLA_VERSION="$version"
+  fi
+  isVersionAbove "$VDM_SETUP_JOOMLA_VERSION" 4.3
+}
+
 # set persistence volumes
 function setPersistence() {
   # ask the question
@@ -8993,7 +9038,7 @@ function setPHPSettings() {
     true) configurePHPSettings; customization_status=$?; [ "$customization_status" -ne 1 ] || customization_status=2; return "$customization_status";;
   esac
   # ask the question
-  if getInputYesNo "Would you like to set some PHP overrides for the Joomla container.\n\nTo make these changes we need sudo privileges." \
+  if getInputYesNo "Would you like to set some PHP overrides for the Joomla container." \
     "PHP.ini values" 9 112; then
     if configurePHPSettings; then
       return 0
@@ -9020,7 +9065,7 @@ function joomlaPHPQuestion() {
 }
 
 function configurePHPSettings() {
-    local default_error_reporting edit_status
+    local default_error_reporting edit_status ini_dir ini_file ini_source='' temporary status=0
     # max_execution_time
     VDM_max_execution_time=$(joomlaPHPQuestion max_execution_time "${VDM_max_execution_time:-124}") || return $?
     # remember this for next time
@@ -9062,45 +9107,41 @@ function configurePHPSettings() {
       VDM_PHP_INI_TARGET=$(joomlaRuntimeIniTarget "${VDM_J_REPO}:${VDM_JV}") || return 2
       export VDM_PHP_INI_TARGET
     fi
-    # make sure the directory exist
-    mkdir -p "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}" || return $?
+    # PHP configuration contains no credentials. Keep it readable by the
+    # selected image's own user instead of requiring a host www-data account.
+    # An adjacent temporary file permits replacement of an older read-only
+    # override without changing its contents before validation succeeds.
+    ini_dir="${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}"
+    ini_file="${ini_dir}/php.ini"
+    mkdir -p "$ini_dir" || return $?
+    temporary=$(mktemp "${ini_dir}/.php.ini.XXXXXX") || return $?
+    [ ! -f "$ini_file" ] || ini_source="$ini_file"
+    if ! joomlaPHPPatchIni "$ini_source" "$temporary" \
+      max_execution_time "$VDM_max_execution_time" max_input_time "$VDM_max_input_time" \
+      max_input_vars "$VDM_max_input_vars" error_reporting "$VDM_error_reporting" \
+      upload_max_filesize "$VDM_upload_max_filesize" post_max_size "$VDM_post_max_size" memory_limit "$VDM_memory_limit"; then
+      rm -f "$temporary"
+      return 1
+    fi
 
-    # push all these values to the php.ini file
-    {
-      echo "max_execution_time = ${VDM_max_execution_time}"
-      echo "max_input_time = ${VDM_max_input_time}"
-      echo "max_input_vars = ${VDM_max_input_vars}"
-      echo "error_reporting = ${VDM_error_reporting}"
-      echo "upload_max_filesize = ${VDM_upload_max_filesize}"
-      echo "post_max_size = ${VDM_post_max_size}"
-      echo "memory_limit = ${VDM_memory_limit}"
-    } > "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini" || return 1
-
-    # allow custom edit
     if isExpert; then
       if getInputYesNo "Would you like to set some more custom PHP overrides for this Joomla container" \
         "Edit PHP.ini" 8 112 "defaultno"; then
-        # give little heads-up
         showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13
-        # lets open the file with nano for now
-        sudo "${EDITOR:-nano}" "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini" || return $?
+        "${EDITOR:-nano}" "$temporary" || status=$?
       else
         edit_status=$?
-        [ "$edit_status" -eq 1 ] || return "$edit_status"
+        [ "$edit_status" -eq 1 ] || status="$edit_status"
       fi
     fi
-
-    # set the ownership
-    if [ -n "${VDM_PUID}" ] && [ -n "${VDM_PGID}" ]; then
-      sudo chown "${VDM_PUID}":"${VDM_PGID}" "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini" || return $?
-    else
-      sudo chown www-data:www-data "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini" || return $?
+    if [ "$status" -eq 0 ] && [ -n "${VDM_J_REPO:-}" ] && [ -n "${VDM_JV:-}" ]; then
+      joomlaPHPValidateIni "${VDM_J_REPO}:${VDM_JV}" "$temporary" "$VDM_PHP_INI_TARGET" || status=$?
     fi
-    # make sure the permission are good
-    sudo chmod 600 "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini" || return $?
-
-    # yes load php.ini volume to the container
-    return 0
+    if [ "$status" -eq 0 ]; then
+      chmod 644 "$temporary" && mv -f "$temporary" "$ini_file" || status=$?
+    fi
+    rm -f "$temporary"
+    return "$status"
 }
 
 # set the docker entrypoint

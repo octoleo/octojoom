@@ -148,3 +148,80 @@ headless_setup() {
   run grep -q 'VDM_BRAVO_' "$env_file"
   assert_status 1
 }
+
+@test "setup: persisted image choices follow the final prepared runtime" {
+  headless_setup
+  VDM_WEBSERVER=nginx
+  joomlaSetupWebPrepare() { VDM_JV=verified-fpm; }
+  run joomla__TRuST__setup
+  assert_success
+  assert_file_contains "${VDM_REPO_PATH}/joomla/.env" 'VDM_ALPHA_IMAGE_TAG="verified-fpm"'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" 'image: joomla:verified-fpm'
+}
+
+@test "setup: explicit PHP settings run without probing unrelated webserver choices" {
+  headless_setup
+  parseCLI --memory-limit 512M --non-interactive
+  joomlaSetupWebChoices() { printf 'unexpected webserver selection\n' >&2; return 91; }
+  joomlaRuntimeRequireTools() { return 0; }
+  joomlaRuntimeIniTarget() { printf '%s\n' /usr/local/etc/php/conf.d/zz-octojoom.ini; }
+  run joomla__TRuST__setup
+  assert_success
+  assert_file_contains "${VDM_PROJECT_PATH}/alpha/php.ini" 'memory_limit = 512M'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" '/usr/local/etc/php/conf.d/zz-octojoom.ini'
+}
+
+@test "setup: a headless webserver choice does not implicitly enable PHP overrides" {
+  OCTOJOOM_NON_INTERACTIVE=true
+  parseCLI --webserver nginx --non-interactive
+  joomlaSetupDefaults
+  assert_equal "$VDM_PHP_SETTINGS" false
+}
+
+@test "setup: contradictory PHP settings fail before first-run initialization" {
+  local fresh="$SANDBOX/new-home"
+  run env OCTOJOOM_HOME="$fresh" bash "$OCTOJOOM_SCRIPT" --type joomla --task setup \
+    --key alpha --domain example.test --memory-limit 512M --php-settings false --non-interactive
+  assert_status 17
+  refute_file_exists "$fresh"
+}
+
+@test "setup: explicit manual installation ignores supplied administrator details" {
+  headless_setup
+  VDM_AUTO_INSTALL=false
+  VDM_J_EMAIL=admin@example.test
+  VDM_J_PASSWORD=secret-supplied-but-not-installed
+  run joomla__TRuST__setup
+  assert_success
+  run grep -q JOOMLA_ADMIN_PASSWORD "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml"
+  assert_status 1
+}
+
+@test "setup: automatic installation resolves Joomla version from a PHP alias tag" {
+  headless_setup
+  VDM_JV=php8.3-apache
+  VDM_AUTO_INSTALL=true
+  VDM_J_EMAIL=admin@example.test
+  VDM_J_PASSWORD=secret-supplied-for-install
+  joomlaRuntimeProbeImage() {
+    printf '%s\n' "$1" >> "$SANDBOX/probed-images"
+    printf '%s\n' '{"joomla":"5.3.2","php":"8.3.9","flavor":"apache"}'
+  }
+  run joomla__TRuST__setup
+  assert_success
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" 'image: joomla:php8.3-apache'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" 'JOOMLA_ADMIN_PASSWORD='
+  [ "$(wc -l < "$SANDBOX/probed-images")" -eq 1 ]
+}
+
+@test "setup: an alias with an old Joomla release cannot silently auto-install" {
+  headless_setup
+  VDM_JV=legacy-custom
+  VDM_AUTO_INSTALL=true
+  VDM_J_EMAIL=admin@example.test
+  VDM_J_PASSWORD=secret-supplied-for-install
+  joomlaRuntimeProbeImage() { printf '%s\n' '{"joomla":"3.10.12"}'; }
+  run joomlaSetupPreflight
+  assert_status 17
+  refute_file_exists "${VDM_REPO_PATH}/joomla/.env"
+}
