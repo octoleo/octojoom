@@ -152,6 +152,7 @@ headless_setup() {
 @test "setup: persisted image choices follow the final prepared runtime" {
   headless_setup
   VDM_WEBSERVER=nginx
+  joomlaRuntimeSelectSetupFlavor() { printf '%s\n' joomla:selected-fpm; }
   joomlaSetupWebPrepare() { VDM_JV=verified-fpm; }
   run joomla__TRuST__setup
   assert_success
@@ -272,4 +273,47 @@ headless_setup() {
     assert_status 17
     refute_file_exists "$fresh"
   done
+}
+
+# The two published flavors deliberately have different PHP scan directories.
+# Saved defaults skip the optional questionnaire but must still select the
+# deployment image before measuring or validating its override file.
+saved_nginx_php_setup() {
+  headless_setup
+  parseCLI --memory-limit 512M --non-interactive
+  VDM_DEFAULT_JOOMLA_IMAGE_SOURCE=custom/joomla
+  VDM_DEFAULT_JOOMLA_IMAGE_TAG=apache-build
+  VDM_DEFAULT_JOOMLA_WEBSERVER=nginx
+  joomlaSetupWebChoices() { printf 'unexpected customization question\n' >&2; return 91; }
+  joomlaRuntimeSelectSetupFlavor() { printf '%s\n' custom/joomla:fpm-build; }
+  joomlaRuntimeRequireTools() { return 0; }
+  joomlaRuntimeIniTarget() {
+    case "$1" in
+      custom/joomla:fpm-build) printf '%s\n' /opt/fpm/conf.d/zz-octojoom.ini;;
+      *) printf '%s\n' /opt/apache/conf.d/zz-octojoom.ini;;
+    esac
+  }
+  joomlaPHPValidateIni() { printf '%s %s\n' "$1" "$3" >> "$SANDBOX/php-validation"; }
+}
+
+@test "setup: saved nginx defaults measure PHP overrides against the selected FPM image" {
+  saved_nginx_php_setup
+  run joomla__TRuST__setup
+  assert_success
+  assert_file_contains "$SANDBOX/php-validation" 'custom/joomla:fpm-build /opt/fpm/conf.d/zz-octojoom.ini'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" '/alpha/php.ini:/opt/fpm/conf.d/zz-octojoom.ini'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" 'image: custom/joomla:fpm-build'
+}
+
+@test "setup: bulk saved nginx defaults validate and mount the shared PHP override for FPM" {
+  saved_nginx_php_setup
+  VDM_TASK=bulk
+  VDM_SUBDOMAIN=website
+  VDM_NUMBER_CONTAINERS=2
+  run joomla__TRuST__bulk
+  assert_success
+  [ "$(wc -l < "$SANDBOX/php-validation")" -eq 1 ]
+  assert_file_contains "$SANDBOX/php-validation" 'custom/joomla:fpm-build /opt/fpm/conf.d/zz-octojoom.ini'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/website1.example.test/docker-compose.yml" '/bulk/php.ini:/opt/fpm/conf.d/zz-octojoom.ini'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/website2.example.test/docker-compose.yml" '/bulk/php.ini:/opt/fpm/conf.d/zz-octojoom.ini'
 }

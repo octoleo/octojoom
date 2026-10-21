@@ -1056,7 +1056,7 @@ function joomlaSetupPersistence() {
 }
 
 function joomlaSetupCustomization() {
-  local status
+  local status image
   # Supplying a specific optional runtime setting opens its relevant branch
   # without requiring automation to imitate the question sequence.
   if isFunc cliHasValue; then
@@ -1072,6 +1072,12 @@ function joomlaSetupCustomization() {
   else
     status=$?
     [ "$status" -eq 1 ] || return "$status"
+    # Saved Nginx defaults still need a published FPM image. Resolve it before
+    # PHP overrides inspect the image's scan directory, including bulk setup.
+    if [ "${VDM_WEBSERVER:-apache}" = nginx ]; then
+      image=$(joomlaRuntimeSelectSetupFlavor fpm) || return $?
+      VDM_J_REPO="${image%:*}" VDM_JV="${image##*:}"
+    fi
   fi
   return 0
 }
