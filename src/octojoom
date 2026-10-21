@@ -832,11 +832,321 @@ EOF
 
 #####################################################################################################################VDM
 ######################################## SETUP JOOMLA
+# Resolve future-site defaults without changing saved settings or prompting.
+# Explicit request presence is retained by the CLI until setup has finished.
+function joomlaSetupDefaults() {
+  local persistence_default=true
+  [ "${VDM_TASK:-}" != bulk ] || persistence_default=false
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || ! isExpert; then
+    [ -n "${VDM_J_REPO:-}" ] || VDM_J_REPO="${VDM_DEFAULT_JOOMLA_IMAGE_SOURCE:-}"
+  fi
+  [ "${VDM_WEBSERVER+x}" = x ] || VDM_WEBSERVER="${VDM_DEFAULT_JOOMLA_WEBSERVER:-apache}"
+  [ "${VDM_DOCROOT+x}" = x ] || VDM_DOCROOT="${VDM_DEFAULT_JOOMLA_DOCROOT:-.}"
+  [ "${VDM_PHPMYADMIN+x}" = x ] || VDM_PHPMYADMIN="${VDM_DEFAULT_JOOMLA_PHPMYADMIN:-true}"
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    : "${VDM_J_REPO:=joomla}" "${VDM_JV:=${VDM_DEFAULT_JOOMLA_IMAGE_TAG:-latest}}"
+    : "${VDM_ENV_KEY:=${VDM_KEY^^}}" "${VDM_SUBDOMAIN:=${VDM_KEY,,}}"
+    : "${VDM_AUTO_INSTALL:=${VDM_DEFAULT_JOOMLA_AUTO_INSTALL:-false}}" "${VDM_ENABLE:=false}"
+    : "${VDM_CUSTOMIZE:=false}" "${VDM_SECURE:=false}" "${VDM_SECURE_CLOUDFLARE:=false}"
+    : "${VDM_MAILCATCHER:=false}" "${VDM_PERSISTENCE:=$persistence_default}" "${VDM_DB_PERSISTENCE:=$persistence_default}"
+    : "${VDM_MULTI_DOMAIN:=false}" "${VDM_UPDATE_HOST:=false}"
+    # A provided domain must not open the multiple-domain selector.
+    VDM_ARG_DOMAIN=true
+    if [ "${VDM_AUTO_INSTALL}" = true ]; then
+      : "${VDM_J_SITE_NAME:=Joomla! CMS}" "${VDM_J_USERNAME:=user}" "${VDM_J_USER:=John Doe}"
+    fi
+  fi
+  return 0
+}
+
+# Called before first-run filesystem setup by the noninteractive dispatcher.
+# Generated passwords are deliberately deferred until all input is valid.
+function joomlaSetupPreflight() {
+  local name value saved suffix request candidate shared="${VDM_REPO_PATH}/joomla/.env"
+  joomlaSetupDefaults || return $?
+  for name in VDM_KEY VDM_ENV_KEY VDM_SUBDOMAIN; do
+    value="${!name:-}"
+    if [[ ! "$value" =~ ^[a-zA-Z]{2,}$ ]]; then
+      printf 'ERROR: %s must contain at least two letters.\n' "$name" >&2
+      return 17
+    fi
+  done
+  if ! isValidDomain "${VDM_DOMAIN:-}" || [ "${VDM_SUBDOMAIN}" = joomla ]; then
+    printf 'ERROR: Supply a valid --domain and a non-reserved --sub-domain.\n' >&2
+    return 17
+  fi
+  for candidate in "${VDM_PROJECT_PATH}/${VDM_KEY}" "${VDM_REPO_PATH}/joomla/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}" "${VDM_REPO_PATH}/joomla/enabled/${VDM_SUBDOMAIN}.${VDM_DOMAIN}"; do
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      printf 'ERROR: The requested project key or website is already in use.\n' >&2
+      return 17
+    fi
+  done
+  for candidate in "${VDM_REPO_PATH}/joomla/available/"*/docker-compose.yml; do
+    [ -f "$candidate" ] || continue
+    if grep -qE "^[[:space:]]*container_name:[[:space:]]*(mariadb|joomla|phpmyadmin|mailcatcher)${VDM_KEY}[[:space:]]*$" "$candidate"; then
+      printf 'ERROR: The project key already belongs to another website.\n' >&2
+      return 17
+    fi
+  done
+  if [ -f "$shared" ]; then (loadEnvFile "$shared") || return 12; fi
+  joomlaValidateSetupOptions || return $?
+  for suffix in DB DB_USER DB_PASS DB_ROOT; do
+    case "$suffix" in DB) request=vdm_database_name ;; DB_USER) request=vdm_database_user ;; DB_PASS) request=vdm_database_pass ;; DB_ROOT) request=vdm_database_rootpass ;; esac
+    saved=''
+    if [ -f "$shared" ]; then migrationReadEnvValue "$shared" "VDM_${VDM_ENV_KEY^^}_${suffix}" saved || saved=''; fi
+    if [ -n "${!request:-}" ] && [ -n "$saved" ] && [ "${!request}" != "$saved" ]; then
+      printf 'ERROR: --env-key is already associated with different database values; use a new environment key.\n' >&2
+      return 17
+    fi
+    [ -n "${!request:-}" ] || printf -v "$request" '%s' "$saved"
+    formatEnvAssignment "VDM_CHECK=\"${!request}\"" >/dev/null || return 17
+  done
+  : "${vdm_database_name:=vdm_io}" "${vdm_database_user:=vdm_user}"
+  return 0
+}
+
+# Validate shared setup option values before collecting or changing anything.
+function joomlaValidateSetupOptions() {
+  local name item
+  local -a items=()
+  for name in VDM_AUTO_INSTALL VDM_ENABLE VDM_CUSTOMIZE VDM_SECURE VDM_SECURE_CLOUDFLARE VDM_MAILCATCHER VDM_PERSISTENCE VDM_DB_PERSISTENCE VDM_PHPMYADMIN VDM_SAVE_DEFAULTS VDM_PHP_SETTINGS; do
+    [ "${!name+x}" != x ] || case "${!name}" in true|false) ;; *) printf 'ERROR: %s must be true or false.\n' "$name" >&2; return 17 ;; esac
+  done
+  [[ "${VDM_J_REPO}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$ && "${VDM_JV}" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ ]] || {
+    printf 'ERROR: Invalid image repository or image tag.\n' >&2; return 17;
+  }
+  case "${VDM_WEBSERVER:-apache}" in apache|nginx) ;; *) printf 'ERROR: --webserver must be apache or nginx.\n' >&2; return 17 ;; esac
+  if [[ -z "${VDM_DOCROOT:-}" || "$VDM_DOCROOT" == /* || "$VDM_DOCROOT" == *\\* || "$VDM_DOCROOT" == *$'\n'* || "$VDM_DOCROOT" == *$'\r'* ]]; then
+    printf 'ERROR: --docroot must be a relative project directory.\n' >&2; return 17
+  fi
+  IFS='/' read -r -a items <<< "$VDM_DOCROOT"
+  for item in "${items[@]}"; do
+    [ "$item" != .. ] || { printf 'ERROR: --docroot cannot leave the project directory.\n' >&2; return 17; }
+  done
+  for name in VDM_PUID VDM_PGID; do
+    [ -z "${!name:-}" ] || [[ "${!name}" =~ ^[0-9]+$ ]] || {
+      printf 'ERROR: %s must be a numeric user/group ID.\n' "$name" >&2; return 17;
+    }
+  done
+  if isExpert; then
+    : "${VDM_PUID:=1000}" "${VDM_PGID:=1000}"
+  fi
+  if [ "${VDM_AUTO_INSTALL}" = true ]; then
+    if ! isVersionAbove "$VDM_JV" 4.3; then
+      printf 'ERROR: Automatic installation is not supported for this image tag; choose manual installation.\n' >&2; return 17
+    fi
+    [[ "${VDM_J_USERNAME}" =~ ^[a-zA-Z]{2,}$ && ${#VDM_J_SITE_NAME} -gt 2 && ${#VDM_J_USER} -gt 2 ]] || {
+      printf 'ERROR: Invalid Joomla site/administrator name.\n' >&2; return 17;
+    }
+    [[ "${VDM_J_EMAIL:-}" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ && ${#VDM_J_PASSWORD} -gt 12 ]] || {
+      printf 'ERROR: Automatic installation requires --admin-email and an administrator password longer than 12 characters (JSON input may carry the password).\n' >&2; return 17;
+    }
+  fi
+  if [ -n "${VDM_J_EXTENSIONS_URLS:-}" ]; then
+    IFS=';' read -r -a items <<< "$VDM_J_EXTENSIONS_URLS"
+    for item in "${items[@]}"; do
+      [[ "$item" =~ ^https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(/.*)?$ ]] || { printf 'ERROR: Invalid extension URL.\n' >&2; return 17; }
+    done
+  fi
+  if [ -n "${VDM_J_CLI_COMMANDS:-}" ]; then
+    IFS=';' read -r -a items <<< "$VDM_J_CLI_COMMANDS"
+    for item in "${items[@]}"; do
+      joomlaValidateCliCommand "$item" || { printf 'ERROR: Invalid Joomla CLI command.\n' >&2; return 17; }
+    done
+  fi
+  return 0
+}
+
+function joomlaBulkPreflight() {
+  local number candidate
+  joomlaSetupDefaults || return $?
+  joomlaValidateSetupOptions || return $?
+  if ! isValidDomain "${VDM_DOMAIN:-}" || [[ ! "${VDM_SUBDOMAIN:-}" =~ ^[a-zA-Z]{2,}$ ]] || [ "$VDM_SUBDOMAIN" = joomla ]; then
+    printf 'ERROR: Bulk setup requires a valid --domain and alphabetic --sub-domain prefix.\n' >&2
+    return 17
+  fi
+  : "${VDM_NUMBER_CONTAINERS:=10}"
+  if [[ ! "$VDM_NUMBER_CONTAINERS" =~ ^[0-9]{1,2}$ ]] || (( 10#$VDM_NUMBER_CONTAINERS < 2 || 10#$VDM_NUMBER_CONTAINERS > 99 )); then
+    printf 'ERROR: --number must be between 2 and 99.\n' >&2
+    return 17
+  fi
+  VDM_NUMBER_CONTAINERS=$((10#$VDM_NUMBER_CONTAINERS))
+  for ((number=1; number<=VDM_NUMBER_CONTAINERS; number++)); do
+    candidate="${VDM_REPO_PATH}/joomla/available/${VDM_SUBDOMAIN}${number}.${VDM_DOMAIN}"
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then printf 'ERROR: A requested bulk website already exists: %s\n' "${candidate##*/}" >&2; return 17; fi
+  done
+  return 0
+}
+
+# A boolean supplied by a request never opens a dialog and false stays false.
+function joomlaSetupBoolean() {
+  local variable="$1" status
+  shift
+  if [ "${!variable+x}" = x ]; then
+    case "${!variable}" in true) return 0 ;; false) return 1 ;; *) printf 'ERROR: %s must be true or false.\n' "$variable" >&2; return 17 ;; esac
+  fi
+  if getInputYesNo "$1" "$2" 8 112 "${3:-}"; then
+    printf -v "$variable" '%s' true
+    return 0
+  else
+    status=$?
+    [ "$status" -ne 1 ] || printf -v "$variable" '%s' false
+    return "$status"
+  fi
+}
+
+function joomlaSetupPersistence() {
+  local variable="$1"
+  if [ "${!variable+x}" = x ]; then
+    case "${!variable}" in true) return 0 ;; false) return 1 ;; *) return 17 ;; esac
+  fi
+  if isExpert; then
+    joomlaSetupBoolean "$variable" "Would you like to enable persistence on this $2." 'Persist Volume'
+  else
+    printf -v "$variable" '%s' true
+  fi
+}
+
+function joomlaSetupCustomization() {
+  local status
+  # Supplying a specific optional runtime setting opens its relevant branch
+  # without requiring automation to imitate the question sequence.
+  if isFunc cliHasValue; then
+    if cliHasValue VDM_WEBSERVER || cliHasValue VDM_DOCROOT || cliHasValue VDM_PHP_SETTINGS; then VDM_CUSTOMIZE=true; fi
+  fi
+  if joomlaSetupBoolean VDM_CUSTOMIZE 'Would you like to change the default configurations of your Joomla site?' 'Site Configuration' defaultno; then
+    if isFunc joomlaSetupPHPChoices; then joomlaSetupPHPChoices || return $?; fi
+    if isFunc joomlaSetupWebChoices; then joomlaSetupWebChoices || return $?; fi
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ]; then
+      if joomlaSetupBoolean VDM_SAVE_DEFAULTS 'Use these image and runtime choices as defaults for future websites?' 'Save Site Defaults' defaultno; then :
+      else status=$?; [ "$status" -eq 1 ] || return "$status"; fi
+    fi
+  else
+    status=$?
+    [ "$status" -eq 1 ] || return "$status"
+  fi
+  return 0
+}
+
+# Remember the entrypoint belonging to a selected source, including a custom
+# source restored from defaults. Never borrow another repository's entrypoint.
+function joomlaImageEntrypoint() {
+  local source
+  [ -z "${VDM_ENTRY_REPO:-}" ] || return 0
+  case "$VDM_J_REPO" in
+    joomla) VDM_ENTRY_REPO='https://raw.githubusercontent.com/joomla-docker/docker-joomla/master/docker-entrypoint.sh' ;;
+    octoleo/joomengine) VDM_ENTRY_REPO='https://raw.githubusercontent.com/octoleo/joomengine/refs/heads/master/src/docker/docker-entrypoint.sh' ;;
+    llewellyn/joomla) VDM_ENTRY_REPO='https://raw.githubusercontent.com/octoleo/docker-joomla/refs/heads/octoleo/docker-entrypoint.sh' ;;
+    *)
+      if [ -f "${VDM_SRC_PATH}/.images-source" ]; then
+        while IFS= read -r source; do
+          if [ "${source%%|*}" = "$VDM_J_REPO" ]; then source="${source%,*}"; VDM_ENTRY_REPO="${source##*;}"; break; fi
+        done < "${VDM_SRC_PATH}/.images-source"
+      fi
+      ;;
+  esac
+  return 0
+}
+
+function joomlaSaveSetupChoices() {
+  local suffix variable
+  for suffix in IMAGE_SOURCE IMAGE_TAG AUTO_INSTALL WEBSERVER DOCROOT PHPMYADMIN; do
+    case "$suffix" in IMAGE_SOURCE) variable=VDM_J_REPO ;; IMAGE_TAG) variable=VDM_JV ;; AUTO_INSTALL) variable=VDM_AUTO_INSTALL ;; *) variable="VDM_${suffix}" ;; esac
+    [ "${!variable+x}" != x ] || setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_${suffix}=\"${!variable}\"" || return $?
+  done
+}
+
+function joomlaSaveSetupDefaults() {
+  local suffix variable
+  for suffix in IMAGE_SOURCE IMAGE_TAG AUTO_INSTALL WEBSERVER DOCROOT PHPMYADMIN; do
+    case "$suffix" in IMAGE_SOURCE) variable=VDM_J_REPO ;; IMAGE_TAG) variable=VDM_JV ;; AUTO_INSTALL) variable=VDM_AUTO_INSTALL ;; *) variable="VDM_${suffix}" ;; esac
+    [ "${!variable+x}" != x ] || setUniqueEnvVariable "VDM_DEFAULT_JOOMLA_${suffix}=\"${!variable}\"" || return $?
+  done
+}
+
+# Stage shared ENV and the canonical generator output together. Validate before
+# publication; if the second rename fails, restore the former environment.
+# This is explicit recovery for two renames, not an atomic multi-file write.
+function joomlaPublishSetup() {
+  local directory="${VDM_REPO_PATH}/joomla" env_file compose_file env_stage compose_stage backup assignment line name value saved refs scoped status=0 private_env=false
+  env_file="${directory}/.env"
+  compose_file="${directory}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}/docker-compose.yml"
+  if [ -e "$compose_file" ] || [ -L "$compose_file" ]; then printf 'ERROR: Website configuration already exists.\n' >&2; return 1; fi
+  createPrivateDirectory -p "${compose_file%/*}" || return 1
+  env_stage=$(mktemp "${directory}/.env.setup.XXXXXX") || return 1
+  compose_stage=$(mktemp "${compose_file%/*}/.compose.setup.XXXXXX") || { rm -f "$env_stage"; return 1; }
+  backup=$(mktemp "${directory}/.env.previous.XXXXXX") || { rm -f "$env_stage" "$compose_stage"; return 1; }
+  if [ -f "$env_file" ]; then cp "$env_file" "$env_stage" && cp "$env_file" "$backup" || status=1; fi
+  if [ "$status" -eq 0 ]; then
+    for assignment in "${OCTOJOOM_SETUP_ASSIGNMENTS[@]}"; do
+      line=$(formatEnvAssignment "$assignment") || { status=$?; break; }
+      name="${line%%=*}"
+      decodeEnvValue "${line#*=}" value || { status=$?; break; }
+      if migrationReadEnvValue "$env_stage" "$name" saved && [ "$saved" != "$value" ]; then private_env=true; fi
+      writeEnvVariable "$env_stage" "$assignment" true || { status=$?; break; }
+    done
+  fi
+  if [ "$status" -eq 0 ]; then
+    if saveContainerCompose joomlaContainer "$compose_stage"; then
+      if "$private_env"; then
+        # A different shared path or scoped runtime choice belongs only to this
+        # new website. Carry all referenced and recognized scoped values into
+        # its ENV; never copy another site's credentials or change their file.
+        refs=$(migrationComposeReferences "$compose_stage") || status=$?
+        scoped=$(mktemp "${directory}/.env.scoped.XXXXXX") || status=1
+        if [ "$status" -eq 0 ]; then
+          while IFS= read -r line || [ -n "$line" ]; do
+            [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(VDM_[A-Za-z0-9_]+)[[:space:]]*= ]] || continue
+            name="${BASH_REMATCH[2]}"
+            if printf '%s\n' "$refs" | grep -qxF "$name" ||
+              [[ "$name" =~ ^VDM_${VDM_ENV_KEY^^}_($(getJoomlaEnvSuffixes)|IMAGE_SOURCE|IMAGE_TAG|AUTO_INSTALL|WEBSERVER|DOCROOT|PHPMYADMIN)$ ]]; then
+              printf '%s\n' "$line" >> "$scoped" || { status=1; break; }
+            fi
+          done < "$env_stage"
+          mv -f "$scoped" "$env_stage" || status=1
+          env_file="${compose_file%/*}/.env"
+          if [ -e "$env_file" ] || [ -L "$env_file" ]; then
+            printf 'ERROR: A per-site environment already exists; refusing to replace it during new setup.\n' >&2
+            status=1
+          fi
+          : > "$backup"
+        fi
+        [ -z "$scoped" ] || rm -f "$scoped"
+      fi
+      if [ "$status" -eq 0 ]; then migrationRunCompose "$env_stage" "$compose_stage" config --quiet || status=$?; fi
+    else status=$?; fi
+  fi
+  if [ "$status" -eq 0 ]; then
+    if mv -f "$env_stage" "$env_file"; then
+      if ! mv -f "$compose_stage" "$compose_file"; then
+        status=1
+        if [ -s "$backup" ]; then
+          mv -f "$backup" "$env_file" || printf 'ERROR: Restore the environment from %s.\n' "$backup" >&2
+        else rm -f "$env_file"; fi
+      fi
+    else status=1; fi
+  fi
+  rm -f "$env_stage" "$compose_stage"
+  # Keep a recovery copy only when restoring the previous ENV failed.
+  if [ "$status" -eq 0 ] || cmp -s "$backup" "$env_file" || [ ! -s "$backup" ]; then rm -f "$backup"; fi
+  return "$status"
+}
+
 function joomla__TRuST__setup() {
+  (
+  # Setup state belongs to this website, including failed/cancelled attempts.
+  local OCTOJOOM_SETUP_COLLECT_ENV=true OCTOJOOM_SETUP_ENV_APPROVED=false
+  local -a OCTOJOOM_SETUP_ASSIGNMENTS=()
   # load this container type globals
   # shellcheck disable=SC1090
   if [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ]; then
     loadEnvFile "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || return 1
+  fi
+  # Explicit request values take precedence over the shared defaults as well.
+  if isFunc cliApplyValues; then cliApplyValues; fi
+  joomlaSetupDefaults || return $?
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    joomlaSetupPreflight || return $?
   fi
   # we need to pull these values from the env if set
   local vdm_key_db
@@ -847,7 +1157,9 @@ function joomla__TRuST__setup() {
   local vdm_env_pass
   local vdm_key_root
   local vdm_env_root
-  local vdm_middlewares
+  local vdm_middlewares customization_status
+  local vdm_database_name="${vdm_database_name:-}" vdm_database_user="${vdm_database_user:-}"
+  local vdm_database_pass="${vdm_database_pass:-}" vdm_database_rootpass="${vdm_database_rootpass:-}"
   # get the Joomla image source
   setImageSource || return $?
   # get the key if not set
@@ -858,8 +1170,10 @@ function joomla__TRuST__setup() {
   setDomain || return $?
   # get the sub domain if not set TODO get dynamic joomla domain name
   setSubDomain "${VDM_KEY,,}" "joomla" || return $?
+  # One optional fork extends the original questions only with implemented choices.
+  joomlaSetupCustomization || return $?
   # check if we have secure switch set
-  setSecureState
+  setSecureState || return $?
   # setup letsencrypt stuff
   VDM_JOOMLA_SECURE_LABELS=''
   VDM_PHPMYADMIN_SECURE_LABELS=''
@@ -868,7 +1182,7 @@ function joomla__TRuST__setup() {
   VDM_HTTP_SCHEME="https://"
   VDM_CERT_RESOLVER="vdmresolver"
   if $VDM_SECURE; then
-    setSecureCloudflareState "joomla"
+    setSecureCloudflareState "joomla" || return $?
     if $VDM_SECURE_CLOUDFLARE; then
       VDM_CERT_RESOLVER="cfresolver"
     fi
@@ -907,11 +1221,20 @@ function joomla__TRuST__setup() {
   vdm_database_user="${vdm_database_user:-$vdm_env_user}"
   vdm_database_pass="${vdm_database_pass:-$vdm_env_pass}"
   vdm_database_rootpass="${vdm_database_rootpass:-$vdm_env_root}"
+  if { [ -n "$vdm_env_db" ] && [ "$vdm_database_name" != "$vdm_env_db" ]; } ||
+    { [ -n "$vdm_env_user" ] && [ "$vdm_database_user" != "$vdm_env_user" ]; } ||
+    { [ -n "$vdm_env_pass" ] && [ "$vdm_database_pass" != "$vdm_env_pass" ]; } ||
+    { [ -n "$vdm_env_root" ] && [ "$vdm_database_rootpass" != "$vdm_env_root" ]; }; then
+    printf 'ERROR: The environment key already has different database values; select a new environment key.\n' >&2
+    return 17
+  fi
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    [ -n "$vdm_database_pass" ] || vdm_database_pass=$(getRandomPass 20) || return $?
+    [ -n "$vdm_database_rootpass" ] || vdm_database_rootpass=$(getRandomPass 40) || return $?
+  fi
   # check if env is already set
   # shellcheck disable=SC2015
   [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && grep -q "VDM_${VDM_ENV_KEY^^}_DB=" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || {
-    # add a space or create the file
-    [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && echo '' >>"${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
     # get the database name needed
     while [ ${#vdm_database_name} -le 1 ]; do
       # get the value
@@ -961,13 +1284,19 @@ function joomla__TRuST__setup() {
   VDM_VOLUMES='volumes:'
   reset_volume=true
   # only if in expert mode
-  if isExpert && ! setPersistence 'Joomla website files and folders'; then
+  if joomlaSetupPersistence VDM_PERSISTENCE 'Joomla website files and folders'; then :
+  else
+    customization_status=$?
+    [ "$customization_status" -eq 1 ] || return "$customization_status"
     VDM_JOOMLA_VOLUMES_MOUNT=$(getYMLine3 "- ${VDM_KEY,,}_web:/var/www/html")
     VDM_VOLUMES+=$(getYMLine1 "${VDM_KEY,,}_web:")
     reset_volume=false
   fi
   # only if in expert mode
-  if isExpert && ! setPersistence 'Joomla database'; then
+  if joomlaSetupPersistence VDM_DB_PERSISTENCE 'Joomla database'; then :
+  else
+    customization_status=$?
+    [ "$customization_status" -eq 1 ] || return "$customization_status"
     VDM_DB_VOLUMES_MOUNT=$(getYMLine3 "- ${VDM_KEY,,}_db:/var/lib/mysql")
     VDM_VOLUMES+=$(getYMLine1 "${VDM_KEY,,}_db:")
     reset_volume=false
@@ -977,10 +1306,9 @@ function joomla__TRuST__setup() {
   # add the projects path
   setContainerEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\"" || return $?
   # only if in expert mode set the container user detail id needed
-  if isExpert; then
+  if isExpert || [ "${VDM_MAILCATCHER+x}" = x ] || [ -n "${VDM_PUID:-}" ] || [ -n "${VDM_PGID:-}" ]; then
     # ask if we should add mailcatcher
-    if getInputYesNo "Would you also like to enable mailcatcher for these ${VDM_CONTAINER_TYPE^} containers" \
-      "Enable Mailcatcher" 8 112 "defaultno"; then
+    if joomlaSetupBoolean VDM_MAILCATCHER "Would you also like to enable mailcatcher for these ${VDM_CONTAINER_TYPE^} containers" "Enable Mailcatcher" defaultno; then
       VDM_EXTRA_CONTAINER_STUFF=$(getYMLine1 "mailcatcher${VDM_KEY}:")
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "image: schickling/mailcatcher")
       VDM_EXTRA_CONTAINER_STUFF+=$(getYMLine2 "container_name: mailcatcher${VDM_KEY}")
@@ -1000,7 +1328,9 @@ function joomla__TRuST__setup() {
       VDM_EXTRA_JOOMLA_ENV+=$(getYMLine3 "- JOOMLA_SMTP_HOST=mailcatcher${VDM_KEY}:1025")
     fi
     # if this is our octoleo images we can also set the user ID and user-group ID
-    setContainerUser "$(id -u)" || return $?
+    if isExpert || [ -n "${VDM_PUID:-}${VDM_PGID:-}" ]; then
+      setContainerUser "$(id -u)" || return $?
+    fi
     # check that we got the details
     if [ -n "${VDM_PUID}" ] && [ -n "${VDM_PGID}" ]; then
       setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_PUID=\"#${VDM_PUID}\"" || return $?
@@ -1008,13 +1338,13 @@ function joomla__TRuST__setup() {
     fi
   fi
   # add this value if not set variable
-  [ ${#vdm_database_name} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB=\"${vdm_database_name}\""
+  [ ${#vdm_database_name} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB=\"${vdm_database_name}\"" || return $?
   # add this value if not set variable
-  [ ${#vdm_database_user} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_USER=\"${vdm_database_user}\""
+  [ ${#vdm_database_user} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_USER=\"${vdm_database_user}\"" || return $?
   # add this value if not set variable
-  [ ${#vdm_database_pass} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_PASS=\"${vdm_database_pass}\""
+  [ ${#vdm_database_pass} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_PASS=\"${vdm_database_pass}\"" || return $?
   # add this value if not set variable
-  [ ${#vdm_database_rootpass} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_ROOT=\"${vdm_database_rootpass}\""
+  [ ${#vdm_database_rootpass} -ge 1 ] && setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_DB_ROOT=\"${vdm_database_rootpass}\"" || return $?
   # we only do autodeploy for Joomla 4.3 and above
   if isVersionAbove "$VDM_JV" "4.3"; then
     # setup the website auto deploy details
@@ -1051,9 +1381,9 @@ function joomla__TRuST__setup() {
   VDM_PHP_PROJECT_PATH="${VDM_KEY}"
   export VDM_PHP_PROJECT_PATH
   local customization_status
-  if isExpert; then
+  if isExpert || [ "${VDM_CUSTOMIZE:-false}" = true ] || [ "${VDM_PHP_SETTINGS:-false}" = true ]; then
     if setPHPSettings; then
-      VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini:/var/www/html/php.ini\"")
+      VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini:${VDM_PHP_INI_TARGET:-/var/www/html/php.ini}\"")
     else
       customization_status=$?
       [ "$customization_status" -eq 1 ] || return "$customization_status"
@@ -1095,23 +1425,26 @@ function joomla__TRuST__setup() {
   export vdm_database_user
   export vdm_database_pass
   export vdm_database_rootpass
-  # set host file if needed
-  updateHostFile
-  # also set the database domain
-  updateHostFile "${VDM_SUBDOMAIN}db"
-  saveContainerCompose joomlaContainer "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}/docker-compose.yml" || return 1
+  # Persist chosen values separately from defaults for future websites.
+  joomlaValidateSetupOptions || return $?
+  joomlaSaveSetupChoices || return $?
+  if isFunc joomlaSetupWebPrepare; then joomlaSetupWebPrepare || return $?; fi
+  joomlaPublishSetup || return $?
+  # Update hosts only after the complete configuration was validated and saved.
+  updateHostFile || return $?
+  if [ "${VDM_PHPMYADMIN:-true}" = true ]; then updateHostFile "${VDM_SUBDOMAIN}db" || return $?; fi
+  if [ "${VDM_SAVE_DEFAULTS:-false}" = true ]; then joomlaSaveSetupDefaults || return $?; fi
   # saved the file
   showNotice "Saved ${VDM_CONTAINER_TYPE}:docker-compose.yml file.\nSetup of this container is complete!"
   # ask if we should continue to enable
-  if getInputYesNo "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
-    "Enable Container" 8 112 "defaultno"; then
+  if joomlaSetupBoolean VDM_ENABLE "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" "Enable Container" defaultno; then
     # we set the container details
     export VDM_CONTAINER="${VDM_SUBDOMAIN}.${VDM_DOMAIN}"
     # then we enable it
     enableContainer "${VDM_CONTAINER_TYPE}" || return $?
   fi
   # display the configurations
-  showJoomlaConfigDetails
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ]; then showJoomlaConfigDetails; fi
   ##########################
   ### unset all no longer needed
   # container
@@ -1150,6 +1483,7 @@ function joomla__TRuST__setup() {
   unset vdm_database_rootpass
   # return a success
   return 0
+  )
 }
 
 # return the Joomla Container setup yml
@@ -2002,20 +2336,25 @@ function joomlaSetupWebPrepare() {
 #####################################################################################################################VDM
 ######################################## BULK SETUP JOOMLA
 function joomla__TRuST__bulk() {
+  (
+  local VDM_TASK=bulk
+  local OCTOJOOM_SETUP_COLLECT_ENV=true OCTOJOOM_SETUP_ENV_APPROVED=false
+  local -a OCTOJOOM_SETUP_ASSIGNMENTS=()
   # load this container type globals
   # shellcheck disable=SC1090
   if [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ]; then
     loadEnvFile "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || return 1
   fi
+  if isFunc cliApplyValues; then cliApplyValues; fi
+  joomlaSetupDefaults || return $?
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then joomlaBulkPreflight || return $?; fi
   # we need to pull these values from the env if set
   local vdm_key
   local vdm_subdomain
-  local vdm_database_name
-  local vdm_bulk_database_name
-  local vdm_database_user
-  local vdm_bulk_database_user
-  local vdm_database_pass
-  local vdm_bulk_database_user
+  local vdm_bulk_database_name="${vdm_database_name:-}"
+  local vdm_bulk_database_user="${vdm_database_user:-}"
+  local vdm_bulk_database_pass="${vdm_database_pass:-}"
+  local vdm_database_name vdm_database_user vdm_database_pass
   local vdm_database_rootpass
   local vdm_middlewares
   # get the Joomla image source
@@ -2025,15 +2364,20 @@ function joomla__TRuST__bulk() {
   # get the sub domain if not set TODO get dynamic joomla domain name
   setSubDomain "subdomain" "joomla" || return $?
   vdm_subdomain="${VDM_SUBDOMAIN}"
+  joomlaSetupCustomization || return $?
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    : "${vdm_bulk_database_name:=vdm_io}" "${vdm_bulk_database_user:=vdm_user}"
+    [ -n "$vdm_bulk_database_pass" ] || vdm_bulk_database_pass=$(getRandomPass 20) || return $?
+  fi
   # check if we have secure switch set
-  setSecureState
+  setSecureState || return $?
   # setup letsencrypt stuff
   VDM_REMOVE_SECURE=''
   VDM_ENTRY_POINT="websecure"
   VDM_HTTP_SCHEME="https://"
   VDM_CERT_RESOLVER="vdmresolver"
   if $VDM_SECURE; then
-    setSecureCloudflareState "joomla"
+    setSecureCloudflareState "joomla" || return $?
     vdm_middlewares="joomla-security"
     if $VDM_SECURE_CLOUDFLARE; then
       VDM_CERT_RESOLVER="cfresolver"
@@ -2084,7 +2428,7 @@ function joomla__TRuST__bulk() {
   VDM_PHP_PROJECT_PATH="bulk"
   export VDM_PHP_PROJECT_PATH
   local customization_status
-  if isExpert; then
+  if isExpert || [ "${VDM_CUSTOMIZE:-false}" = true ] || [ "${VDM_PHP_SETTINGS:-false}" = true ]; then
     if setPHPSettings; then
       set_php_settings=true
     else
@@ -2108,17 +2452,16 @@ function joomla__TRuST__bulk() {
   persistence_volume=false
   persistence_db=false
   # only if in expert mode
-  if isExpert && setPersistence 'Joomla website files and folders'; then
+  if { isExpert || [ "${VDM_PERSISTENCE+x}" = x ]; } && joomlaSetupPersistence VDM_PERSISTENCE 'Joomla website files and folders'; then
     persistence_volume=true
   fi
   # only if in expert mode
-  if isExpert && setPersistence 'Joomla database'; then
+  if { isExpert || [ "${VDM_DB_PERSISTENCE+x}" = x ]; } && joomlaSetupPersistence VDM_DB_PERSISTENCE 'Joomla database'; then
     persistence_db=true
   fi
   # ask if we should add mailcatcher
   enable_mailcatcher=false
-  if getInputYesNo "Would you also like to enable mailcatcher for these ${VDM_CONTAINER_TYPE^} containers" \
-    "Enable Mailcatcher" 8 112 "defaultno"; then
+  if joomlaSetupBoolean VDM_MAILCATCHER "Would you also like to enable mailcatcher for these ${VDM_CONTAINER_TYPE^} containers" "Enable Mailcatcher" defaultno; then
       enable_mailcatcher=true
   fi
   # we only do autodeploy for Joomla 4.3 and above
@@ -2157,10 +2500,10 @@ function joomla__TRuST__bulk() {
   setNumberContainers || return $?
   # ask if we should continue to enable
   enable_containers=false
-  if getInputYesNo "Would you also like to enable all these ${VDM_CONTAINER_TYPE^} containers" \
-    "Enable Containers" 8 112 "defaultno"; then
+  if joomlaSetupBoolean VDM_ENABLE "Would you also like to enable all these ${VDM_CONTAINER_TYPE^} containers" "Enable Containers" defaultno; then
       enable_containers=true
   fi
+  joomlaBulkPreflight || return $?
   # loop the number of containers
   for (( i=1; i<=VDM_NUMBER_CONTAINERS; i++ ))
   do
@@ -2233,7 +2576,7 @@ function joomla__TRuST__bulk() {
     fi
     # add PHP settings
     if $set_php_settings; then
-      VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini:/var/www/html/php.ini\"")
+      VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini:${VDM_PHP_INI_TARGET:-/var/www/html/php.ini}\"")
     fi
     # customize docker-entrypoint.sh
     if $set_docker_entry_point; then
@@ -2295,7 +2638,10 @@ function joomla__TRuST__bulk() {
     export vdm_database_user
     export vdm_database_pass
     export vdm_database_rootpass
-    saveContainerCompose joomlaContainer "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_SUBDOMAIN}.${VDM_DOMAIN}/docker-compose.yml" || return 1
+    joomlaSaveSetupChoices || return $?
+    if isFunc joomlaSetupWebPrepare; then joomlaSetupWebPrepare || return $?; fi
+    joomlaPublishSetup || return $?
+    OCTOJOOM_SETUP_ASSIGNMENTS=("VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\"")
     # enable the container
     if $enable_containers; then
       # we set the container details
@@ -2304,6 +2650,7 @@ function joomla__TRuST__bulk() {
       enableContainer "${VDM_CONTAINER_TYPE}" || return $?
     fi
   done
+  if [ "${VDM_SAVE_DEFAULTS:-false}" = true ]; then joomlaSaveSetupDefaults || return $?; fi
   ##########################
   ### unset all no longer needed
   # container
@@ -2326,6 +2673,8 @@ function joomla__TRuST__bulk() {
   unset VDM_PHP_PROJECT_PATH
   unset VDM_ENTRY_PROJECT_PATH
   unset VDM_EXTRA_CONTAINER_STUFF
+  unset VDM_WEB_WORKING_DIR VDM_WEB_SERVICE VDM_WEB_HEALTH VDM_WEB_LABELS VDM_WEB_EXPOSE
+  unset VDM_WEBSERVER VDM_DOCROOT VDM_NGINX_IMAGE VDM_NGINX_CONFIG
   unset VDM_JOOMLA_SECURE_LABELS
   unset VDM_PHPMYADMIN_SECURE_LABELS
   unset VDM_J_SITE_NAME
@@ -2342,6 +2691,7 @@ function joomla__TRuST__bulk() {
   unset vdm_database_rootpass
   # return a success
   return 0
+  )
 }
 
 #####################################################################################################################VDM
@@ -5328,7 +5678,7 @@ function resetPersistentJoomlaVolumes() {
         ensureProjectStopped "${persistent}" || return $?
         # last serious check and then its gone
         if [ -d "${VDM_PROJECT_PATH}/${persistent}/joomla" ] &&
-          { { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] && [[ "$VDM_VOLUME" == web || "$VDM_VOLUME" == both ]]; } ||
+          { { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] && [[ "${VDM_VOLUME:-}" == web || "${VDM_VOLUME:-}" == both ]]; } ||
           { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && whiptail --yesno "Are you absolutely sure you would like to delete this (${persistent}/joomla) persistent volume? THIS CAN'T BE UNDONE!\n(we need sudo privileges)" \
             --title "Delete Persistent Volume" --backtitle "${BACK_TITLE}" 15 112; }; }; then
           # then remove soft link
@@ -5336,7 +5686,7 @@ function resetPersistentJoomlaVolumes() {
         fi
         # last serious check and then its gone
         if [ -d "${VDM_PROJECT_PATH}/${persistent}/db" ] &&
-          { { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] && [[ "$VDM_VOLUME" == database || "$VDM_VOLUME" == both ]]; } ||
+          { { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] && [[ "${VDM_VOLUME:-}" == database || "${VDM_VOLUME:-}" == both ]]; } ||
           { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && whiptail --yesno "Are you absolutely sure you would like to delete this (${persistent}/db) persistent volume? THIS CAN'T BE UNDONE!\n(we need sudo privileges)" \
             --title "Delete Persistent Volume" --backtitle "${BACK_TITLE}" 15 112; }; }; then
           # then remove soft link
@@ -7017,7 +7367,9 @@ function showJoomlaConfigDetails() {
   # shellcheck disable=SC1090
   # [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && source "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env"
   # set some locals
-  local message
+  local message env_file
+  env_file=$(getContainerEnvFile joomla "${VDM_SUBDOMAIN}.${VDM_DOMAIN}" available)
+  env_file="${env_file:-${VDM_REPO_PATH}/joomla/.env}"
   # now set the message
   message="                                                                      ${PROGRAM_NAME} v$_VERSION
 
@@ -7032,7 +7384,7 @@ function showJoomlaConfigDetails() {
     VDM_${VDM_ENV_KEY^^}_DB_ROOT:  ${vdm_database_rootpass}
   --------------------------------------------------------------------
   These details are securely stored in this environment variable file
-    ${VDM_REPO_PATH}/joomla/.env
+    ${env_file}
   --------------------------------------------------------------------
 
   Do not remove these details from the file, as it's used to deploy the container.
@@ -7330,7 +7682,7 @@ function getImageSource() {
   local default
   local default_joomengine
   local default_octojoom
-  local image_name image_desc
+  local image_name image_desc source_index
   # menu for dynamic addition
   local menu_options=()
   # our counter
@@ -7368,6 +7720,11 @@ function getImageSource() {
         done
       fi
     fi
+    for ((source_index=0; source_index<${#menu_options[@]}; source_index+=3)); do
+      if [ "${menu_options[source_index]%%|*}" = "${VDM_DEFAULT_JOOMLA_IMAGE_SOURCE:-joomla}" ]; then
+        menu_options[source_index+2]=ON
+      fi
+    done
     # now make the selection
     image_source=$(whiptail --title "Select image source repository" \
       --radiolist --backtitle "${BACK_TITLE}" --nocancel --notags \
@@ -7521,11 +7878,11 @@ function setContainerUser() {
   # give little notice
   # showNotice "To get the ID of a user in a container:\n\n$ docker exec -it container_name /bin/bash\n$ id -u www-data"
   # we first get the container user ID
-  while [ -z "${VDM_PUID}" ] || [ ${#VDM_PUID} -le 1 ] || ! [[ "${VDM_PUID}" =~ ^[0-9]+$ ]]; do
+  while [ -z "${VDM_PUID}" ] || ! [[ "${VDM_PUID}" =~ ^[0-9]+$ ]]; do
     VDM_PUID=$(getInput "Enter user ID for the ${VDM_CONTAINER_TYPE^} container. Use default:${1:-1000} if you don't know.\n[add only a number]" \
       "${1:-1000}" 'Enter User ID') || return $?
     # check if we have success
-    if [ ${#VDM_PUID} -le 1 ] || ! [[ "${VDM_PUID}" =~ ^[0-9]+$ ]]; then
+    if [ -z "${VDM_PUID}" ] || ! [[ "${VDM_PUID}" =~ ^[0-9]+$ ]]; then
       showError "You must enter a user ID like: ${1:-1000} (only the number)"
     fi
   done
@@ -7540,11 +7897,11 @@ function setContainerUser() {
   # give little notice
   # showNotice "To get the ID of a user-group in a container:\n\n$ docker exec -it container_name /bin/bash\n$ id -u www-data"
   # we get the container user-group ID
-  while [ -z "${VDM_PGID}" ] || [ ${#VDM_PGID} -le 1 ] || ! [[ "${VDM_PGID}" =~ ^[0-9]+$ ]]; do
+  while [ -z "${VDM_PGID}" ] || ! [[ "${VDM_PGID}" =~ ^[0-9]+$ ]]; do
     VDM_PGID=$(getInput "Enter user-group ID for the ${VDM_CONTAINER_TYPE^} container. Use default:${1:-1000} if you don't know.\n[add only a number]" \
       "${1:-1000}" 'Enter User Group ID') || return $?
     # check if we have success
-    if [ ${#VDM_PGID} -le 1 ] || ! [[ "${VDM_PGID}" =~ ^[0-9]+$ ]]; then
+    if [ -z "${VDM_PGID}" ] || ! [[ "${VDM_PGID}" =~ ^[0-9]+$ ]]; then
       showError "You must enter a user-group ID like: ${1:-1000} (only the number)"
     fi
   done
@@ -7702,9 +8059,10 @@ function setUniqueKey() {
 
 # set the Joomla website details
 function setJoomlaWebsiteDetails() {
+  local auto_default='' status
+  [ "${VDM_DEFAULT_JOOMLA_AUTO_INSTALL:-true}" != false ] || auto_default=defaultno
   # ask if we should add auto deployment
-  if getInputYesNo "Would you like to enable website auto deploy for ${VDM_CONTAINER_TYPE,}:${VDM_JV}" \
-    "Enable Auto deploy" 8 112; then
+  if joomlaSetupBoolean VDM_AUTO_INSTALL "Would you like to enable website auto deploy for ${VDM_CONTAINER_TYPE,}:${VDM_JV}" "Enable Auto deploy" "$auto_default"; then
 
     # ask for website name
     setJoomlaSiteName || return $?
@@ -7728,7 +8086,11 @@ function setJoomlaWebsiteDetails() {
     if [[ "${VDM_J_REPO}" == "octoleo/joomengine" ]]; then
       setJoomlaCommands || return $?
     fi
+  else
+    status=$?
+    [ "$status" -eq 1 ] || return "$status"
   fi
+  return 0
 }
 
 # set the website name
@@ -7821,6 +8183,8 @@ function setJoomlaPassword() {
 # This function asks for Joomla extension ZIP URLs using whiptail, validates them,
 # and concatenates them into a single environment variable.
 function setJoomlaExtensionUrls() {
+    if isFunc cliHasValue && cliHasValue VDM_J_EXTENSIONS_URLS; then return 0; fi
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then return 0; fi
     local urls=()
     local input=""
     local prompt_message="Enter Joomla Extension ZIP URL (leave empty to for none):"
@@ -7854,6 +8218,8 @@ function setJoomlaExtensionUrls() {
 # This function asks for Joomla commands using whiptail, validates them,
 # and concatenates them into a single environment variable.
 function setJoomlaCommands() {
+    if isFunc cliHasValue && cliHasValue VDM_J_CLI_COMMANDS; then return 0; fi
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then return 0; fi
     local j_commands=()
     local input=""
     local prompt_message="Enter Joomla cli command passed to cli/joomla.php script (leave empty for none):"
@@ -7915,6 +8281,15 @@ function joomlaValidateCliCommand() {
 
 # set the number of containers to build
 function setNumberContainers() {
+  if [ -n "${VDM_NUMBER_CONTAINERS:-}" ]; then
+    if [[ "$VDM_NUMBER_CONTAINERS" =~ ^[0-9]{1,2}$ ]] && (( 10#$VDM_NUMBER_CONTAINERS > 1 && 10#$VDM_NUMBER_CONTAINERS < 100 )); then
+      VDM_NUMBER_CONTAINERS=$((10#$VDM_NUMBER_CONTAINERS))
+      return 0
+    elif [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+      printf 'ERROR: --number must be between 2 and 99.\n' >&2
+      return 17
+    fi
+  fi
   local valid=0
   local count
   while [ "$valid" -eq 0 ]; do
@@ -8005,12 +8380,13 @@ function setImageSource() {
   # get the Joomla version if not set
   while [ ${#VDM_JV} -le 1 ]; do
     # get the value
-    VDM_JV=$(getInput "Enter Joomla version tag for this container.\n[See available tags here ${vdm_tag_url}]" 'latest' 'Enter Version Tag') || return $?
+    VDM_JV=$(getInput "Enter Joomla version tag for this container.\n[See available tags here ${vdm_tag_url}]" "${VDM_DEFAULT_JOOMLA_IMAGE_TAG:-latest}" 'Enter Version Tag') || return $?
     # keep asking
     [ ${#VDM_JV} -ge 1 ] || {
       showError "You must enter a version tag. See available tags here ${vdm_tag_url}"
     }
   done
+  joomlaImageEntrypoint || return $?
   # make the value available globally
   export VDM_ENTRY_REPO
   export VDM_J_REPO
@@ -8695,7 +9071,7 @@ function setSecureCloudflareState() {
 	# Determine caller
 	local caller="${1:-generic}"
 	local question=""
-	local title="Cloudflare"
+	local title="Cloudflare" status
 
 	# Build caller-specific question
 	if [[ "$caller" == "traefik" ]]; then
@@ -8711,6 +9087,8 @@ function setSecureCloudflareState() {
 	if getInputYesNo "$question" "$title" 10 112 "defaultno"; then
 		VDM_SECURE_CLOUDFLARE=true
 	else
+		status=$?
+		[ "$status" -eq 1 ] || return "$status"
 		VDM_SECURE_CLOUDFLARE=false
 	fi
 
@@ -8930,6 +9308,15 @@ function setEnvVariable() {
 
 function setContainerEnvVariable() {
   [[ "${VDM_CONTAINER_TYPE:-}" =~ ^[a-zA-Z0-9_-]+$ ]] || return 12
+  if [ "${OCTOJOOM_SETUP_COLLECT_ENV:-false}" = true ]; then
+    if [ ! -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && [ "${OCTOJOOM_SETUP_ENV_APPROVED:-false}" != true ]; then
+      getInputYesNo "Can we create the ${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env file" "Environment Variable File" 8 112 || return 12
+      OCTOJOOM_SETUP_ENV_APPROVED=true
+    fi
+    formatEnvAssignment "$1" >/dev/null || return 12
+    OCTOJOOM_SETUP_ASSIGNMENTS+=("$1")
+    return 0
+  fi
   writeEnvVariable "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" "$1"
 }
 

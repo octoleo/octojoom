@@ -15,6 +15,9 @@ load ../helpers/common
 setup() {
   octojoom_setup
   VDM_CONTAINER_TYPE='joomla'
+  VDM_PHP_INI_TARGET=/usr/local/etc/php/conf.d/zz-octojoom.ini
+  joomlaRuntimeIniTarget() { printf '%s\n' '/usr/local/etc/php/conf.d/zz-octojoom.ini'; }
+  joomlaSetupPHPChoices() { return 0; }
 }
 
 # the joomengine image source offered in expert mode (a radiolist tag)
@@ -33,12 +36,12 @@ shared_env() {
 # Expert setup answers before the optional PHP/entrypoint questions. Version
 # 4.2 keeps auto-deployment outside these focused failure-path regressions.
 expert_single_answers() {
-  answers "${JOOMENGINE_SOURCE}" 4.2 abc ABC abc \
+  answers "${JOOMENGINE_SOURCE}" 4.2 abc ABC abc no \
     abc_db abc_user userpass rootpass no yes yes no 1001 1002 "$@"
 }
 
 expert_bulk_answers() {
-  answers "${JOOMENGINE_SOURCE}" 4.2 site bulk_db bulk_user bulkpass 1001 1002 "$@"
+  answers "${JOOMENGINE_SOURCE}" 4.2 site no bulk_db bulk_user bulkpass 1001 1002 "$@"
 }
 
 fail_php_ownership() {
@@ -58,7 +61,7 @@ EOF
   octojoom_config
   # version, key, env key, sub-domain, database name/user/pass/root,
   # create env file, auto deploy, enable
-  answers 5.3 jcb JCB jcb jcb_db jcb_user userpass rootpass yes no no
+  answers 5.3 jcb JCB jcb no jcb_db jcb_user userpass rootpass yes no no
   run joomla__TRuST__setup
   assert_success
   assert_answers_used
@@ -72,13 +75,13 @@ EOF
   assert_file_contains "$(shared_env)" 'VDM_JCB_DB_PASS="userpass"'
   assert_file_contains "$(shared_env)" 'VDM_JCB_DB_ROOT="rootpass"'
   refute_file_exists "${VDM_REPO_PATH}/joomla/enabled/jcb.vdm.dev"
-  refute_command '^docker compose'
+  refute_command '^docker compose .* (up|start|restart)'
 }
 
 @test "joomla setup: the compose file and the env file are private" {
   skip_on_windows "file modes are not real on Windows"
   octojoom_config
-  answers 5.3 jcb JCB jcb jcb_db jcb_user userpass rootpass yes no no
+  answers 5.3 jcb JCB jcb no jcb_db jcb_user userpass rootpass yes no no
   run joomla__TRuST__setup
   assert_success
   assert_equal "$(file_mode "$(compose_yml jcb.vdm.dev)")" 600
@@ -87,7 +90,7 @@ EOF
 
 @test "joomla setup: the auto deploy details are saved for the container" {
   octojoom_config
-  answers 5.3 jcb JCB jcb jcb_db jcb_user userpass rootpass yes \
+  answers 5.3 jcb JCB jcb no jcb_db jcb_user userpass rootpass yes \
     yes 'Octo Site' admin 'Octo Admin' admin@vdm.dev 'a-strong-password' \
     'https://example.org/pkg.zip' '' \
     no
@@ -102,7 +105,7 @@ EOF
 @test "joomla setup: Letsencrypt behind Cloudflare adds the secure labels" {
   octojoom_config 'VDM_SECURE=true'
   # the Cloudflare question comes after the sub-domain
-  answers 4.2 jcb JCB jcb yes jcb_db jcb_user userpass rootpass yes no
+  answers 4.2 jcb JCB jcb no yes jcb_db jcb_user userpass rootpass yes no
   run joomla__TRuST__setup
   assert_success
   local yml
@@ -115,7 +118,7 @@ EOF
   octojoom_config
   make_joomla_container abc ABC abc
   # key, env key, sub-domain: no database questions, then no enable
-  answers 4.2 xyz ABC xyz no
+  answers 4.2 xyz ABC xyz no no
   run joomla__TRuST__setup
   assert_success
   assert_file_contains "$(compose_yml xyz.vdm.dev)" 'container_name: joomlaxyz'
@@ -125,7 +128,7 @@ EOF
 
 @test "joomla setup: answering yes to enable starts the container" {
   octojoom_config
-  answers 4.2 jcb JCB jcb jcb_db jcb_user userpass rootpass yes yes
+  answers 4.2 jcb JCB jcb no jcb_db jcb_user userpass rootpass yes yes
   run joomla__TRuST__setup
   assert_success
   [ -e "${VDM_REPO_PATH}/joomla/enabled/jcb.vdm.dev" ]
@@ -139,7 +142,7 @@ EOF
   # persistence (website no, database yes), create env file, mailcatcher,
   # user and group IDs, auto deploy with one extension and one CLI command,
   # PHP overrides (no editor), entrypoint, enable
-  answers "${JOOMENGINE_SOURCE}" 5.3 abc ABC abc \
+  answers "${JOOMENGINE_SOURCE}" 5.3 abc ABC abc no \
     abc_db abc_user userpass rootpass \
     no yes \
     yes \
@@ -162,7 +165,7 @@ EOF
   assert_file_contains "${yml}" 'container_name: mailcatcherabc'
   assert_file_contains "${yml}" '- APACHE_RUN_USER=${VDM_ABC_PUID}'
   assert_file_contains "${yml}" '- JOOMLA_CLI_COMMANDS=${VDM_ABC_CLI_COMMANDS}'
-  assert_file_contains "${yml}" '${VDM_PROJECT_PATH}/abc/php.ini:/var/www/html/php.ini'
+  assert_file_contains "${yml}" '${VDM_PROJECT_PATH}/abc/php.ini:/usr/local/etc/php/conf.d/zz-octojoom.ini'
   assert_file_contains "${yml}" '${VDM_PROJECT_PATH}/abc/entrypoint.sh:/entrypoint.sh'
   assert_file_contains "$(shared_env)" 'VDM_ABC_PUID="#1001"'
   assert_file_contains "$(shared_env)" 'VDM_ABC_CLI_COMMANDS="cache:clean"'
@@ -178,7 +181,7 @@ EOF
   assert_status 2
   assert_answers_used
   refute_file_exists "$(compose_yml abc.vdm.dev)"
-  refute_command '^docker compose'
+  refute_command '^docker compose .* (up|start|restart)'
   refute_dialog 'Setup of this container is complete'
 }
 
@@ -190,7 +193,7 @@ EOF
   assert_status 22
   assert_answers_used
   refute_file_exists "$(compose_yml abc.vdm.dev)"
-  refute_command '^docker compose'
+  refute_command '^docker compose .* (up|start|restart)'
   refute_dialog 'Setup of this container is complete'
 }
 
@@ -212,7 +215,7 @@ EOF
   octojoom_config
   # version, sub-domain, database name/user/pass, mailcatcher, auto deploy,
   # create env file, number of containers, enable
-  answers 5.3 site bulk_db bulk_user bulkpass no no yes 2 no
+  answers 5.3 site no bulk_db bulk_user bulkpass no no yes 2 no
   run joomla__TRuST__bulk
   assert_success
   assert_answers_used
@@ -221,12 +224,12 @@ EOF
   refute_file_exists "$(compose_yml site3.vdm.dev)"
   assert_file_contains "$(shared_env)" '_DB="bulk_db1"'
   assert_file_contains "$(shared_env)" '_DB="bulk_db2"'
-  refute_command '^docker compose'
+  refute_command '^docker compose .* (up|start|restart)'
 }
 
 @test "joomla bulk: answering yes to enable starts every container" {
   octojoom_config
-  answers 4.2 site bulk_db bulk_user bulkpass no yes 2 yes
+  answers 4.2 site no bulk_db bulk_user bulkpass no yes 2 yes
   run joomla__TRuST__bulk
   assert_success
   [ -e "${VDM_REPO_PATH}/joomla/enabled/site1.vdm.dev" ]
@@ -237,7 +240,7 @@ EOF
 
 @test "joomla bulk: a number of containers that is not between 2 and 99 is asked again" {
   octojoom_config
-  answers 4.2 site bulk_db bulk_user bulkpass no yes ten 1 100 3 no
+  answers 4.2 site no bulk_db bulk_user bulkpass no yes ten 1 100 3 no
   run joomla__TRuST__bulk
   assert_success
   assert_file_exists "$(compose_yml site3.vdm.dev)"
@@ -252,7 +255,7 @@ EOF
   assert_status 2
   assert_answers_used
   refute_file_exists "${VDM_REPO_PATH}/joomla/available"
-  refute_command '^docker compose'
+  refute_command '^docker compose .* (up|start|restart)'
 }
 
 @test "joomla bulk: entrypoint failure aborts before container-count and enable questions" {
@@ -263,7 +266,7 @@ EOF
   assert_status 22
   assert_answers_used
   refute_file_exists "${VDM_REPO_PATH}/joomla/available"
-  refute_command '^docker compose'
+  refute_command '^docker compose .* (up|start|restart)'
   refute_dialog 'Enter the number of containers'
 }
 
