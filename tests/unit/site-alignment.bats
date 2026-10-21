@@ -217,3 +217,12 @@ YAML
   migrationReadEnvValue "$SANDBOX/clone.env" VDM_BETA_PHP_MEMORY_LIMIT cloned
   assert_equal "$cloned" 512M
 }
+
+@test "alignment: retains the saved phpMyAdmin choice from website setup" {
+  formatEnvAssignment 'VDM_ALPHA_PHPMYADMIN=false' >> "$ALIGN_ENV"
+  run siteAlignConfiguration alpha.example.test apply
+  assert_success
+  migrationReadEnvValue "$ALIGN_DIR/.env" VDM_ALPHA_PHPMYADMIN choice
+  assert_equal "$choice" false
+  migrationValidateScopedEnv "$ALIGN_YML" "$ALIGN_DIR/.env"
+}
