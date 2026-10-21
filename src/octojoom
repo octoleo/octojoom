@@ -3245,9 +3245,13 @@ function joomla__TRuST__clone() {
 # Existing cold clone/export readers assume Joomla directly in the web mount.
 # Keep their supported path intact and reject only a configured nested root.
 function requireOriginalJoomlaDataLayout() {
-  local site="$1" operation="$2" compose_file env_file root env_key server
+  local site="$1" operation="$2" compose_file env_file root env_key server project_base
   compose_file="${VDM_REPO_PATH}/joomla/available/$site/docker-compose.yml"
   env_file=$(getContainerEnvFile joomla "$site" available)
+  if [ "$operation" = Clone ] && migrationReadEnvValue "$env_file" VDM_PROJECT_PATH project_base && [ "$project_base" != "$VDM_PROJECT_PATH" ]; then
+    printf '%s\n' 'Clone cannot yet copy a source using a different site-specific project base. Use complete project migration for that layout; source data is unchanged.' >&2
+    return 1
+  fi
   if getJoomlaComposeIdentity "$compose_file"; then
     env_key="$VDM_SRC_ENV_KEY"
     if migrationReadEnvValue "$env_file" "VDM_${env_key}_WEBSERVER" server && [ "$server" = nginx ]; then
