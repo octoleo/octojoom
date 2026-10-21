@@ -3663,12 +3663,341 @@ Would you like to continue anyway?" "Database Is Running" 12 112 "defaultno"; th
 }
 
 #####################################################################################################################VDM
+######################################## EXISTING SITE CONFIGURATION
+
+# Copy the complete effective configuration needed by one site. Shared files are
+# never copied wholesale: unrelated sites and host-only secrets stay behind.
+function siteWriteScopedEnv() {
+  local compose_file="$1" effective_env="$2" env_key="$3" destination="$4"
+  local references name value line suffixes temporary
+  [[ "$env_key" =~ ^[A-Za-z]+$ ]] || return 1
+  [ -f "$effective_env" ] && [ ! -L "$effective_env" ] || return 1
+  [ "$effective_env" != "$destination" ] && [ ! "$effective_env" -ef "$destination" ] || return 1
+  (loadEnvFile "$effective_env") || return 1
+  references=$(migrationComposeReferences "$compose_file") || return 1
+  suffixes=$(getJoomlaEnvSuffixes)
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(VDM_[A-Za-z0-9_]+)[[:space:]]*= ]]; then
+      name="${BASH_REMATCH[2]}"
+      if [[ "$name" =~ ^VDM_${env_key}_(${suffixes})$ ]] && ! printf '%s\n' "$references" | grep -qxF "$name"; then
+        references+=$'\n'"$name"
+      fi
+    fi
+  done < "$effective_env"
+  temporary=$(mktemp "${destination}.tmp.XXXXXX") || return 1
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if ! migrationReadEnvValue "$effective_env" "$name" value || ! formatEnvAssignment "$name=\"$value\"" >> "$temporary"; then
+      rm -f -- "$temporary"
+      return 1
+    fi
+  done <<< "$references"
+  chmod 600 "$temporary" && mv -f -- "$temporary" "$destination"
+}
+
+# These two helpers intentionally support the original, block-style service
+# mapping only. They are not a general YAML parser. A service/property must
+# occur exactly once at the original indentation; custom structures are refused.
+function siteReadServiceScalar() {
+  local source="$1" service="$2" property="$3" scalar
+  [[ "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && "$property" =~ ^[a-z_]+$ ]] || return 1
+  scalar=$(awk -v service="$service" -v property="$property" '
+    /^services:[[:space:]]*(#.*)?$/ { services=1; next }
+    services && /^[^[:space:]#]/ { services=0; selected=0 }
+    services && /^  [^[:space:]#]/ {
+      selected=($0 ~ ("^  " service ":[[:space:]]*(#.*)?$")); if (selected) blocks++
+    }
+    selected && $0 ~ ("^    " property ":[[:space:]]*") {
+      count++; line=$0; sub("^    " property ":[[:space:]]*", "", line); value=line
+    }
+    END { if (blocks != 1 || count != 1) exit 1; print value }
+  ' "$source") || return 1
+  decodeEnvValue "$scalar" scalar || return 1
+  [ -n "$scalar" ] && [[ "$scalar" != *$'\n'* && "$scalar" != *$'\r'* ]] || return 1
+  printf '%s\n' "$scalar"
+}
+
+function siteReplaceServiceScalar() {
+  local source="$1" destination="$2" service="$3" property="$4" value="$5" escaped
+  [ "$source" != "$destination" ] && [ ! "$source" -ef "$destination" ] || return 1
+  siteReadServiceScalar "$source" "$service" "$property" >/dev/null || return 1
+  [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
+  # Environment variables remain Compose placeholders; the YAML value is quoted.
+  escaped="${value//\\/\\\\}"
+  escaped="${escaped//\"/\\\"}"
+  OCTOJOOM_SCALAR_VALUE="$escaped" awk -v service="$service" -v property="$property" '
+    /^services:[[:space:]]*(#.*)?$/ { services=1 }
+    services && /^[^[:space:]#]/ && $0 !~ /^services:/ { services=0; selected=0 }
+    services && /^  [^[:space:]#]/ { selected=($0 ~ ("^  " service ":[[:space:]]*(#.*)?$")) }
+    selected && $0 ~ ("^    " property ":[[:space:]]*") { $0="    " property ": \"" ENVIRON["OCTOJOOM_SCALAR_VALUE"] "\"" }
+    { print }
+  ' "$source" > "$destination"
+}
+
+# Keep the original Compose project directory while validating adjacent staged
+# files. This preserves relative mounts and the normal inferred project name.
+function siteValidateCompose() {
+  local compose_file="$1" env_file="$2" project_directory="$3"
+  [ -f "$compose_file" ] && [ -f "$env_file" ] && [ -d "$project_directory" ] || return 1
+  migrationRunCompose "$env_file" "$compose_file" --project-directory "$project_directory" config --quiet
+}
+
+# Publish Compose, ENV and optional companion files as a recoverable sequence.
+# Companion pairs come from caller-local OCTOJOOM_SITE_FILE_TARGETS/_SOURCES
+# arrays. Optional START/STOP_SERVICES arrays cover a changed HTTP service role.
+# Only already-running affected services are recreated; disabled/stopped sites
+# stay stopped. The caller verifies intended semantic changes before this call.
+function sitePublishConfiguration() {
+  (
+    local site="$1" staged_compose="$2" staged_env="$3"
+    shift 3
+    local directory="${VDM_REPO_PATH}/joomla/available/$site" compose_file effective_env
+    local recovery='' lock='' running='' service target source index changed=0 failed=false runtime_changed=false
+    local callback="${OCTOJOOM_SITE_VALIDATE_FUNCTION:-}" rollback_failed=false
+    local -a targets=("${OCTOJOOM_SITE_FILE_TARGETS[@]}") sources=("${OCTOJOOM_SITE_FILE_SOURCES[@]}")
+    local -a active=() stopped=() start_services=("${OCTOJOOM_SITE_START_SERVICES[@]}")
+    local -a stop_services=("${OCTOJOOM_SITE_STOP_SERVICES[@]}") existed=()
+    isValidDomain "$site" && [ -d "$directory" ] && ! migrationPathHasSymlink "$directory" || exit 1
+    compose_file="$directory/docker-compose.yml"
+    effective_env=$(getContainerEnvFile joomla "$site" available)
+    [ "${#targets[@]}" -eq "${#sources[@]}" ] || exit 1
+    targets+=("$directory/.env" "$compose_file")
+    sources+=("$staged_env" "$staged_compose")
+    for index in "${!targets[@]}"; do
+      target="${targets[index]}" source="${sources[index]}"
+      [[ "$target" == "$directory/"* && "$target" != *'/../'* && "$target" != *'/./'* && "$target" != *$'\n'* ]] || exit 1
+      [ -f "$source" ] && [ ! -L "$source" ] && ! migrationPathHasSymlink "$target" || exit 1
+      [ "$target" != "$source" ] && [ ! "$target" -ef "$source" ] || exit 1
+      [ -d "${target%/*}" ] || exit 1
+      # Duplicate destinations make rollback ambiguous.
+      for ((changed=0; changed<index; changed++)); do [ "$target" != "${targets[changed]}" ] || exit 1; done
+    done
+    changed=0
+    lock="$directory/.octojoom-change.lock"
+    mkdir "$lock" 2>/dev/null || { printf 'Another configuration change is using %s.\n' "$site" >&2; exit 1; }
+    trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+    siteValidateCompose "$staged_compose" "$staged_env" "$directory" || exit 1
+    if [ "$#" -gt 0 ] || [ "${#stop_services[@]}" -gt 0 ]; then
+      running=$(migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" ps --status running --services) || {
+        printf 'Cannot determine running services for %s; configuration unchanged.\n' "$site" >&2; exit 1;
+      }
+      for service in "$@"; do
+        [[ "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || exit 1
+        if printf '%s\n' "$running" | grep -qxF "$service"; then active+=("$service"); fi
+      done
+      for service in "${stop_services[@]}"; do
+        [[ "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || exit 1
+        if printf '%s\n' "$running" | grep -qxF "$service"; then stopped+=("$service"); fi
+      done
+      if [ "${#active[@]}" -gt 0 ] || [ "${#stopped[@]}" -gt 0 ]; then
+        for service in "${start_services[@]}"; do
+          [[ "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || exit 1
+          active+=("$service")
+        done
+      fi
+    fi
+    recovery=$(mktemp -d "$directory/.octojoom-recovery.XXXXXX") || exit 1
+    chmod 700 "$recovery" || exit 1
+    for index in "${!targets[@]}"; do
+      target="${targets[index]}"
+      if [ -e "$target" ]; then
+        [ -f "$target" ] && cp -p -- "$target" "$recovery/$index" || exit 1
+        existed+=(true)
+      else
+        existed+=(false)
+      fi
+      printf '%s\t%s\n' "$index" "$target" >> "$recovery/paths" || exit 1
+    done
+    # Interrupted writes flow through the same recovery path as command failures.
+    trap 'failed=true' INT TERM HUP
+    if [ "${#stopped[@]}" -gt 0 ]; then
+      runtime_changed=true
+      migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" stop "${stopped[@]}" >&2 || failed=true
+    fi
+    if ! "$failed"; then
+      for index in "${!targets[@]}"; do
+        "$failed" && break
+        # Write an adjacent copy so publication remains a rename on one filesystem.
+        # Companions retain their explicitly prepared mode (PHP/Nginx read 0644
+        # configuration as an unprivileged container user); ENV/Compose stay private.
+        target="${targets[index]}"
+        source=$(mktemp "${target}.publish.XXXXXX") || { failed=true; break; }
+        if ! cp -p -- "${sources[index]}" "$source"; then
+          rm -f -- "$source"; failed=true; break
+        fi
+        if [ "$target" = "$directory/.env" ] || [ "$target" = "$compose_file" ]; then
+          chmod 600 "$source" || { rm -f -- "$source"; failed=true; break; }
+        fi
+        if ! mv -f -- "$source" "$target"; then
+          rm -f -- "$source"; failed=true; break
+        fi
+        changed=$((index+1))
+      done
+    fi
+    if ! "$failed" && [ "${#active[@]}" -gt 0 ]; then
+      runtime_changed=true
+      migrationRunCompose "$directory/.env" "$compose_file" --project-directory "$directory" up -d --no-deps --wait --wait-timeout 90 "${active[@]}" >&2 || failed=true
+      if ! "$failed" && [ -n "$callback" ]; then
+        if ! isFunc "$callback" || ! "$callback" "$site"; then failed=true; fi
+      fi
+    fi
+    if "$failed"; then
+      for ((index=changed-1; index>=0; index--)); do
+        target="${targets[index]}"
+        if "${existed[index]}"; then
+          cp -p -- "$recovery/$index" "$target" || rollback_failed=true
+        else
+          rm -f -- "$target" || rollback_failed=true
+        fi
+      done
+      if "$runtime_changed"; then
+        # Stop newly introduced services using the candidate before returning to
+        # the original project. Do not remove containers or their data volumes.
+        if [ "${#start_services[@]}" -gt 0 ]; then
+          migrationRunCompose "$staged_env" "$staged_compose" --project-directory "$directory" stop "${start_services[@]}" >&2 || rollback_failed=true
+        fi
+        local -a restore=()
+        for service in "$@" "${stopped[@]}"; do
+          if printf '%s\n' "$running" | grep -qxF "$service"; then restore+=("$service"); fi
+        done
+        if [ "${#restore[@]}" -gt 0 ]; then
+          migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" up -d --no-deps --wait --wait-timeout 90 "${restore[@]}" >&2 || rollback_failed=true
+        fi
+      fi
+      printf 'Configuration change failed for %s. Originals retained in %s.\n' "$site" "$recovery" >&2
+      if "$rollback_failed"; then printf 'Automatic recovery is incomplete; inspect the retained files and services before retrying.\n' >&2; fi
+      exit 1
+    fi
+    printf 'Previous configuration retained in %s.\n' "$recovery" >&2
+  )
+}
+
+# Alignment's one concrete transformation exposes the *current* web image as a
+# scoped editable setting. It deliberately does not enable optional services,
+# upgrade an image, regenerate YAML, or change Traefik before such a change exists.
+function siteAlignmentPlan() {
+  local site="$1" directory compose_file effective_env raw image env_key service references name value
+  isValidDomain "$site" || return 1
+  directory="${VDM_REPO_PATH}/joomla/available/$site"
+  compose_file="$directory/docker-compose.yml"
+  [ -f "$compose_file" ] && ! migrationPathHasSymlink "$compose_file" || return 1
+  if ! getJoomlaComposeIdentity "$compose_file"; then
+    printf 'action-needed\tThe web service/environment identity is not in the supported generated layout.\n'; return 0
+  fi
+  env_key="$VDM_SRC_ENV_KEY" service="joomla$VDM_SRC_KEY"
+  effective_env=$(getContainerEnvFile joomla "$site" available)
+  if [ ! -f "$effective_env" ] || ! references=$(migrationComposeReferences "$compose_file"); then
+    printf 'action-needed\tThe effective environment is missing or interpolation needs a manual edit.\n'; return 0
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if ! migrationReadEnvValue "$effective_env" "$name" value; then
+      printf 'action-needed\tA required Compose setting is missing or invalid in the effective environment.\n'; return 0
+    fi
+  done <<< "$references"
+  if ! raw=$(siteReadServiceScalar "$compose_file" "$service" image); then
+    printf 'action-needed\tThe web image is not a unique block-style service scalar.\n'; return 0
+  fi
+  if [ "$raw" = "\${VDM_${env_key}_IMAGE}" ]; then
+    if migrationReadEnvValue "$effective_env" "VDM_${env_key}_IMAGE" image; then
+      printf 'unchanged\tCurrent image already has a saved site setting.\n'
+    else
+      printf 'action-needed\tThe saved web image setting is missing.\n'
+    fi
+  elif [[ "$raw" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$ ]]; then
+    printf 'pending\tSave the current web image and scoped environment; no service recreation.\n'
+  else
+    printf 'action-needed\tThe existing image interpolation is customized; keep its current setting.\n'
+  fi
+}
+
+function siteAlignConfiguration() {
+  (
+    local site="$1" action="${2:-apply}" plan state directory compose_file effective_env env_key service image staged_compose staged_env before after
+    plan=$(siteAlignmentPlan "$site") || exit 1
+    state="${plan%%$'\t'*}"
+    if [ "$action" = inspect ] || [ "$state" != pending ]; then
+      printf '%s\t%s\n' "$site" "$plan"
+      [ "$state" != action-needed ]
+      exit $?
+    fi
+    directory="${VDM_REPO_PATH}/joomla/available/$site"
+    compose_file="$directory/docker-compose.yml"
+    effective_env=$(getContainerEnvFile joomla "$site" available)
+    getJoomlaComposeIdentity "$compose_file" || exit 1
+    env_key="$VDM_SRC_ENV_KEY" service="joomla$VDM_SRC_KEY"
+    image=$(siteReadServiceScalar "$compose_file" "$service" image) || exit 1
+    staged_compose=$(mktemp "$directory/.align-compose.XXXXXX") || exit 1
+    staged_env=$(mktemp "$directory/.align-env.XXXXXX") || { rm -f "$staged_compose"; exit 1; }
+    before=$(mktemp "$directory/.align-before.XXXXXX") || exit 1
+    after=$(mktemp "$directory/.align-after.XXXXXX") || exit 1
+    trap 'rm -f -- "$staged_compose" "$staged_env" "$before" "$after"' EXIT
+    siteWriteScopedEnv "$compose_file" "$effective_env" "$env_key" "$staged_env" &&
+      writeEnvVariable "$staged_env" "VDM_${env_key}_IMAGE=\"$image\"" true &&
+      siteReplaceServiceScalar "$compose_file" "$staged_compose" "$service" image "\${VDM_${env_key}_IMAGE}" || exit 1
+    siteValidateCompose "$staged_compose" "$staged_env" "$directory" || exit 1
+    migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" config > "$before" &&
+      migrationRunCompose "$staged_env" "$staged_compose" --project-directory "$directory" config > "$after" || exit 1
+    if ! cmp -s "$before" "$after"; then
+      printf '%s\taction-needed\tEffective Compose configuration changed unexpectedly; original retained.\n' "$site"
+      exit 1
+    fi
+    # No service arguments: effective configuration is identical, including when
+    # the daemon cannot be inspected. No stop/start/pull is needed for this edit.
+    sitePublishConfiguration "$site" "$staged_compose" "$staged_env" || exit 1
+    printf '%s\tupdated\tSaved current image and complete site environment; services unchanged.\n' "$site"
+  )
+}
+
+function joomla__TRuST__align() {
+  local action="${VDM_ACTION:-apply}" site result=0 found=false
+  case "$action" in inspect|apply) ;; *) printf 'Alignment action must be inspect or apply.\n' >&2; return 17 ;; esac
+  if [ "${VDM_ALL:-false}" = true ] && [ -n "${VDM_CONTAINER:-}" ]; then
+    printf 'Choose --all or --container for alignment.\n' >&2; return 17
+  fi
+  if [ "${VDM_ALL:-false}" = true ]; then
+    for site in "${VDM_REPO_PATH}/joomla/available/"*; do
+      [ -f "$site/docker-compose.yml" ] || continue
+      found=true
+      siteAlignConfiguration "${site##*/}" "$action" || result=1
+    done
+    "$found" || printf 'No Joomla websites found.\n'
+  elif [ -n "${VDM_CONTAINER:-}" ]; then
+    siteAlignConfiguration "$VDM_CONTAINER" "$action" || result=$?
+  else
+    printf 'Alignment requires --container HOSTNAME or --all.\n' >&2; return 17
+  fi
+  return "$result"
+}
+
+function showConfigurationAlignment() {
+  local VDM_ALL=true VDM_CONTAINER='' VDM_ACTION=inspect report
+  report=$(joomla__TRuST__align)
+  if getInputYesNo "$report\n\nApply the supported configuration changes? Current images, data and service state are preserved." 'Update existing configurations' 22 112; then
+    VDM_ACTION=apply
+    report=$(joomla__TRuST__align 2>&1)
+    showNotice "$report" 22
+  fi
+}
+
+# Read-only startup hint, no Docker, cache, settings writes or implicit apply.
+function configurationAlignmentCount() {
+  local site plan count=0
+  for site in "${VDM_REPO_PATH}/joomla/available/"*; do
+    [ -f "$site/docker-compose.yml" ] || continue
+    plan=$(siteAlignmentPlan "${site##*/}") || continue
+    [[ "$plan" == pending$'\t'* ]] && count=$((count+1))
+  done
+  printf '%s\n' "$count"
+}
+
+#####################################################################################################################VDM
 ######################################## CLONE HELPERS (no user interaction, so they can be tested)
 
 # the env variable name suffixes a Joomla container reads through its env key (VDM_<ENV_KEY>_<suffix>)
 # returned as an extended regular expression alternation
 function getJoomlaEnvSuffixes() {
-  echo 'DB|DB_USER|DB_PASS|DB_ROOT|PUID|PGID|JOOMLA_[A-Z_]+|EXTENSIONS_URLS|CLI_COMMANDS'
+  echo 'DB|DB_USER|DB_PASS|DB_ROOT|PUID|PGID|JOOMLA_[A-Z_]+|EXTENSIONS_URLS|CLI_COMMANDS|IMAGE|IMAGE_SOURCE|IMAGE_TAG|AUTO_INSTALL|PHP_IMAGE|PHP_(MAX_EXECUTION_TIME|MAX_INPUT_TIME|MAX_INPUT_VARS|ERROR_REPORTING|UPLOAD_MAX_FILESIZE|POST_MAX_SIZE|MEMORY_LIMIT)|WEBSERVER|DOCROOT|NGINX_IMAGE|SMTP_(HOST|PORT|USERNAME|PASSWORD|SECURITY|AUTH|FROM|FROM_NAME)|HOOKS_ENABLED|HOOK_(PRE_START|POST_START|PRE_STOP|POST_STOP)|BACKUP_(PATH|FORMAT|RETENTION)|TOOLS_(IMAGE|ENABLED)'
 }
 
 # read the identity of a Joomla container from its docker-compose.yml
@@ -4488,6 +4817,9 @@ function showJoomla() {
     # Get Joomla env details
     isExpert && hasDirectories 'joomla/available' &&
       menu_options+=("joomla_env" "Open Joomla .env Details") && i=$((i + 1))
+    # align existing configurations without regenerating customized Compose
+    hasDirectories 'joomla/available' &&
+      menu_options+=("align" "Update existing configurations") && i=$((i + 1))
     # bulk deploy
     isExpert && menu_options+=("bulk" "Bulk deploy") && i=$((i + 1))
     # Quit Octoleo Program
@@ -4538,6 +4870,9 @@ function showJoomla() {
     "joomla_env")
       openEnv 'joomla'
       ;;
+    "align")
+      showConfigurationAlignment
+      ;;
     "bulk")
       bulkSetupContainers 'joomla'
       ;;
@@ -4546,7 +4881,7 @@ function showJoomla() {
 
     # menu loop
     case $CHOICE in
-    "setup" | "edit" | "enable" | "disable" | "down" | "up" | "fix" | "clonefiles" | "clone" | "delete" | "reset" | "joomla_env" | "bulk")
+    "setup" | "edit" | "enable" | "disable" | "down" | "up" | "fix" | "clonefiles" | "clone" | "delete" | "reset" | "joomla_env" | "bulk" | "align")
       continue
       ;;
     *) return 0 ;;
@@ -4971,7 +5306,9 @@ function migrateMenu() {
 
 # MAIN MENU
 function mainMenu() {
-  local CHOICE
+  local CHOICE pending_alignment
+  pending_alignment=$(configurationAlignmentCount)
+
   # get the selection
   while true; do
     # menu for dynamic addition
@@ -4980,6 +5317,11 @@ function mainMenu() {
     local i=6
     # Joomla containers
     menu_options+=("joomla" "Joomla Containers")
+    # Startup detection is read-only; applying remains an explicit action.
+    if [ "$pending_alignment" -gt 0 ]; then
+      menu_options+=("align" "Update existing configurations ($pending_alignment websites)")
+      i=$((i + 1))
+    fi
     # Openssh containers
     menu_options+=("openssh" "Openssh Containers")
     # Traefik container
@@ -5012,6 +5354,10 @@ function mainMenu() {
     case $CHOICE in
     "joomla")
       showJoomla
+      ;;
+    "align")
+      showConfigurationAlignment
+      pending_alignment=$(configurationAlignmentCount)
       ;;
     "openssh")
       showOpenssh
@@ -7856,13 +8202,20 @@ function migrationComposeReferences() {
 }
 
 function migrationValidateScopedEnv() {
-  local compose_file="$1" env_file="$2" refs line name value seen=' '
+  local compose_file="$1" env_file="$2" refs line name value seen=' ' scoped_key='' suffixes
   refs=$(migrationComposeReferences "$compose_file") || return 1
+  # Admit only recognized settings for this site's own identity in addition to
+  # required Compose references. This preserves dormant restoration/defaults.
+  scoped_key=$(sed -nE '/^[[:space:]]*#/!s/^.*MARIADB_DATABASE=[$][{]VDM_([A-Za-z]+)_DB[}].*$/\1/p' "$compose_file" | head -n 1)
+  suffixes=$(getJoomlaEnvSuffixes)
   refs=" ${refs//$'\n'/ } "
   while IFS= read -r line || [ -n "$line" ]; do
     [[ "$line" =~ ^(VDM_[A-Za-z0-9_]+)=(.*)$ ]] || return 1
     name="${BASH_REMATCH[1]}"
-    [[ "$refs" == *" $name "* && "$seen" != *" $name "* ]] || return 1
+    [[ "$seen" != *" $name "* ]] || return 1
+    if [[ "$refs" != *" $name "* ]]; then
+      [[ -n "$scoped_key" && "$name" =~ ^VDM_${scoped_key}_(${suffixes})$ ]] || return 1
+    fi
     decodeEnvValue "${BASH_REMATCH[2]}" value || return 1
     seen+="$name "
   done < "$env_file"
@@ -8153,12 +8506,7 @@ function exportJoomlaMigration() {
     temporary_archive=$(mktemp "${archive}.partial.XXXXXX") || exit 1
     mkdir "$package/compose" "$package/project" || exit 1
     cp "$source_yml" "$package/compose/docker-compose.yml" || exit 1
-    : > "$package/compose/.env"
-    while IFS= read -r name; do
-      [ -n "$name" ] || continue
-      migrationReadEnvValue "$source_env" "$name" value || exit 1
-      formatEnvAssignment "$name=\"$value\"" >> "$package/compose/.env" || exit 1
-    done <<< "$references"
+    siteWriteScopedEnv "$source_yml" "$source_env" "$env_key" "$package/compose/.env" || exit 1
     while IFS= read -r path; do
       [ -n "$path" ] || continue
       mkdir -p "$package/compose/$(dirname "$path")" || exit 1

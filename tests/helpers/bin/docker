@@ -71,7 +71,7 @@ compose)
       i=$((i + 1))
       file="${args[${i}]}"
       ;;
-    --env-file | -p | --project-name)
+    --env-file | -p | --project-name | --project-directory)
       i=$((i + 1))
       ;;
     -*) ;;
