@@ -2197,14 +2197,17 @@ function joomlaMoveDocumentRoot() {
       return 1
     fi
   done
-  local parent="${destination%/*}" canonical ancestor
+  local parent="${destination%/*}" canonical canonical_base ancestor
+  # macOS exposes /var and /tmp through standard /private aliases. Compare
+  # physical paths on both sides after the ancestor safety check above.
+  canonical_base=$(cd "$base" && pwd -P) || return 1
   if [[ "$destination/" = "$source/"* ]]; then
     ancestor="${destination#"$source/"}"; ancestor="${ancestor%%/*}"
     [ ! -e "$source/$ancestor" ] && [ ! -L "$source/$ancestor" ] || return 1
   fi
   runPrivileged mkdir -p "$parent" || return 1
   canonical=$(cd "$parent" && pwd -P) || return 1
-  [[ "$canonical/" == "$base/"* || "$canonical" = "$base" ]] || return 1
+  [[ "$canonical/" == "$canonical_base/"* || "$canonical" = "$canonical_base" ]] || return 1
   runPrivileged mkdir "$destination" || return 1
   if [ "${OS_NUMBER:-0}" != 3 ]; then
     local ownership mode
