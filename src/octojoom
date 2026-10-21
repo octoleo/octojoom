@@ -40,6 +40,32 @@ if [ "${1:-}" = --migration-worker ]; then
   exit $?
 fi
 
+# Read-only discovery and explicit automation bypass interactive dependency setup.
+# Load this executable's own functions, as the migration worker already does.
+# A supplied task with no input terminal is automation even when the caller
+# omits --non-interactive. An argument-free invocation retains the normal menu.
+octojoom_headless_task=false
+if [ ! -t 0 ] && [ "${1:-}" != --complete ]; then
+  for octojoom_argument in "$@"; do
+    case "$octojoom_argument" in --) break;; --type|--type=*|--task|--task=*|--container|--container=*) octojoom_headless_task=true;; esac
+  done
+fi
+if [ "$octojoom_headless_task" = true ]; then set -- --non-interactive "$@"; fi
+unset octojoom_headless_task
+for octojoom_argument in "$@"; do
+  case "$octojoom_argument" in
+    --complete|--non-interactive|--input-json|--input-json=*|--output|--output=*|-h|--help)
+      check_cli_bash=${BASH_VERSINFO[0]}
+      [ "$check_cli_bash" -ge 4 ] || { echo >&2 'Octojoom requires Bash 4 or newer.'; exit 1; }
+      # shellcheck disable=SC1090
+      source <(awk '/^(function )?[A-Za-z_][A-Za-z0-9_]*\(\) \{$/ {p=1} p {print} p && /^}$/ {p=0}' "${BASH_SOURCE[0]}")
+      cliStart "$@"
+      exit $?
+      ;;
+  esac
+done
+unset octojoom_argument
+
 #####################################################################################################################VDM
 ######################################## The environment preparation
 DOCKER_INSTALLED_THIS_SESSION=false
@@ -532,6 +558,7 @@ function traefik__TRuST__setup() {
   if [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ]; then
     loadEnvFile "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || return 1
   fi
+  cliApplyValues
   # check if we have secure switch set
   setSecureState
   # removed cloudflare features by default
@@ -575,10 +602,10 @@ function traefik__TRuST__setup() {
         showError "The ACME storage (${acme_file}) must be a file."
         return 1
       fi
-      sudo chmod 600 "${VDM_PROJECT_PATH}/traefik/${acme_file}" || return 1
+      cliSudo chmod 600 "${VDM_PROJECT_PATH}/traefik/${acme_file}" || return 1
     done
     # and is owned by root
-    sudo chown -R 0:0 "${VDM_PROJECT_PATH}/traefik" || return 1
+    cliSudo chown -R 0:0 "${VDM_PROJECT_PATH}/traefik" || return 1
   else
     VDM_REMOVE_SECURE="#"
     VDM_HTTP_SCHEME="http"
@@ -598,8 +625,8 @@ function traefik__TRuST__setup() {
   # saved the file
   showNotice "Saved ${VDM_CONTAINER_TYPE}:docker-compose.yml file.\nSetup of this container is complete!"
   # ask if we should continue to enable
-  if getInputYesNo "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
-    "Enable Container" 8 112 "defaultno"; then
+  if [ "${VDM_ENABLE:-false}" = true ] || { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && getInputYesNo "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
+    "Enable Container" 8 112 "defaultno"; }; then
     enableContainer "${VDM_CONTAINER_TYPE}" || return $?
   fi
   ##########################
@@ -708,6 +735,7 @@ function portainer__TRuST__setup() {
   if [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ]; then
     loadEnvFile "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || return 1
   fi
+  cliApplyValues
   # check if we have secure switch set
   setSecureState
   # setup letsencrypt stuff
@@ -747,8 +775,8 @@ function portainer__TRuST__setup() {
   # saved the file
   showNotice "Saved ${VDM_CONTAINER_TYPE}:docker-compose.yml file.\nSetup of this container is complete!"
   # ask if we should continue to enable
-  if getInputYesNo "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
-    "Enable Container" 8 112 "defaultno"; then
+  if [ "${VDM_ENABLE:-false}" = true ] || { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && getInputYesNo "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
+    "Enable Container" 8 112 "defaultno"; }; then
     enableContainer "${VDM_CONTAINER_TYPE}" || return $?
   fi
   ##########################
@@ -2324,6 +2352,7 @@ function openssh__TRuST__setup() {
   if [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ]; then
     loadEnvFile "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || return 1
   fi
+  cliApplyValues
   # get the ssh port if not set
   while ! [[ "${VDM_PORT:-}" =~ ^[0-9]{1,5}$ ]] ||
     [ "$((10#${VDM_PORT:-0}))" -lt 1 ] || [ "$((10#${VDM_PORT:-0}))" -gt 65535 ] ||
@@ -2385,7 +2414,7 @@ function openssh__TRuST__setup() {
   done
   # set the global key env string for the ssh keys
   VDM_ENV_PUBLIC_KEY_U_DIR="VDM_${VDM_ENV_KEY^^}_PUBLIC_KEY_DIR"
-  VDM_PUBLIC_KEY_U_DIR=${!VDM_ENV_PUBLIC_KEY_U_DIR}
+  cliHasValue VDM_PUBLIC_KEY_U_DIR || VDM_PUBLIC_KEY_U_DIR=${!VDM_ENV_PUBLIC_KEY_U_DIR}
   # get the directory of this containers public keys if not set
   while [ ${#VDM_PUBLIC_KEY_U_DIR} -le 1 ] || [ ! -d "${VDM_PUBLIC_KEY_U_DIR}" ]; do
     # creat the path if it exist
@@ -2415,7 +2444,7 @@ function openssh__TRuST__setup() {
   done
   # we must get the project path
   VDM_ENV_PROJECT_DIR="VDM_${VDM_ENV_KEY^^}_PROJECT_DIR"
-  VDM_PROJECT_U_DIR=${!VDM_ENV_PROJECT_DIR}
+  cliHasValue VDM_PROJECT_U_DIR || VDM_PROJECT_U_DIR=${!VDM_ENV_PROJECT_DIR}
   # get the directory of the ssh public keys if not set
   while [ ${#VDM_PROJECT_U_DIR} -le 1 ] || [ ! -d "${VDM_PROJECT_U_DIR}" ]; do
     # creat the path if it exist
@@ -2489,8 +2518,8 @@ function openssh__TRuST__setup() {
   # saved the file
   showNotice "Saved ${VDM_CONTAINER_TYPE}:docker-compose.yml file.\nSetup of this container is complete!"
   # ask if we should continue to enable
-  if getInputYesNo "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
-    "Enable Container" 8 112 "defaultno"; then
+  if [ "${VDM_ENABLE:-false}" = true ] || { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && getInputYesNo "Would you also like to enable this ${VDM_CONTAINER_TYPE^} container" \
+    "Enable Container" 8 112 "defaultno"; }; then
     # we set the container details
     export VDM_CONTAINER="${VDM_USER_NAME}.${VDM_DOMAIN}"
     # then we enable it
@@ -3826,7 +3855,7 @@ function joomla__TRuST__delete() {
       done
     fi
     # ask if there are volumes to delete
-    if hasDirectories '' "${VDM_PROJECT_PATH}" && \
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && hasDirectories '' "${VDM_PROJECT_PATH}" && \
       getInputYesNo "Would you like to delete persistent volumes found in (${VDM_PROJECT_PATH})?" \
       "Continue To Delete Persistent Volumes" 12 112; then
       # trigger the volumes removal script
@@ -5327,7 +5356,9 @@ function runUpdate() {
       "Give sudo Privileges" 8 112; then
     local branch download staged
     # get the target branch to use in our update
-    if isExpert; then
+    if [ -n "${VDM_UPDATE_CHANNEL:-}" ]; then
+      case "$VDM_UPDATE_CHANNEL" in master|staging) branch="$VDM_UPDATE_CHANNEL";; *) return 17;; esac
+    elif isExpert && [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ]; then
       branch=$(getTargetBranch) || return 1
     fi
     download=$(mktemp "${TMPDIR:-/tmp}/octojoom-update.XXXXXX") || return 1
@@ -5338,18 +5369,20 @@ function runUpdate() {
       echo >&2 "ERROR: Update download or validation failed."
       return 1
     fi
-    staged=$(sudo mktemp /usr/local/bin/.octojoom-update.XXXXXX) || {
+    staged=$(cliSudo mktemp /usr/local/bin/.octojoom-update.XXXXXX) || {
       rm -f "$download"
       return 1
     }
-    if [ -z "$staged" ] || ! sudo install -m 0755 "$download" "$staged" || ! sudo mv -f "$staged" /usr/local/bin/octojoom; then
+    if [ -z "$staged" ] || ! cliSudo install -m 0755 "$download" "$staged" || ! cliSudo mv -f "$staged" /usr/local/bin/octojoom; then
       rm -f "$download"
-      [ -z "$staged" ] || sudo rm -f "$staged"
+      [ -z "$staged" ] || cliSudo rm -f "$staged"
       echo >&2 "ERROR: Update installation failed."
       return 1
     fi
     rm -f "$download"
+    installShellIntegration || return 1
     echo "SUCCESS: Update was successful."
+    [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] && return 0
     quitProgram
   fi
 }
@@ -5384,6 +5417,7 @@ function removeOctojoomDirectory() {
 
 # make an uninstall
 function runUninstall() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then cliUninstall; return $?; fi
   # little notice
   showNotice "We have three uninstall options: 1) Complete. 2) Just Script. 3) Make your selection."
   # first safety check
@@ -5446,6 +5480,7 @@ function runUninstall() {
       # now remove the octojoom script
       if [ -f /usr/local/bin/octojoom ]; then
         sudo rm -f /usr/local/bin/octojoom || return 1
+        removeShellIntegration || return 1
       fi
       # give the final message
       whiptail --title "${PROGRAM_NAME} v${_VERSION}  is UNINSTALLED" --msgbox "\n\
@@ -5557,6 +5592,7 @@ function runUninstall() {
     # now remove the octojoom script
     if [ -f /usr/local/bin/octojoom ]; then
       sudo rm -f /usr/local/bin/octojoom || return 1
+        removeShellIntegration || return 1
     fi
     # last and final question as this is most dangerous and serious issue.
     if [ -d "${VDM_PROJECT_PATH}" ] &&
@@ -6849,18 +6885,32 @@ function mainMenu() {
 
 # show error
 function showError() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || [ "${OCTOJOOM_OUTPUT:-text}" = json ]; then
+    printf '%s: %s\n' 'ERROR' "$1" >&2
+    return 0
+  fi
   whiptail --title "ERROR | ${PROGRAM_NAME} v${_V}" --backtitle "${BACK_TITLE}" \
     --msgbox "${1}" "${2:-12}" 112
 }
 
 # show info
 function showInfo() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || [ "${OCTOJOOM_OUTPUT:-text}" = json ]; then
+    [ "${OCTOJOOM_QUIET:-false}" != true ] || return 0
+    printf '%s: %s\n' 'INFO' "$1" >&2
+    return 0
+  fi
   whiptail --title "INFO | ${PROGRAM_NAME} v${_V}" --backtitle "${BACK_TITLE}" \
     --infobox "${1}" "${2:-12}" 112
 }
 
 # show notice
 function showNotice() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || [ "${OCTOJOOM_OUTPUT:-text}" = json ]; then
+    [ "${OCTOJOOM_QUIET:-false}" != true ] || return 0
+    printf '%s: %s\n' 'NOTICE' "$1" >&2
+    return 0
+  fi
   whiptail --title "NOTICE | ${PROGRAM_NAME} v${_V}" --backtitle "${BACK_TITLE}" \
     --msgbox "${1}" "${2:-12}" 112
 }
@@ -6873,6 +6923,7 @@ function showLink() {
 
 # show progress bar
 function showProgress() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || [ "${OCTOJOOM_NO_PROGRESS:-false}" = true ] || [ "${OCTOJOOM_QUIET:-false}" = true ] || [ "${OCTOJOOM_OUTPUT:-text}" = json ]; then return 0; fi
   # some locals
   local title
   local message
@@ -7020,6 +7071,10 @@ function getRandomString() {
 # $2 (optional): Default input value
 # $3 (optional): Title for the input dialog
 function getInput() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    printf 'ERROR: Missing required input: %s. Supply the corresponding option.\n' "${3:-$1}" >&2
+    return 17
+  fi
   # set local var
   local answer
   # get the answer
@@ -7039,6 +7094,10 @@ function getInput() {
 # Returns 0 (yes) if the user selects "Yes".
 # Returns 1 (no) if the user selects "No" or if "defaultno" is set and VDM_FORCE is "true".
 function getInputYesNo() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    [ "${5:-}" != defaultno ]
+    return $?
+  fi
   # set local vars
   local question="$1"
   local title="${2:-Confirmation Required}"
@@ -7091,6 +7150,21 @@ function getInputNow() {
 
 # get a selected directory
 function getSelectedDirectory() {
+  local requested='' requested_path="${2%/}"
+  if [[ "$requested_path" == "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available" || "$requested_path" == "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled" ]] && [ -n "${VDM_CONTAINER:-}" ]; then
+    isValidDomain "$VDM_CONTAINER" || return 17
+    requested="$VDM_CONTAINER"
+  elif [ "$requested_path" = "$VDM_PROJECT_PATH" ]; then
+    requested="${VDM_PROJECT:-}"
+    if [ -z "$requested" ] && [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] && isSafeProjectName "${3:-}" && [ -d "$requested_path/${3}" ]; then requested="$3"; fi
+    [ -z "$requested" ] || isSafeProjectName "$requested" || return 17
+  fi
+  if [ -n "$requested" ]; then
+    [ -d "$requested_path/$requested" ] || { echo >&2 "ERROR: Selected directory does not exist: $requested"; return 1; }
+    printf '%s\n' "$requested"
+    return 0
+  fi
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then echo >&2 'ERROR: A container or project selection is required.'; return 17; fi
   # the selected folder
   local answer
   #  set the local path
@@ -7135,6 +7209,20 @@ function getSelectedDirectory() {
 
 # select multiple directories from one directory
 function getSelectedDirectories() {
+  local requested='' requested_path="${2%/}"
+  if [[ "$requested_path" == "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available" || "$requested_path" == "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled" ]] && [ -n "${VDM_CONTAINER:-}" ]; then
+    isValidDomain "$VDM_CONTAINER" || return 17
+    requested="$VDM_CONTAINER"
+  elif [ "$requested_path" = "$VDM_PROJECT_PATH" ]; then
+    requested="${VDM_PROJECT:-}"
+    [ -z "$requested" ] || isSafeProjectName "$requested" || return 17
+  fi
+  if [ -n "$requested" ]; then
+    [ -d "$requested_path/$requested" ] || { echo >&2 "ERROR: Selected directory does not exist: $requested"; return 1; }
+    printf '"%s"\n' "$requested"
+    return 0
+  fi
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then echo >&2 'ERROR: A container or project selection is required.'; return 17; fi
   # the selected folder
   local answer
   #  set the local path
@@ -7206,6 +7294,10 @@ EOF
 
 # get input from user
 function getPassword() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    printf 'ERROR: Missing required input: %s. Supply the corresponding option.\n' "${3:-$1}" >&2
+    return 17
+  fi
   # set local var
   local PASSWORD
   # get the pass
@@ -7414,6 +7506,11 @@ function getMainDomain() {
 
 # set the container user
 function setContainerUser() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    [[ "${VDM_PUID:-}" =~ ^[0-9]+$ && "${VDM_PGID:-}" =~ ^[0-9]+$ ]] || { echo >&2 'ERROR: Supply numeric --uid and --gid.'; return 17; }
+    export VDM_PUID VDM_PGID
+    return 0
+  fi
   # ask if a new User ID should be set if one is set
   if [ -n "${VDM_PUID}" ] && [[ "${VDM_PUID}" =~ ^[0-9]+$ ]] && \
     getInputYesNo "The user ID in ${PROGRAM_NAME} memory is ${VDM_PUID}, would you like to change this user ID?" \
@@ -8532,6 +8629,11 @@ function configureDockerEntrypoint() {
 
 # Set the secure Cloudflare state
 function setSecureCloudflareState() {
+  if cliHasValue VDM_SECURE_CLOUDFLARE || [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    : "${VDM_SECURE_CLOUDFLARE:=false}"
+    export VDM_SECURE_CLOUDFLARE
+    return 0
+  fi
 	# Determine caller
 	local caller="${1:-generic}"
 	local question=""
@@ -9922,120 +10024,49 @@ function transferTarWasSuccessful() {
 function showHelp() {
   cat <<EOF
 Usage: octojoom [OPTION...]
-	Options
-	======================================================
-   --type <type>
-	set type you would like to work with
-	example: octojoom --type joomla
-	======================================================
-   --task <task>
-	set type of task you would like to perform
-	example: octojoom --task setup
-	======================================================
-   --container <container.domain.name>
-	Directly enabling or disabling a container with
-	  the type=joomla and task=enable/disable set
-	The container must exist, which means it was
-	  setup previously
-	Used without type and task Joomla-Enable is (default)
-	example: octojoom --container "io.vdm.dev"
-	======================================================
-   --update
-	to update your install
-	example: octojoom --update
-	======================================================
-   --access-token <token>
-	to update the program you will need an access token
-	from https://git.vdm.dev/user/settings/applications
-	example: octojoom --access-token xxxxxxxxxxx
-	======================================================
-   --uninstall
-	to uninstall this script
-	example: octojoom --uninstall
-	======================================================
-	AVAILABLE FOR TO ANY CONTAINER
-	======================================================
-   -k|--key <key>
-	set key for the docker compose container naming
-	!! no spaces allowed in the key !!
-	example: octojoom -k="vdm"
-	example: octojoom --key="vdm"
-	======================================================
-   -e|--env-key <key>
-	set key for the environment variable naming
-	!! no spaces allowed in the key & must be UPPERCASE !!
-	example: octojoom -e="VDM"
-	example: octojoom --env-key="VDM"
-	======================================================
-   -d|--domain <domain.com>
-	set key website domain
-	!! must be domain.tld !!
-	example: octojoom -d="joomla.org"
-	example: octojoom --domain="joomla.org"
-	======================================================
-   -s|--sub-domain <domain.com>
-	set key website sub domain
-	!! no spaces allowed in the sub domain !!
-	example: octojoom -s="jcb"
-	example: octojoom --sub-domain="jcb"
-	======================================================
-	AVAILABLE FOR JOOMLA CONTAINER
-	======================================================
-   -j|--joomla-version <version-tag>
-	see available tags here https://hub.docker.com/_/joomla
-	example: octojoom -j=6.0
-	example: octojoom --joomla-version=6.0
-	======================================================
-	AVAILABLE FOR OPENSSH CONTAINER
-	======================================================
-   -u|--username <username>
-	set username of the container
-	example: octojoom -u="ubuntu"
-	example: octojoom --username="ubuntu"
-	======================================================
-   --uid <id>
-	set container user id
-	example: octojoom --uid=1000
-	======================================================
-   --gid <id>
-	set container user group id
-	example: octojoom --gid=1000
-	======================================================
-   -p|--port <port>
-	set ssh port to use
-	!! do not use 22 !!
-	example: octojoom -p=2239
-	example: octojoom --port=2239
-	======================================================
-   --ssh-dir <dir>
-	set ssh directory name found in the .ssh dir
-	of this repo for the container keys
-		This directory has separate files for
-		each public key allowed to access
-		the container
-	example: octojoom --ssh-dir="teamname"
-	======================================================
-   --sudo
-	switch to add the container user to the
-	sudo group of the container
-	example: octojoom --sudo
-	======================================================
-   -t|--time-zone <time/zone>
-	set time zone of the container
-	!! must valid time zone !!
-	example: octojoom -t="Africa/Windhoek"
-	example: octojoom --time-zone="Africa/Windhoek"
-	======================================================
-	HELP ʕ•ᴥ•ʔ
-	======================================================
-   -h|--help
-	display this help menu
-	example: octojoom -h
-	example: octojoom --help
-	======================================================
-			${PROGRAM_NAME} v${_VERSION}
-	======================================================
+
+  --type TYPE --task TASK       Existing task dispatch (joomla, openssh,
+                               traefik, portainer, settings, domains, directory).
+  --container HOSTNAME          Select an existing site. Without type/task,
+                               this retains Joomla enable shorthand.
+  --non-interactive             Never prompt or install dependencies. A task
+                               without an input terminal uses this mode too.
+  --action ACTION               Select a task-specific operation.
+  --input-json FILE|-           Optional request transport (requires jq).
+  --output text|json            Human data or one JSON result envelope (jq).
+  --quiet --verbose --no-progress  Diagnostic/progress controls.
+  --yes                         Keep each question's existing default choice.
+  --update [--channel master|staging]
+  --uninstall --action script|complete|selected
+  --remove-deployments BOOL --remove-config BOOL --remove-data BOOL
+                               Independent explicit uninstall choices.
+  --                            Pass remaining arguments literally (remote).
+
+Setup: --key/-k, --env-key/-e, --domain/-d, --sub-domain/-s,
+       --image-source, --image-tag/--joomla-version/-j, --enable BOOL,
+       --customize BOOL, --auto-install BOOL, --save-defaults BOOL.
+Credentials: --db-name, --db-user, --db-password, --db-root-password,
+       --admin-email, --admin-password, --site-name, --admin-user,
+       --admin-username. Protected JSON files/stdin avoid shell history.
+OpenSSH: --username/-u, --port/-p, --uid, --gid, --ssh-keys,
+       --mount-base, --mount-dirs, --ssh-dir, --time-zone/-t, --sudo.
+
+Configuration: --task config --action path|read|replace
+       [--config-kind compose|env] [--file FILE]. Existing editors remain
+       interactive. Configuration reads explicitly include secret values.
+Shell discovery is installed during normal initialization/setup and update.
+It is available in new Bash shells; an executable cannot change its parent.
+
+Available tasks:
 EOF
+  local type
+  for type in joomla openssh traefik portainer settings domains directory; do
+    printf '  %s: ' "$type"
+    cliTaskNames "$type" | paste -sd ' ' -
+  done
+  printf '\nOptions (values are required except switches listed above):\n'
+  cliOptionNames | paste -sd ' ' -
+  printf '\n%s v%s\n' "$PROGRAM_NAME" "$_VERSION"
 }
 
 #####################################################################################################################VDM
@@ -11279,84 +11310,568 @@ function joomla__TRuST__import() {
 
 # Parse all options before performing an action. Values passed explicitly on the
 # command line override the saved global config loaded later.
+# Resolve expert configuration views without losing selected-site ENV precedence.
+function cliSudo() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then sudo -n "$@"; else sudo "$@"; fi
+}
+
+function cliConfigPath() {
+  local kind="${VDM_CONFIG_KIND:-compose}" type="${VDM_CONTAINER_TYPE:-}" site="${VDM_CONTAINER:-}"
+  case "$type" in
+    settings) printf '%s/.env\n' "$VDM_SRC_PATH";;
+    joomla|openssh)
+      if [ -n "$site" ]; then
+        isValidDomain "$site" || return 17
+        [ -f "$VDM_REPO_PATH/$type/available/$site/docker-compose.yml" ] || return 1
+        case "$kind" in
+          compose) printf '%s/%s/available/%s/docker-compose.yml\n' "$VDM_REPO_PATH" "$type" "$site";;
+          env) getContainerEnvFile "$type" "$site" available;; *) return 17;;
+        esac
+      elif [ "$kind" = env ]; then printf '%s/%s/.env\n' "$VDM_REPO_PATH" "$type"
+      else echo >&2 'ERROR: Select a container for its Compose configuration.'; return 17; fi;;
+    traefik|portainer)
+      case "$kind" in compose) printf '%s/%s/docker-compose.yml\n' "$VDM_REPO_PATH" "$type";; env) printf '%s/%s/.env\n' "$VDM_REPO_PATH" "$type";; *) return 17;; esac;;
+    *) return 17;;
+  esac
+}
+
+function cliConfiguration() {
+  local file kind="${VDM_CONFIG_KIND:-compose}" candidate backup compose='' env_file='' running='' service status=0
+  file=$(cliConfigPath) || return $?
+  [ -n "$file" ] || return 1
+  case "${VDM_ACTION:-path}" in
+    path) printf '%s\n' "$file";;
+    read) cat -- "$file";;
+    replace)
+      if [ ! -f "${VDM_INPUT_FILE:-}" ] || [ -L "$VDM_INPUT_FILE" ] || [ ! -f "$file" ] || [ -L "$file" ]; then echo >&2 'ERROR: Replacement requires --file with a regular file and an existing configuration.'; return 17; fi
+      [ "$VDM_CONTAINER_TYPE" != settings ] || kind='env'
+      candidate=$(mktemp "${file}.candidate.XXXXXX") || return 1
+      if ! cp "$VDM_INPUT_FILE" "$candidate" || ! chmod 600 "$candidate"; then rm -f "$candidate"; return 1; fi
+      if [ "$kind" = env ] && ! (loadEnvFile "$candidate"); then rm -f "$candidate"; return 17; fi
+      if [ "$VDM_CONTAINER_TYPE" != settings ]; then
+        if [ -n "${VDM_CONTAINER:-}" ]; then compose="$VDM_REPO_PATH/$VDM_CONTAINER_TYPE/available/$VDM_CONTAINER/docker-compose.yml"
+        elif [[ "$VDM_CONTAINER_TYPE" == traefik || "$VDM_CONTAINER_TYPE" == portainer ]]; then compose="$VDM_REPO_PATH/$VDM_CONTAINER_TYPE/docker-compose.yml"; fi
+        if [ -n "$compose" ]; then
+          env_file=$(getContainerEnvFile "$VDM_CONTAINER_TYPE" "${VDM_CONTAINER:-}" available)
+          [ "$kind" != env ] || env_file="$candidate"
+          [ "$kind" != compose ] || compose="$candidate"
+          if ! migrationRunCompose "$env_file" "$compose" config --quiet; then rm -f "$candidate"; return 1; fi
+          # Observe state before publishing; Docker errors must not become stopped.
+          running=$(migrationRunCompose "$env_file" "$compose" ps --status running --services) || { rm -f "$candidate"; return 1; }
+        fi
+      fi
+      backup=$(mktemp "${file}.backup.XXXXXX") || { rm -f "$candidate"; return 1; }
+      if ! cp -p "$file" "$backup" || ! mv -f "$candidate" "$file"; then rm -f "$candidate" "$backup"; return 1; fi
+      if [ -n "$compose" ] && [ -n "$running" ]; then
+        [ "$kind" != compose ] || compose="$file"
+        [ "$kind" != env ] || env_file="$file"
+        local -a services=()
+        while IFS= read -r service; do [ -z "$service" ] || services+=("$service"); done <<<"$running"
+        migrationRunCompose "$env_file" "$compose" up -d --no-deps "${services[@]}" || status=$?
+        if [ "$status" -ne 0 ]; then
+          cp -p "$backup" "$file" || { echo >&2 "ERROR: Restore the retained configuration: $backup"; return "$status"; }
+          migrationRunCompose "$env_file" "$compose" up -d --no-deps "${services[@]}" || echo >&2 "ERROR: Configuration restored; runtime recovery failed. Backup: $backup"
+          return "$status"
+        fi
+      fi
+      printf 'Configuration saved. Previous file: %s\n' "$backup";;
+    *) echo >&2 'ERROR: Configuration action must be path, read or replace.'; return 17;;
+  esac
+}
+
+function joomla__TRuST__config() {
+  cliConfiguration
+}
+function openssh__TRuST__config() {
+  cliConfiguration
+}
+function traefik__TRuST__config() {
+  cliConfiguration
+}
+function portainer__TRuST__config() {
+  cliConfiguration
+}
+function settings__TRuST__config() {
+  cliConfiguration
+}
+function settings__TRuST__mode() {
+  case "${VDM_MODE:-}" in basic|expert) setMode "$VDM_MODE";; *) echo >&2 'ERROR: Supply --mode basic or expert.'; return 17;; esac
+}
+function settings__TRuST__paths() {
+  printf 'Config: %s\nCompose: %s\nProjects: %s\n' "$VDM_SRC_PATH" "$VDM_REPO_PATH" "$VDM_PROJECT_PATH"
+}
+function settings__TRuST__help() {
+  showHelp
+}
+function settings__TRuST__about() {
+  printf '%s %s\nhttps://www.octoleo.com/showcase/octojoom\n' "$PROGRAM_NAME" "$_VERSION"
+}
+function settings__TRuST__issues() {
+  printf '%s\n' 'https://git.vdm.dev/octoleo/octojoom/issues'
+}
+function settings__TRuST__update() {
+  runUpdate
+}
+function settings__TRuST__uninstall() {
+  runUninstall
+}
+function settings__TRuST__remote() {
+  local remote="${VDM_REMOTE:-}" command='octojoom' argument
+  [[ -n "$remote" && "$remote" != -* && "$remote" != *[[:space:]]* ]] || { echo >&2 'ERROR: Supply a valid --remote SSH host alias.'; return 17; }
+  if [ "${#OCTOJOOM_ARGS[@]}" -eq 0 ]; then
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || [ ! -t 0 ]; then echo >&2 'ERROR: A remote interactive session needs a terminal; pass -- followed by OctoJoom arguments for automation.'; return 17; fi
+    connectToRemoteSystem "$remote"
+  else
+    for argument in "${OCTOJOOM_ARGS[@]}"; do command+=" $(quoteRemoteArgument "$argument")"; done
+    ssh -- "$remote" "$command"
+  fi
+}
+
+function domains__TRuST__list() {
+  [ ! -f "$VDM_SRC_PATH/.domains" ] || cat "$VDM_SRC_PATH/.domains"
+}
+function domains__TRuST__add() {
+  isValidDomain "${VDM_DOMAIN:-}" || return 17
+  saveMultiDomain "$VDM_DOMAIN"
+}
+function domains__TRuST__delete() {
+  local file="$VDM_SRC_PATH/.domains" temporary status=0
+  isValidDomain "${VDM_DOMAIN:-}" || return 17
+  [ -f "$file" ] || return 0
+  temporary=$(mktemp "${file}.XXXXXX") || return 1
+  cp -p "$file" "$temporary" || { rm -f "$temporary"; return 1; }
+  grep -Fvx -- "$VDM_DOMAIN" "$file" >"$temporary" || status=$?
+  if [ "$status" -gt 1 ] || ! mv -f "$temporary" "$file"; then rm -f "$temporary"; return 1; fi
+}
+function domains__TRuST__hosts() {
+  local file=/etc/hosts backup
+  [ "$OS_NUMBER" -ne 3 ] || file=/c/Windows/System32/drivers/etc/hosts
+  case "${VDM_ACTION:-path}" in
+    path) printf '%s\n' "$file";; read) cat "$file";;
+    replace)
+      [ -f "${VDM_INPUT_FILE:-}" ] && [ ! -L "$VDM_INPUT_FILE" ] || return 17
+      # Hosts input is plain text. Refuse malformed addresses/records before sudo.
+      awk 'NF && $1 !~ /^#/ {if ($1 !~ /^[0-9a-fA-F:.]+$/ || NF < 2) exit 1}' "$VDM_INPUT_FILE" || return 17
+      backup=$(cliSudo mktemp "${file}.octojoom.XXXXXX") || return 1
+      cliSudo cp -p "$file" "$backup" && cliSudo cp "$VDM_INPUT_FILE" "$file" || return 1
+      printf 'Hosts saved. Previous file: %s\n' "$backup";;
+    *) return 17;;
+  esac
+}
+
+# Explicit uninstall choices are independent: removing the executable never
+# implies deleting deployment configuration or persistent website/database data.
+function cliUninstall() {
+  local type saved_type="${VDM_CONTAINER_TYPE:-}" directory
+  case "${VDM_ACTION:-}" in script|complete|selected) ;; *) echo >&2 'ERROR: --uninstall requires --action script, complete or selected in noninteractive mode.'; return 17;; esac
+  if [ "$VDM_ACTION" = complete ]; then VDM_REMOVE_DEPLOYMENTS=true VDM_REMOVE_CONFIG=true; fi
+  if [ "${VDM_REMOVE_DEPLOYMENTS:-false}" = true ] || [ "${VDM_REMOVE_DATA:-false}" = true ]; then
+    for directory in "$VDM_REPO_PATH" "$VDM_PROJECT_PATH"; do [ ! -d "$directory" ] || validateOctojoomRemovalPath "$directory" || return 1; done
+    for type in joomla openssh traefik portainer; do
+      VDM_CONTAINER_TYPE="$type"
+      if [[ "$type" == joomla || "$type" == openssh ]]; then
+        ! hasDirectories "$type/enabled" || "${type}__TRuST__down" || return $?
+      elif [ -f "$VDM_REPO_PATH/$type/docker-compose.yml" ]; then "${type}__TRuST__disable" || return $?; fi
+    done
+    VDM_CONTAINER_TYPE="$saved_type"
+  fi
+  [ "${VDM_REMOVE_CONFIG:-false}" != true ] || [ ! -d "$VDM_SRC_PATH" ] || validateOctojoomRemovalPath "$VDM_SRC_PATH" || return 1
+  [ "${VDM_REMOVE_DEPLOYMENTS:-false}" != true ] || [ ! -d "$VDM_REPO_PATH" ] || removeOctojoomDirectory "$VDM_REPO_PATH" || return 1
+  [ "${VDM_REMOVE_DATA:-false}" != true ] || [ ! -d "$VDM_PROJECT_PATH" ] || removeOctojoomDirectory "$VDM_PROJECT_PATH" || return 1
+  [ "${VDM_REMOVE_CONFIG:-false}" != true ] || [ ! -d "$VDM_SRC_PATH" ] || removeOctojoomDirectory "$VDM_SRC_PATH" || return 1
+  removeShellIntegration || return 1
+  [ ! -f /usr/local/bin/octojoom ] || cliSudo rm -f /usr/local/bin/octojoom || return 1
+        removeShellIntegration || return 1
+}
+
+# Command options are kept here so parsing, help and completion share names.
+# Request presence is separate from its value: false and an allowed empty value
+# are intentional inputs, never permission to fall back to another site's data.
+function cliOptionVariable() {
+  case "$1" in
+    --access-token) echo VDM_ACCESS_TOKEN;;
+    --type) echo VDM_CONTAINER_TYPE;; --task) echo VDM_TASK;;
+    --container) echo VDM_CONTAINER;; --action) echo VDM_ACTION;;
+    -j|--joomla-version|--image-tag) echo VDM_JV;; --image-source) echo VDM_J_REPO;;
+    -k|--key) echo VDM_KEY;; -e|--env-key) echo VDM_ENV_KEY;;
+    -d|--domain) echo VDM_DOMAIN;; -s|--sub-domain) echo VDM_SUBDOMAIN;;
+    -u|--username) echo VDM_USER_NAME;; --uid) echo VDM_PUID;; --gid) echo VDM_PGID;;
+    -p|--port) echo VDM_PORT;; --ssh-dir) echo VDM_PUBLIC_KEY_DIR;;
+    -t|--time-zone) echo VDM_TZ;; --repo-path) echo VDM_REPO_PATH;; --project-path) echo VDM_PROJECT_PATH;;
+    --db-name) echo vdm_database_name;; --db-user) echo vdm_database_user;;
+    --db-password) echo vdm_database_pass;; --db-root-password) echo vdm_database_rootpass;;
+    --auto-install) echo VDM_AUTO_INSTALL;; --enable) echo VDM_ENABLE;;
+    --customize) echo VDM_CUSTOMIZE;; --persistence) echo VDM_PERSISTENCE;;
+    --db-persistence) echo VDM_DB_PERSISTENCE;; --mailcatcher) echo VDM_MAILCATCHER;;
+    --phpmyadmin) echo VDM_PHPMYADMIN;; --save-defaults) echo VDM_SAVE_DEFAULTS;;
+    --site-name) echo VDM_J_SITE_NAME;; --admin-username) echo VDM_J_USERNAME;;
+    --admin-user) echo VDM_J_USER;; --admin-email) echo VDM_J_EMAIL;; --admin-password) echo VDM_J_PASSWORD;;
+    --extensions) echo VDM_J_EXTENSIONS_URLS;; --commands) echo VDM_J_CLI_COMMANDS;;
+    --php-settings) echo VDM_PHP_SETTINGS;; --image) echo VDM_PHP_IMAGE;;
+    --memory-limit) echo VDM_memory_limit;; --max-execution-time) echo VDM_max_execution_time;;
+    --max-input-time) echo VDM_max_input_time;; --max-input-vars) echo VDM_max_input_vars;;
+    --upload-max-filesize) echo VDM_upload_max_filesize;; --post-max-size) echo VDM_post_max_size;;
+    --error-reporting) echo VDM_error_reporting;; --webserver) echo VDM_WEBSERVER;;
+    --docroot) echo VDM_DOCROOT;; --nginx-config) echo VDM_NGINX_CONFIG;; --nginx-image) echo VDM_NGINX_IMAGE;;
+    --service) echo VDM_SERVICE;; --tail) echo VDM_TAIL;; --version-prefix) echo VDM_VERSION_PREFIX;;
+    --file) echo VDM_INPUT_FILE;; --config-kind) echo VDM_CONFIG_KIND;;
+    --mode) echo VDM_MODE;; --secure) echo VDM_SECURE;; --cloudflare) echo VDM_SECURE_CLOUDFLARE;;
+    --secure-email) echo VDM_SECURE_EMAIL;; --cloudflare-token) echo VDM_CLOUDFLARE_DNS_API_TOKEN;;
+    --traefik-network) echo VDM_TRAEFIK_GATEWAY;; --openssh-network) echo VDM_OPENSSH_GATEWAY;;
+    --remote) echo VDM_REMOTE;; --direction) echo VDM_DIRECTION;; --project) echo VDM_PROJECT;;
+    --mount-dirs) echo VDM_MOUNT_DIRS;; --ssh-keys) echo VDM_PUBLIC_KEY_U_DIR;;
+    --mount-base) echo VDM_PROJECT_U_DIR;; --number) echo VDM_NUMBER_CONTAINERS;;
+    --remove-deployments) echo VDM_REMOVE_DEPLOYMENTS;; --remove-config) echo VDM_REMOVE_CONFIG;; --remove-data) echo VDM_REMOVE_DATA;;
+    --target-host) echo VDM_TARGET_HOST;; --archive) echo VDM_ARCHIVE;; --volume) echo VDM_VOLUME;; --target-project) echo VDM_TARGET_PROJECT;;
+    --channel) echo VDM_UPDATE_CHANNEL;; --output) echo OCTOJOOM_OUTPUT;;
+    *) return 17;;
+  esac
+}
+
+function cliOptionNames() {
+  # Extract only option labels from this small case, never environment values.
+  declare -f cliOptionVariable | sed -nE 's/^[[:space:]]*((--[a-z][a-z-]*|-[a-z])([[:space:]]*\|[[:space:]]*(--[a-z][a-z-]*|-[a-z]))*)\).*/\1/p' | tr '|' '\n' | tr -d ' ' | grep '^--'
+  printf '%s\n' --help --yes --sudo --non-interactive --input-json --quiet --verbose --no-progress --all --short --follow --move-files --update --uninstall
+}
+
+function cliHasValue() {
+  local key
+  for key in "${OCTOJOOM_CLI_KEYS[@]}"; do [ "$key" != "$1" ] || return 0; done
+  return 1
+}
+
+function cliApplyValues() {
+  local index
+  for index in "${!OCTOJOOM_CLI_KEYS[@]}"; do
+    printf -v "${OCTOJOOM_CLI_KEYS[index]}" '%s' "${OCTOJOOM_CLI_VALUES[index]}"
+  done
+}
+
+function cliRememberValue() {
+  local variable="$1" value="$2"
+  printf -v "$variable" '%s' "$value"
+  OCTOJOOM_CLI_KEYS+=("$variable")
+  OCTOJOOM_CLI_VALUES+=("$value")
+}
+
+function cliBoolean() {
+  case "$1" in true|yes|1) printf true;; false|no|0) printf false;; *) return 17;; esac
+}
+
+function cliReadJSON() {
+  local input="$1" json option value variable
+  command -v jq >/dev/null 2>&1 || { echo >&2 'ERROR: JSON transport requires jq. Install jq or use ordinary command options.'; return 17; }
+  if [ "$input" = - ]; then json=$(cat); else json=$(cat -- "$input") || return 17; fi
+  if ! printf '%s' "$json" | jq -e 'type == "object" and (keys - ["type","task","container","action","options","args"] | length == 0) and ((.options // {}) | type == "object") and ((.args // []) | type == "array" and all(.[]; type == "string" and (contains("\u0000") | not))) and ([.type,.task,.container,.action] | all(.[]; . == null or type == "string")) and ((.options // {}) | to_entries | all(.[]; (.value | type == "string" or type == "boolean" or type == "number") and (.value | tostring | contains("\u0000") | not)))' >/dev/null; then
+    echo >&2 'ERROR: Invalid JSON request; use type, task, container, action, options and a string args array.'
+    return 17
+  fi
+  while IFS= read -r -d '' option && IFS= read -r -d '' value; do
+    case "$option" in
+      non-interactive) variable=OCTOJOOM_NON_INTERACTIVE;;
+      quiet) variable=OCTOJOOM_QUIET;; verbose) variable=OCTOJOOM_VERBOSE;;
+      no-progress) variable=OCTOJOOM_NO_PROGRESS;; all) variable=VDM_ALL;;
+      short) variable=VDM_SHORT;; follow) variable=VDM_FOLLOW;; move-files) variable=VDM_MOVE_FILES;;
+      *) variable=$(cliOptionVariable "--$option") || { echo >&2 "ERROR: Unknown JSON option: $option"; return 17; };;
+    esac
+    cliRememberValue "$variable" "$value"
+  done < <(printf '%s' "$json" | jq -j '(.options // {}) + ({type,task,container,action} | with_entries(select(.value != null))) | to_entries[] | .key,"\u0000",(.value | tostring),"\u0000"')
+  OCTOJOOM_ARGS=()
+  while IFS= read -r -d '' value; do OCTOJOOM_ARGS+=("$value"); done < <(printf '%s' "$json" | jq -j '.args // [] | .[] | ., "\u0000"')
+}
+
+# Parse JSON first; direct flags always win, regardless of their position.
 function parseCLI() {
-  local option variable value
+  local option variable value json_file='' index
+  local -a original=("$@")
   OCTOJOOM_CLI_ACTION=''
   OCTOJOOM_CLI_KEYS=()
   OCTOJOOM_CLI_VALUES=()
+  OCTOJOOM_ARGS=()
+  OCTOJOOM_OUTPUT=text
+  OCTOJOOM_NON_INTERACTIVE=false
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --) break;;
+      --input-json=*) [ -z "$json_file" ] || return 17; json_file="${1#*=}";;
+      --input-json) [ -z "$json_file" ] && [ "$#" -ge 2 ] || return 17; json_file="$2"; shift;;
+    esac
+    shift
+  done
+  for option in "${original[@]}"; do
+    [ "$option" != --input-json= ] || { echo >&2 'ERROR: --input-json requires a file or -.'; return 17; }
+  done
+  [ -z "$json_file" ] || cliReadJSON "$json_file" || return $?
+  set -- "${original[@]}"
   while [ "$#" -gt 0 ]; do
     option="${1%%=*}"
     variable=''
     case "$1" in
-      -h|--help) OCTOJOOM_CLI_ACTION=help; shift; continue ;;
+      -h|--help) OCTOJOOM_CLI_ACTION=help; shift; continue;;
+      --input-json=*) shift; continue;; --input-json) shift 2; continue;;
       --update|--uninstall)
-        if [ -n "${OCTOJOOM_CLI_ACTION}" ]; then
-          echo >&2 "ERROR: Only one action may be requested."
-          return 17
-        fi
-        OCTOJOOM_CLI_ACTION="${1#--}"
-        shift
-        continue
-        ;;
-      -y|--yes) VDM_FORCE=true; shift; continue ;;
-      --sudo)
-        VDM_SUDO_ACCESS=true
-        OCTOJOOM_CLI_KEYS+=(VDM_SUDO_ACCESS)
-        OCTOJOOM_CLI_VALUES+=(true)
-        shift
-        continue
-        ;;
-      --)
-        shift
-        [ "$#" -eq 0 ] && break
-        echo >&2 "ERROR: Unexpected positional argument: $1"
-        return 17
-        ;;
+        [ -z "$OCTOJOOM_CLI_ACTION" ] || { echo >&2 'ERROR: Only one action may be requested.'; return 17; }
+        OCTOJOOM_CLI_ACTION="${1#--}"; shift; continue;;
+      -y|--yes) cliRememberValue VDM_FORCE true; shift; continue;;
+      --sudo) cliRememberValue VDM_SUDO_ACCESS true; shift; continue;;
+      --non-interactive) cliRememberValue OCTOJOOM_NON_INTERACTIVE true; shift; continue;;
+      --quiet) cliRememberValue OCTOJOOM_QUIET true; shift; continue;;
+      --verbose) cliRememberValue OCTOJOOM_VERBOSE true; shift; continue;;
+      --no-progress) cliRememberValue OCTOJOOM_NO_PROGRESS true; shift; continue;;
+      --all) cliRememberValue VDM_ALL true; shift; continue;;
+      --short) cliRememberValue VDM_SHORT true; shift; continue;;
+      --follow) cliRememberValue VDM_FOLLOW true; shift; continue;;
+      --move-files) cliRememberValue VDM_MOVE_FILES true; shift; continue;;
+      --) shift; OCTOJOOM_ARGS=("$@"); break;;
     esac
-    case "${option}" in
-      --access-token) variable=VDM_ACCESS_TOKEN ;;
-      --type) variable=VDM_CONTAINER_TYPE ;;
-      --task) variable=VDM_TASK ;;
-      --container) variable=VDM_CONTAINER ;;
-      -j|--joomla-version) variable=VDM_JV ;;
-      -k|--key) variable=VDM_KEY ;;
-      -e|--env-key) variable=VDM_ENV_KEY ;;
-      -d|--domain) variable=VDM_DOMAIN ;;
-      -s|--sub-domain) variable=VDM_SUBDOMAIN ;;
-      -u|--username) variable=VDM_USER_NAME ;;
-      --uid) variable=VDM_PUID ;;
-      --gid) variable=VDM_PGID ;;
-      -p|--port) variable=VDM_PORT ;;
-      --ssh-dir) variable=VDM_PUBLIC_KEY_DIR ;;
-      -t|--time-zone) variable=VDM_TZ ;;
-      *)
-        echo >&2 "ERROR: Unknown option or argument: $1"
-        return 17
-        ;;
+    variable=$(cliOptionVariable "$option") || { echo >&2 "ERROR: Unknown option or argument: $1"; return 17; }
+    if [[ "$1" == *=* ]]; then value="${1#*=}"
+    elif [ "$#" -ge 2 ] && [[ "$2" != --* ]] && { [[ "$2" != -* ]] || [ "$2" = - ]; }; then value="$2"; shift
+    else echo >&2 "ERROR: ${option} requires a non-empty option argument."; return 17; fi
+    case "$variable" in
+      VDM_J_EXTENSIONS_URLS|VDM_J_CLI_COMMANDS|VDM_error_reporting) ;;
+      *) [ -n "$value" ] || { echo >&2 "ERROR: ${option} requires a non-empty option argument."; return 17; };;
     esac
-    if [[ "$1" == *=* ]]; then
-      value="${1#*=}"
-    elif [ "$#" -ge 2 ] && [ -n "$2" ] && [[ "$2" != -* ]]; then
-      value="$2"
-      shift
-    else
-      echo >&2 "ERROR: ${option} requires a non-empty option argument."
-      return 17
-    fi
-    if [ -z "${value}" ]; then
-      echo >&2 "ERROR: ${option} requires a non-empty option argument."
-      return 17
-    fi
-    printf -v "${variable}" '%s' "${value}"
-    OCTOJOOM_CLI_KEYS+=("${variable}")
-    OCTOJOOM_CLI_VALUES+=("${value}")
-    [ "${variable}" != VDM_DOMAIN ] || VDM_ARG_DOMAIN=true
+    cliRememberValue "$variable" "$value"
+    [ "$variable" != VDM_DOMAIN ] || cliRememberValue VDM_ARG_DOMAIN true
     shift
   done
-  # These per-invocation switches must not come from a saved configuration.
-  OCTOJOOM_CLI_KEYS+=(VDM_FORCE VDM_ARG_DOMAIN)
-  OCTOJOOM_CLI_VALUES+=("${VDM_FORCE}" "${VDM_ARG_DOMAIN}")
+  for index in "${!OCTOJOOM_CLI_KEYS[@]}"; do
+    variable="${OCTOJOOM_CLI_KEYS[index]}"
+    case "$variable" in
+      OCTOJOOM_NON_INTERACTIVE|OCTOJOOM_QUIET|OCTOJOOM_VERBOSE|OCTOJOOM_NO_PROGRESS|VDM_ALL|VDM_SHORT|VDM_FOLLOW|VDM_MOVE_FILES|VDM_AUTO_INSTALL|VDM_ENABLE|VDM_CUSTOMIZE|VDM_PERSISTENCE|VDM_DB_PERSISTENCE|VDM_MAILCATCHER|VDM_PHPMYADMIN|VDM_SAVE_DEFAULTS|VDM_PHP_SETTINGS|VDM_SECURE|VDM_SECURE_CLOUDFLARE|VDM_REMOVE_DEPLOYMENTS|VDM_REMOVE_CONFIG|VDM_REMOVE_DATA)
+        value=$(cliBoolean "${OCTOJOOM_CLI_VALUES[index]}") || { echo >&2 "ERROR: $variable requires true or false."; return 17; }
+        OCTOJOOM_CLI_VALUES[index]="$value";;
+    esac
+  done
+  cliApplyValues
+  case "$OCTOJOOM_OUTPUT" in text|json) ;; *) echo >&2 'ERROR: --output must be text or json.'; return 17;; esac
+  if [ "$OCTOJOOM_OUTPUT" = json ]; then
+    if [ "${VDM_TASK:-}" = shell ] || { [ "${VDM_TASK:-}" = logs ] && [ "${VDM_FOLLOW:-false}" = true ]; }; then echo >&2 'ERROR: Terminal and streaming commands require --output text.'; return 17; fi
+    command -v jq >/dev/null 2>&1 || { echo >&2 'ERROR: JSON output requires jq.'; return 17; }
+  fi
+  cliRememberValue VDM_FORCE "${VDM_FORCE:-false}"
+  cliRememberValue VDM_ARG_DOMAIN "${VDM_ARG_DOMAIN:-false}"
   return 0
+}
+
+# The public task names are discovered from the executable's existing dispatch
+# convention. Listing them never calls a handler, Docker, or a remote registry.
+function cliTaskNames() {
+  local name
+  while read -r _ _ name; do
+    [[ "$name" == "${1:-joomla}__TRuST__"* ]] && printf '%s\n' "${name#*__TRuST__}"
+  done < <(declare -F)
+  return 0
+}
+
+function cliComplete() {
+  local previous="${1:-}" current="${2:-}" type="${3:-joomla}" path item
+  case "$previous" in
+    --type) printf '%s\n' joomla openssh traefik portainer settings domains directory;;
+    --task) cliTaskNames "$type";;
+    --container)
+      for path in "${VDM_REPO_PATH}/${type}/available/"*/docker-compose.yml; do
+        [ -f "$path" ] || continue; item="${path%/*}"; printf '%s\n' "${item##*/}"
+      done;;
+    --action) printf '%s\n' show list inspect apply set switch settings path read replace script complete;;
+    --output) printf '%s\n' text json;; --webserver) printf '%s\n' apache nginx;;
+    --mode) printf '%s\n' basic expert;; --direction) printf '%s\n' push pull;;
+    --config-kind) printf '%s\n' compose env;; --channel) printf '%s\n' master staging;;
+    --enable|--secure|--cloudflare|--customize|--auto-install|--persistence|--db-persistence|--save-defaults|--mailcatcher|--phpmyadmin|--php-settings) printf '%s\n' true false;;
+    --file|--input-json|--repo-path|--project-path|--ssh-dir|--ssh-keys|--mount-base) compgen -f -- "$current";;
+    --image-tag)
+      # Cached catalogues contain public tag names only. Tab never refreshes them.
+      for path in "${VDM_SRC_PATH}/cache/"php-tags-*; do [ ! -f "$path" ] || cat "$path"; done;;
+    *) cliOptionNames;;
+  esac | while IFS= read -r item; do [[ "$item" != "$current"* ]] || printf '%s\n' "$item" || return; done
+  return 0
+}
+
+function cliCompletionScript() {
+  cat <<'COMPLETION'
+# OctoJoom Bash completion. Installed and maintained by octojoom.
+_octojoom_complete() {
+  local current="${COMP_WORDS[COMP_CWORD]}" previous='' prefix='' type=joomla word index
+  (( COMP_CWORD == 0 )) || previous="${COMP_WORDS[COMP_CWORD-1]}"
+  for ((index=1; index<COMP_CWORD; index++)); do
+    word="${COMP_WORDS[index]}"
+    case "$word" in --type) type="${COMP_WORDS[index+1]}";; --type=*) type="${word#*=}";; esac
+  done
+  case "$current" in --*=*) previous="${current%%=*}"; prefix="${previous}="; current="${current#*=}";; esac
+  COMPREPLY=()
+  while IFS= read -r word; do COMPREPLY+=("${prefix}$word"); done < <(command octojoom --complete "$previous" "$current" "$type" 2>/dev/null)
+  }
+complete -o filenames -F _octojoom_complete octojoom
+# A function is necessary: only the caller's shell can change its own directory.
+octojoom_cd() {
+  local directory
+  directory=$(command octojoom --type joomla --task path --container "$1" --non-interactive) || return
+  [ -d "$directory" ] || return 1
+  cd -- "$directory" || return
+  }
+COMPLETION
+}
+
+function installShellIntegration() {
+  local directory="${VDM_HOME_PATH}/.local/share/bash-completion/completions" file startup line temporary login_file
+  createPrivateDirectory -p "$directory" || return 1
+  file="$directory/octojoom"
+  temporary=$(mktemp "$directory/.octojoom.XXXXXX") || return 1
+  if ! cliCompletionScript >"$temporary" || ! chmod 600 "$temporary" || ! mv -f "$temporary" "$file"; then rm -f "$temporary"; return 1; fi
+  # Bash's programmable completion is builtin; the loader also works without
+  # the optional system bash-completion package on macOS and Git Bash.
+  # shellcheck disable=SC2016 # Expanded by the user's next Bash, not the installer.
+  line='[ -z "${BASH_VERSION:-}" ] || [ ! -f "$HOME/.local/share/bash-completion/completions/octojoom" ] || . "$HOME/.local/share/bash-completion/completions/octojoom" # octojoom shell integration'
+  # Do not introduce .bash_profile ahead of a user's existing login file.
+  login_file="${VDM_HOME_PATH}/.bash_profile"
+  for startup in "${VDM_HOME_PATH}/.bash_profile" "${VDM_HOME_PATH}/.bash_login" "${VDM_HOME_PATH}/.profile"; do
+    if [ -f "$startup" ]; then login_file="$startup"; break; fi
+  done
+  for startup in "${VDM_HOME_PATH}/.bashrc" "$login_file"; do
+    if [ -L "$startup" ] && [ ! -f "$startup" ]; then echo >&2 "NOTICE: Shell startup link has no target: $startup"; continue; fi
+    [ -f "$startup" ] || (umask 077; touch "$startup") || return 1
+    grep -Fq '# octojoom shell integration' "$startup" || printf '\n%s\n' "$line" >>"$startup" || return 1
+  done
+}
+
+function removeShellIntegration() {
+  local file temporary
+  rm -f -- "${VDM_HOME_PATH}/.local/share/bash-completion/completions/octojoom" || return 1
+  for file in "${VDM_HOME_PATH}/.bashrc" "${VDM_HOME_PATH}/.bash_profile" "${VDM_HOME_PATH}/.bash_login" "${VDM_HOME_PATH}/.profile"; do
+    [ -f "$file" ] || continue
+    temporary=$(mktemp "${file}.XXXXXX") || return 1
+    if ! cp -p "$file" "$temporary" || ! sed '/# octojoom shell integration$/d' "$file" >"$temporary"; then rm -f "$temporary"; return 1; fi
+    if [ -L "$file" ]; then
+      cat "$temporary" >"$file" || { rm -f "$temporary"; return 1; }
+      rm -f "$temporary"
+    elif ! mv -f "$temporary" "$file"; then rm -f "$temporary"; return 1; fi
+  done
+}
+
+function cliResolvePaths() {
+  VDM_HOME_PATH="${OCTOJOOM_HOME:-${HOME}}"
+  local home_path="$VDM_HOME_PATH" src_path="${VDM_HOME_PATH}/.config/octojoom"
+  VDM_SRC_PATH="$src_path"
+  [ ! -f "$src_path/.env" ] || loadEnvFile "$src_path/.env" || return 1
+  VDM_HOME_PATH="$home_path"
+  VDM_SRC_PATH="$src_path"
+  cliApplyValues
+  : "${VDM_REPO_PATH:=${VDM_HOME_PATH}/Docker}"
+  : "${VDM_PROJECT_PATH:=${VDM_HOME_PATH}/Projects}"
+  case "$OSTYPE" in linux*) OS_NUMBER=1;; darwin*) OS_NUMBER=2;; msys*|cygwin*) OS_NUMBER=3;; *) OS_NUMBER=0;; esac
+  export VDM_REPO_PATH VDM_PROJECT_PATH
+}
+
+function cliResolveTarget() {
+  if [ -n "${VDM_CONTAINER:-}" ]; then
+    : "${VDM_CONTAINER_TYPE:=joomla}"; : "${VDM_TASK:=enable}"
+  elif [ -n "${VDM_DOMAIN:-}" ] && [ -n "${VDM_SUBDOMAIN:-}" ]; then
+    VDM_CONTAINER="${VDM_SUBDOMAIN}.${VDM_DOMAIN}"
+  fi
+}
+
+function cliPreflight() {
+  if [ -z "${VDM_CONTAINER_TYPE:-}" ] || [ -z "${VDM_TASK:-}" ]; then echo >&2 'ERROR: Supply --type and --task in noninteractive mode.'; return 17; fi
+  isFunc "${VDM_CONTAINER_TYPE}__TRuST__${VDM_TASK}" || { echo >&2 "ERROR: Unsupported container type or task: ${VDM_CONTAINER_TYPE}/${VDM_TASK}."; return 17; }
+  if [ "${VDM_TASK}" = edit ]; then echo >&2 'ERROR: Editing requires a terminal. Use --task config --action read or replace.'; return 17; fi
+  case "${VDM_CONTAINER_TYPE}/${VDM_TASK}" in
+    joomla/bulk)
+      if isFunc joomlaBulkPreflight; then joomlaBulkPreflight || return $?; fi;;
+    joomla/setup)
+      if isFunc joomlaSetupPreflight; then joomlaSetupPreflight || return $?; fi;;
+    openssh/setup)
+      local variable value mount
+      if [ -f "$VDM_REPO_PATH/openssh/.env" ]; then loadEnvFile "$VDM_REPO_PATH/openssh/.env" || return 1; cliApplyValues; fi
+      : "${VDM_ENV_KEY:=${VDM_KEY^^}}"
+      if [[ "${VDM_ENV_KEY:-}" =~ ^[A-Za-z]+$ ]]; then
+        variable="VDM_${VDM_ENV_KEY^^}_PUBLIC_KEY_DIR"; value="${!variable:-}"; : "${VDM_PUBLIC_KEY_U_DIR:=$value}"
+        variable="VDM_${VDM_ENV_KEY^^}_PROJECT_DIR"; value="${!variable:-}"; : "${VDM_PROJECT_U_DIR:=$value}"
+      fi
+      for variable in VDM_DOMAIN VDM_USER_NAME VDM_KEY VDM_PORT VDM_PUBLIC_KEY_U_DIR VDM_PROJECT_U_DIR VDM_MOUNT_DIRS; do
+        [ -n "${!variable:-}" ] || { echo >&2 "ERROR: Missing setup input: $variable"; return 17; }
+      done
+      isValidDomain "$VDM_DOMAIN" || return 17
+      [[ "$VDM_USER_NAME" =~ ^[a-z][a-z0-9-]{0,31}$ && "$VDM_PORT" =~ ^[0-9]{1,5}$ && "$VDM_KEY" =~ ^[A-Za-z]+$ && "$VDM_ENV_KEY" =~ ^[A-Za-z]+$ ]] || return 17
+      [ ! -e "$VDM_REPO_PATH/openssh/available/$VDM_USER_NAME.$VDM_DOMAIN" ] || { echo >&2 'ERROR: That OpenSSH container already exists.'; return 17; }
+      local -a mounts=()
+      read -r -a mounts <<<"$VDM_MOUNT_DIRS"
+      for mount in "${mounts[@]}"; do mount="${mount//\"/}"; isSafeProjectName "$mount" && [ -d "$VDM_PROJECT_U_DIR/$mount" ] || return 17; done
+      [ "$((10#$VDM_PORT))" -ge 1 ] && [ "$((10#$VDM_PORT))" -le 65535 ] && [ "$((10#$VDM_PORT))" -ne 22 ] || return 17
+      [ -d "$VDM_PUBLIC_KEY_U_DIR" ] && [ -d "$VDM_PROJECT_U_DIR" ] || return 17
+      : "${VDM_ENV_KEY:=${VDM_KEY^^}}"; : "${VDM_PUID:=$(id -u)}"; : "${VDM_PGID:=$(id -g)}"
+      : "${VDM_PUBLIC_KEY_GLOBAL_DIR:=${VDM_PUBLIC_KEY_U_DIR%/*}}";;
+    traefik/setup|portainer/setup)
+      isValidDomain "${VDM_DOMAIN:-}" || { echo >&2 'ERROR: Setup requires --domain.'; return 17; }
+      if [ "${VDM_SECURE:-false}" = true ] && [ "${VDM_CONTAINER_TYPE}" = traefik ]; then
+        [ -n "${VDM_SECURE_EMAIL:-}" ] || { echo >&2 'ERROR: HTTPS setup requires --secure-email.'; return 17; }
+        [ "${VDM_SECURE_CLOUDFLARE:-false}" != true ] || [ -n "${VDM_CLOUDFLARE_DNS_API_TOKEN:-}" ] || return 17
+      fi
+      [ "$VDM_CONTAINER_TYPE" != portainer ] || : "${VDM_SUBDOMAIN:=port}";;
+    joomla/enable|joomla/disable|openssh/enable|openssh/disable|joomla/delete|openssh/delete|joomla/clone)
+      isValidDomain "${VDM_CONTAINER:-}" || { echo >&2 'ERROR: This task requires --container.'; return 17; }
+      [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_CONTAINER}/docker-compose.yml" ] || return 1
+      if [ "$VDM_TASK" = clone ]; then
+        if ! [[ "${VDM_KEY:-}" =~ ^[A-Za-z]+$ ]] || [ -z "${VDM_DOMAIN:-}" ] || [ -z "${VDM_SUBDOMAIN:-}" ]; then echo >&2 'ERROR: Clone also requires destination --key, --domain and --sub-domain.'; return 17; fi
+      fi;;
+  esac
+  if isFunc cliPreflightOtherTask; then cliPreflightOtherTask || return $?; fi
+  return 0
+}
+
+function cliDispatch() {
+  case "${OCTOJOOM_CLI_ACTION:-}" in
+    help) showHelp;; update) runUpdate;; uninstall) runUninstall;; *) main;;
+  esac
+}
+
+function cliFailure() {
+  local status="$1"
+  if [ "${OCTOJOOM_OUTPUT:-text}" = json ] && command -v jq >/dev/null 2>&1; then
+    jq -n --arg task "${VDM_TASK:-${OCTOJOOM_CLI_ACTION:-}}" --arg action "${VDM_ACTION:-}" --arg container "${VDM_CONTAINER:-}" --argjson status "$status" '{success:false,task:$task,action:$action,container:$container,data:null,error:"Invalid request or unavailable configuration; see stderr for details.",exit_status:$status}'
+  fi
+  return "$status"
+}
+
+function cliExecute() {
+  local result status=0 task="${VDM_TASK:-${OCTOJOOM_CLI_ACTION:-}}" site="${VDM_CONTAINER:-}" action="${VDM_ACTION:-}"
+  if [ "${OCTOJOOM_OUTPUT:-text}" = json ]; then
+    result=$(cliDispatch) || status=$?
+    printf '%s' "$result" | jq -Rs --arg task "$task" --arg action "$action" --arg container "$site" --argjson status "$status" \
+      '{success:($status == 0),task:$task,action:$action,container:$container,data:(if length == 0 then null else (try fromjson catch .) end),error:(if $status == 0 then null else "Operation failed; see stderr for details." end),exit_status:$status}'
+    return "$status"
+  fi
+  cliDispatch
+}
+
+# The lightweight entry never runs installers or writes config while answering
+# help, completion, read-only tasks or an invalid/incomplete headless request.
+function cliStart() {
+  VDM_ARG_DOMAIN=false VDM_FORCE=false
+  if [ "${1:-}" = --complete ]; then
+    shift
+    OCTOJOOM_CLI_KEYS=() OCTOJOOM_CLI_VALUES=()
+    cliResolvePaths >/dev/null 2>&1 || return 0
+    cliComplete "$@"
+    return
+  fi
+  parseCLI "$@" || { cliFailure $?; return $?; }
+  [ "$OCTOJOOM_CLI_ACTION" != help ] || { showHelp; return; }
+  cliResolvePaths || { cliFailure $?; return $?; }
+  cliResolveTarget
+  if [ "${OCTOJOOM_NON_INTERACTIVE}" = true ]; then
+    if [ -z "$OCTOJOOM_CLI_ACTION" ]; then cliPreflight || { cliFailure $?; return $?; }; fi
+    : "${VDM_SECURE:=false}"; : "${VDM_SECURE_CLOUDFLARE:=false}"
+    : "${VDM_MULTI_DOMAIN:=false}"; : "${VDM_UPDATE_HOST:=false}"; : "${VDM_EXPERT_MODE:=false}"
+  fi
+  if [[ "${VDM_TASK:-}" == setup || "${VDM_TASK:-}" == bulk ]]; then
+    createPrivateDirectory -p "$VDM_SRC_PATH" "$VDM_REPO_PATH" "$VDM_PROJECT_PATH" || return 1
+    setEnvVariable "VDM_REPO_PATH=\"${VDM_REPO_PATH}\"" || return 1
+    setEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\"" || return 1
+    installShellIntegration || return 1
+    setNetworks >&2 || return $?
+  fi
+  cliExecute
 }
 
 # defaults
@@ -11412,7 +11927,7 @@ unset OCTOJOOM_RESOLVED_HOME_PATH OCTOJOOM_RESOLVED_SRC_PATH
 for cli_index in "${!OCTOJOOM_CLI_KEYS[@]}"; do
   printf -v "${OCTOJOOM_CLI_KEYS[cli_index]}" '%s' "${OCTOJOOM_CLI_VALUES[cli_index]}"
 done
-unset cli_index OCTOJOOM_CLI_KEYS OCTOJOOM_CLI_VALUES
+unset cli_index
 # Resolve targets after loading defaults so a saved domain can accompany a
 # CLI subdomain. Tasks operating on all containers need no individual target.
 if [ -n "${VDM_CONTAINER}" ]; then
@@ -11483,6 +11998,8 @@ while [ ${#VDM_PROJECT_PATH} -le 1 ] || [ ! -d "${VDM_PROJECT_PATH}" ]; do
 done
 # add this value if not set variable
 setEnvVariable "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\"" || exit $?
+# Install the owned shell integration as part of ordinary initialization.
+installShellIntegration || exit 1
 # set these globally
 export VDM_REPO_PATH
 export VDM_PROJECT_PATH

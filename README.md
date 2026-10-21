@@ -23,6 +23,12 @@
 
 ---
 
+## Commands and automatic completion
+
+The original menu and `--type`/`--task` commands share their operations.
+Use `--non-interactive` for automation, optional JSON request/result transport,
+and automatically installed Bash completion. See [command coverage and examples](docs/COMMANDS.md).
+
 ## 📚 Table of Contents
 
 1. [Overview](#-overview)

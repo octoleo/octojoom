@@ -126,7 +126,7 @@ record_calls() {
 @test "cli: startup stops when its config directory cannot be created" {
   mkdir() { return 23; }
   export -f mkdir
-  run_octojoom --type joomla --task up
+  run_octojoom
   assert_failure
   refute_command 'docker compose .* up'
 }
