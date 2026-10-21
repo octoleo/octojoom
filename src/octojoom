@@ -7216,6 +7216,14 @@ function joomlaRuntimeInstalledVersion() {
   relative="${VDM_SITE_DOCROOT#"$VDM_SITE_MOUNT_TARGET"}"
   [[ "$VDM_SITE_DOCROOT" == "$VDM_SITE_MOUNT_TARGET" || "$VDM_SITE_DOCROOT" == "$VDM_SITE_MOUNT_TARGET/"* ]] || return 1
   source="$VDM_SITE_MOUNT_SOURCE"
+  if [ "$VDM_SITE_MOUNT_TYPE" = volume ]; then
+    source="${VDM_SITE_VOLUME_NAME:-}"
+    # Docker run creates missing named volumes, even when mounted read-only.
+    # Inspection must never create an empty volume under a logical Compose key.
+    if [ -z "$source" ] || ! docker volume inspect "$source" >/dev/null 2>&1; then
+      printf 'The actual website volume is unavailable; start the prepared site first.\n' >&2; return 1;
+    fi
+  fi
   [[ "$source" != *,* && -n "$source" ]] || { printf 'Cannot safely inspect this website mount.\n' >&2; return 1; }
   case "$VDM_SITE_MOUNT_TYPE" in bind|volume) mount="type=${VDM_SITE_MOUNT_TYPE},src=$source,dst=/octojoom-site,readonly";; *) return 1;; esac
   docker run --rm --network none --read-only --entrypoint php --mount "$mount" "$VDM_SITE_IMAGE" -r '
@@ -7510,8 +7518,16 @@ function joomla__TRuST__php() {
         probe=$(joomlaRuntimeProbeImage "$VDM_SITE_IMAGE") || exit 1
         flavor=$(jq -r '.flavor' <<< "$probe")
         tags=$(joomlaRuntimeTags "$repository") || exit 1
-        printf 'Current image: %s\nInstalled Joomla: %s\nPHP: %s (%s)\nPublished candidates (verified on selection):\n' "$VDM_SITE_IMAGE" "$version" "$(jq -r '.php' <<< "$probe")" "$flavor"
-        while IFS= read -r tag; do [[ "$tag" != "$version"-* || "$tag" != *"$flavor"* ]] || printf '%s:%s\n' "$repository" "$tag"; done <<< "$tags"
+        candidate=''
+        while IFS= read -r tag; do
+          [[ "$tag" != "$version"-* || "$tag" != *"$flavor"* ]] || candidate+="$repository:$tag"$'\n'
+        done <<< "$tags"
+        if [ "${OCTOJOOM_OUTPUT:-text}" = json ]; then
+          jq -n --arg image "$VDM_SITE_IMAGE" --arg version "$version" --argjson runtime "$probe" --arg candidates "$candidate" \
+            '{image:$image,installed_joomla:$version,runtime:$runtime,candidates:($candidates|split("\n")|map(select(length>0))),candidates_verified:false}'
+        else
+          printf 'Current image: %s\nInstalled Joomla: %s\nPHP: %s (%s)\nPublished candidates (verified on selection):\n%s' "$VDM_SITE_IMAGE" "$version" "$(jq -r '.php' <<< "$probe")" "$flavor" "$candidate"
+        fi
         exit 0;;
       switch|settings) ;;
       *) printf 'Unknown PHP action: %s\n' "$action" >&2; exit 2;;

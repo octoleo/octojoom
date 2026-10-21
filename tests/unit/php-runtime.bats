@@ -176,3 +176,33 @@ SH
   assert_file_contains "$stage/.env" 'VDM_EXAMPLE_PHP_MEMORY_LIMIT=512M'
   assert_file_contains "$stage/docker-compose.yml" "$VDM_SITE_DIR/php.ini:/php/conf.d/zz-octojoom.ini:ro"
 }
+
+@test "PHP installed-version inspection never creates an unknown named volume" {
+  readJoomlaSiteFacts() {
+    VDM_SITE_MOUNT_TYPE=volume
+    VDM_SITE_MOUNT_SOURCE=webfiles
+    VDM_SITE_VOLUME_NAME=''
+    VDM_SITE_MOUNT_TARGET=/var/www/html
+    VDM_SITE_DOCROOT=/var/www/html
+    VDM_SITE_IMAGE=joomla:current
+  }
+  run joomlaRuntimeInstalledVersion example.test
+  assert_failure
+  refute_command '^docker run'
+  readJoomlaSiteFacts() {
+    VDM_SITE_MOUNT_TYPE=volume
+    VDM_SITE_MOUNT_SOURCE=webfiles
+    VDM_SITE_VOLUME_NAME=project_webfiles
+    VDM_SITE_MOUNT_TARGET=/var/www/html
+    VDM_SITE_DOCROOT=/var/www/html
+    VDM_SITE_IMAGE=joomla:current
+  }
+  hook_command docker <<'SH'
+if [ "$1" = volume ]; then exit 1; fi
+exit 99
+SH
+  run joomlaRuntimeInstalledVersion example.test
+  assert_failure
+  assert_command '^docker volume inspect project_webfiles$'
+  refute_command '^docker run'
+}
