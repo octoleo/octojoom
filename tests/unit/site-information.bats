@@ -183,6 +183,44 @@ HOOK
   [ "$(grep -c 'Website: first.vdm.dev' "${STUB_DIR}/dialogs.full")" -eq 2 ]
 }
 
+@test "database and backup menus keep the selected website and return to its details" {
+  make_joomla_container alpha ALPHA first
+  make_joomla_container beta BETA second
+  showJoomlaDatabaseTools() { printf 'tools %s\n' "$1" >> "$SANDBOX/site-actions"; }
+  showJoomlaDatabaseChange() { printf 'change %s\n' "$1" >> "$SANDBOX/site-actions"; }
+  showJoomlaBackups() { printf 'backups %s\n' "$1" >> "$SANDBOX/site-actions"; }
+  answers first.vdm.dev database database-change backups back back
+  run showJoomlaWebsiteInformation
+  assert_success
+  assert_answers_used
+  assert_equal "$(cat "$SANDBOX/site-actions")" $'tools first.vdm.dev\nchange first.vdm.dev\nbackups first.vdm.dev'
+  [ "$(grep -c 'Website: first.vdm.dev' "$STUB_DIR/dialogs.full")" -eq 4 ]
+  refute_command '^docker compose .*second\.vdm\.dev'
+}
+
+@test "Joomla batch backup action returns to the existing Joomla menu" {
+  make_joomla_container alpha ALPHA first
+  showJoomlaBackupSelection() { printf 'selected\n' >> "$SANDBOX/backup-selection"; }
+  answers backup back
+  run showJoomla
+  assert_success
+  assert_answers_used
+  assert_equal "$(cat "$SANDBOX/backup-selection")" selected
+  [ "$(grep -c 'Make your selection' "$STUB_DIR/dialogs.full")" -eq 2 ]
+}
+
+@test "restoration can open destination details directly and Back returns to its caller" {
+  make_joomla_container alpha ALPHA first
+  make_joomla_container beta BETA restored
+  answers back
+  run showJoomlaWebsiteInformation restored.vdm.dev true
+  assert_success
+  assert_answers_used
+  assert_file_contains "$STUB_DIR/dialogs.full" 'Website: restored.vdm.dev'
+  refute_file_contains "$STUB_DIR/dialogs.full" 'Select a website'
+  refute_command '^docker compose .*first\.vdm\.dev'
+}
+
 @test "site JSON exposes facts but never environment credentials" {
   command -v jq >/dev/null 2>&1 || skip 'optional jq is unavailable'
   make_joomla_container alpha ALPHA first

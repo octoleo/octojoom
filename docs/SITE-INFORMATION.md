@@ -27,6 +27,13 @@ action actually checks them. General information and JSON omit credentials.
 Experts can explicitly open the effective ENV file to recover saved credentials;
 the menu warns when it is a shared file used by other websites.
 
+The selected site's **Database tools**, **Change database**, and **Backups and
+restore points** actions use that same site selection and return to refreshed
+details. Their options and data behavior are documented in [database tools](DATABASE-TOOLS.md),
+[database engines](DATABASE-ENGINES.md), and [backups](BACKUPS.md). The Joomla
+menu also offers **Back up websites** for a selected group or all discovered
+websites, using the same backup operation as the individual-site action.
+
 ## Commands
 
 The original `--type` and `--task` grammar is retained:

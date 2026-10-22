@@ -27,6 +27,14 @@ bash tests/run.sh tests/unit/migration-package.bats tests/unit/migration-import.
   tests/unit/migration-flow.bats tests/unit/migration-remote.bats
 ```
 
+Run the database and backup suites together:
+
+```bash
+bash tests/run.sh tests/unit/database-cli.bats tests/unit/database-setup.bats \
+  tests/unit/database-tools.bats tests/unit/database-change.bats \
+  tests/unit/site-backups.bats tests/unit/backup-validation.bats
+```
+
 Bash 4 or newer, Git, and standard shell utilities are required. The runner
 downloads bats-core v1.11.1 into the ignored `tests/.cache` directory when Bats
 is unavailable. macOS needs a current Homebrew Bash; Windows uses Git Bash.
@@ -50,6 +58,9 @@ On Linux, installed Docker Compose also validates generated configuration.
 | Configuration alignment | Effective Compose equivalence, complete scoped ENV, custom-field preservation, idempotence, per-site batch failure reporting, and recoverable publication |
 | PHP runtime | Published-tag compatibility, measured runtime checks, selective INI changes, custom-directive preservation, stopped-site handling, and rollback |
 | Webserver and document root | Apache/Nginx configuration, companion mounts, routing preservation, supported root selection/moves, custom-layout refusal, and failed-change recovery |
+| Database engines | Engine-aware setup, published-image capability checks, fresh target storage, configuration preservation, and failed-change recovery |
+| Database tools | Selected database discovery, literal credentials and table names, private SQL exports, native client failures, and CLI/menu selection |
+| Backups and restore points | Archive validation, backup scopes, independent restore identities, current-site recovery, batch operations, and explicit overwrite/deletion |
 | Lifecycle | Enable, disable, edit, start, stop, delete, clone, permission repair, and failure preservation |
 | OpenSSH | Configuration, public keys, user settings, and lifecycle |
 | Traefik and Portainer | Templates, networks, setup, certificate storage, and lifecycle |
@@ -85,12 +96,17 @@ bash tests/integration/clone.sh
 bash tests/integration/migration.sh
 bash tests/integration/php-runtime.sh
 bash tests/integration/web-runtime.sh
+OCTOJOOM_DB_TEST_ENGINE=mariadb bash tests/integration/database-backups.sh
+OCTOJOOM_DB_TEST_ENGINE=mysql bash tests/integration/database-backups.sh
+OCTOJOOM_DB_TEST_ENGINE=postgres bash tests/integration/database-backups.sh
 ```
 
 These need Linux, a running Docker daemon, Docker Compose v2, network access to
 the official images, and root or passwordless sudo for container-owned bind
 mounts. Migration also requires GNU tar and gzip; PHP and web runtime checks
-require `jq`, `curl`, and `sha256sum`. The scripts create temporary, uniquely
+require `jq`, `curl`, and `sha256sum`. Database and backup checks also need
+`zip`, `unzip`, and util-linux `script` for the console terminal check.
+The scripts create temporary, uniquely
 named or labeled resources and remove their own resources on exit. They never
 prune the daemon or its images. PHP and web checks publish only ephemeral
 loopback HTTP ports.
@@ -101,6 +117,7 @@ loopback HTTP ports.
 | Docker migration integration | `migration.sh` | Complete archive, destination realignment, source preservation, and independent destination writes |
 | Docker PHP runtime integration | `php-runtime.sh` | Published PHP-image change, effective INI values, unchanged installed-version fixture/database, and rejected-candidate preservation |
 | Docker web runtime integration | `web-runtime.sh` | Real Joomla installation, Apache/Nginx round trip, nested-root move, frontend/admin/SEF/API/assets, and preserved site data |
+| Docker database and backups (MariaDB, MySQL, PostgreSQL) | `database-backups.sh` | Real Joomla installation, native SQL operations, Unicode/binary data, ZIP/tar restores, bind/named-volume storage, batch operations, and database changes onto fresh storage |
 
 The clone test checks a real cold database copy and confirms Apache/PHP in the
 cloned Joomla image can use its independent database after the source database
@@ -141,6 +158,21 @@ then switches back to Apache. Installed Joomla and PHP versions, site files,
 the database container, and a database marker must survive these changes.
 The real root-move fixture uses bind storage; named-volume root handling has
 portable coverage, not equivalent real-Docker move acceptance.
+
+The database and backup matrix installs Joomla separately for each engine.
+It exports and imports actual SQL, checks selected-table operations, Unicode
+and binary data, failed imports, overwrite refusal and conditional source-file
+deletion. PostgreSQL also exercises its native archive format; MariaDB opens
+the actual SQL console through a PTY. ZIP/tar restores run with the source
+services stopped and preserve uploaded-file contents, numeric ownership and
+mode. Destination writes must remain independent. It also checks current-site
+restore with a pre-restore backup, batch operations, independent database-change
+clones, and database-version changes that retain the old storage. Fresh mode
+must leave an empty database with the website stopped. The MySQL row changes
+successfully to MariaDB; the MariaDB row requires an incompatible MySQL import
+to reach the actual importer and then restore the original deployment. It also
+restores the legacy raw-project archive format. A failed or unfinished matrix
+row is not acceptance for that engine, even when the portable tests pass.
 
 None of these scripts proves public proxy routing, DNS, browser certificate
 trust, ACME issuance, or real SSH transport. The portable flow tests verify
@@ -206,5 +238,6 @@ Passing workflows only block merge when branch protection requires them.
 Require `ShellCheck`, `Tests (ubuntu-latest)`, `Tests (macos-latest)`,
 `Tests (windows-latest)`, `Docker clone integration`,
 `Docker migration integration`, `Docker PHP runtime integration`, and
-`Docker web runtime integration` on protected branches. A portable-suite pass
+`Docker web runtime integration`, and each `Docker database and backups`
+matrix job on protected branches. A portable-suite pass
 alone does not establish the real-Docker acceptance results.

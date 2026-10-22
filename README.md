@@ -234,6 +234,9 @@ settings, and persistent project directories.
 | [4. Configuration alignment](docs/CONFIGURATION-ALIGNMENT.md) | Inspect and align existing sites without changing their intended Compose behavior |
 | [5. PHP runtime](docs/PHP-RUNTIME.md) | Select compatible published PHP images and change settings for one site |
 | [6. Webserver and document root](docs/WEBSERVER-DOCUMENT-ROOT.md) | Switch Apache/Nginx and select or explicitly move a site's document root |
+| [7. Database engines](docs/DATABASE-ENGINES.md) | Select a supported database engine during setup or change an existing site's database with an explicit data choice |
+| [8. Database tools](docs/DATABASE-TOOLS.md) | Export/import SQL, select tables, open the native SQL console, and export multiple sites |
+| [9. Backups and restore points](docs/BACKUPS.md) | Create, verify, restore, and manage database and website backups |
 
 See [test coverage and validation limits](tests/README.md) for the portable suite
 and real Docker acceptance checks. Clone and complete project migration

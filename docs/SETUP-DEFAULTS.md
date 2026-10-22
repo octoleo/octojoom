@@ -2,7 +2,7 @@
 
 The Joomla menu still uses **Setup new container** and the original sequence of
 image, identity, database, installation and enable questions. After image and
-identity selection, one default-No question opens the optional PHP and webserver
+identity selection, one default-No question opens the optional PHP, webserver and database
 choices. Declining it keeps the ordinary flow. Expert PHP, persistence and
 entrypoint questions remain available. Bulk setup uses the same generator and
 asks runtime choices once for the batch.
@@ -68,10 +68,12 @@ Ordinary per-site changes do not change these defaults.
 | `VDM_DEFAULT_JOOMLA_DOCROOT` | `.` or the selected relative directory |
 | `VDM_DEFAULT_JOOMLA_PHPMYADMIN` | `true` or `false` |
 | `VDM_DEFAULT_JOOMLA_AUTO_INSTALL` | Default manual/automatic installation choice |
+| `VDM_DEFAULT_JOOMLA_DB_ENGINE` | `mariadb`, `mysql`, or `postgres` |
+| `VDM_DEFAULT_JOOMLA_DB_IMAGE` | Published database image and tag/digest |
 
 The shared Joomla environment retains database settings and scoped selected
 values named `VDM_<ENVKEY>_IMAGE_SOURCE`, `IMAGE_TAG`, `AUTO_INSTALL`, `WEBSERVER`,
-`DOCROOT`, and `PHPMYADMIN`. The Compose file remains authoritative for the
+`DOCROOT`, `PHPMYADMIN`, `DB_ENGINE`, and `DB_IMAGE`. The Compose file remains authoritative for the
 actual deployment. If a new site needs a different project path or scoped runtime
 choice from an existing shared assignment, setup saves a complete per-site `.env`
 and leaves the shared file unchanged. Unrelated site secrets are excluded. A per-site environment introduced by a later selected-site
@@ -89,3 +91,38 @@ in turn; a failed later site does not remove earlier successful sites.
 The portable suite checks cancellation, no-dialog setup, generated and literal
 credentials, saved-default reload, site isolation, bulk generation and failed
 validation. Live image startup and routing remain separate runtime acceptance.
+
+## Database engines
+
+MariaDB with `mariadb:latest` remains the first-use default. The optional
+configuration question offers database engines supported by the selected
+Joomla image and asks for a published image reference. Automation supplies
+`--db-engine mariadb|mysql|postgres` and `--db-image IMAGE:TAG`. Nondefault
+choices inspect the image's server version and the selected Joomla image's
+actual PHP extensions, database driver and minimum database requirements.
+No image is built or modified. Saved site choices use `VDM_<ENV>_DB_ENGINE`
+and `VDM_<ENV>_DB_IMAGE`, alongside the original database credential keys.
+
+The generated database service retains its original `mariadb<key>` identity
+for compatibility. MySQL uses its `MYSQL_*` initialization variables; PostgreSQL
+uses `POSTGRES_DB`, `POSTGRES_USER` and `POSTGRES_PASSWORD`, port 5432, and the
+Joomla `pgsql` driver. PostgreSQL asks no root-password question and does not
+create phpMyAdmin. A PostgreSQL data mount follows the selected image's actual
+`PGDATA`: older image layouts use `/var/lib/postgresql/data`, while the versioned
+layout uses `/var/lib/postgresql`. Existing raw clone/migration operations keep
+the same engine and data layout; changing database families is a separate
+database-change operation. Their existing restrictions on Nginx/FPM and nested
+document roots still apply.
+
+Some published Joomla images concatenate PostgreSQL credentials into a libpq
+connection string in `/makedb.php`. When this exact initializer is detected,
+setup rejects whitespace, single quotes or backslashes in those credentials,
+and double quotes in the database name, before writing deployment files.
+Values are never rewritten. This is an upstream initialization limitation;
+existing-site database tools still pass literal credentials safely.
+
+Published image conventions and Joomla capability checks follow the official
+[MySQL image documentation](https://github.com/docker-library/docs/tree/master/mysql),
+[PostgreSQL image documentation](https://github.com/docker-library/docs/tree/master/postgres),
+[Joomla entrypoint](https://github.com/joomla-docker/docker-joomla/blob/master/docker-entrypoint.sh),
+and its [database initializer](https://github.com/joomla-docker/docker-joomla/blob/master/makedb.php).

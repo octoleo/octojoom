@@ -19,7 +19,8 @@ Long options accept `--name value` and `--name=value`. Existing short options
 remain available. Boolean options take `true`/`false` (`yes`/`no` and `1`/`0` are
 also accepted). `--non-interactive`, `--yes`, `--sudo`, `--quiet`, `--verbose`,
 `--no-progress`, `--all`, `--short`, `--follow`, and `--move-files` are switches.
-An empty `--extensions=`, `--commands=`, or `--error-reporting=` remains an
+`--quiet` and `--verbose` also accept an explicit boolean, and are mutually
+exclusive. An empty `--extensions=`, `--commands=`, `--error-reporting=`, or `--label=` remains an
 explicit empty value. Explicit request presence is kept separately from values.
 
 Direct options override JSON options, which override saved applicable defaults.
@@ -29,7 +30,8 @@ commands and completion do not create missing configuration directories.
 
 Text data is written to stdout; notices, progress and errors go to stderr in
 headless/JSON mode. `--quiet` suppresses notices, never errors. `--no-progress`
-suppresses gauges. `--verbose` is accepted as a shared logging preference;
+and `--progress no` suppress progress; `--progress yes` requests it where the
+operation supports it. Progress always remains on stderr. `--verbose` is accepted as a shared logging preference;
 individual operations may provide no additional debug output. Native commands
 retain their failure status. `--output json` requires `jq` and produces one
 object, for example:
@@ -42,7 +44,9 @@ object, for example:
 its text result. On failure, `success` is false and `exit_status` is nonzero;
 details remain on stderr. Routine site information does not include passwords.
 Explicit `config --action read` is a credential-bearing configuration view.
-Streaming `logs --follow` and interactive `shell` require text output.
+Streaming `logs --follow`, interactive `shell`, and the database SQL console
+require text output. The SQL console also requires an input terminal;
+`database --action execute --file FILE` is its noninteractive counterpart.
 
 | Status | Meaning |
 | --- | --- |
@@ -54,8 +58,9 @@ Streaming `logs --follow` and interactive `shell` require text output.
 ### Optional JSON request
 
 JSON is transport, never stored site metadata. Structured requests default to
-headless mode unless their options explicitly request interactive collection. `jq` is required only for JSON
-requests/results; ordinary flags, menus and Bash completion do not require it.
+headless mode unless their options explicitly request interactive collection.
+`jq` is required for JSON requests/results and some runtime operations. Parsing
+ordinary flags and Bash completion do not require it.
 Use `--input-json request.json`, or `--input-json -` to read stdin. The accepted
 schema has these fields only:
 
@@ -76,12 +81,38 @@ schema has these fields only:
 ```
 
 Top-level `container` and `action` are optional. `options` uses long option names
-without `--`, with string, boolean or number values. `args` is a literal string
-array, equivalent to arguments after `--`. Unknown fields/options, NUL bytes and
+without `--`, with string, boolean or number values. For batch database exports
+and backups, `container` also accepts a nonempty string array; `options.container`
+accepts the same values when no top-level container is supplied. `options.table`
+accepts a string or nonempty string array. These are the only array-valued options.
+`args` is a literal string array, equivalent to arguments after `--`. Unknown fields/options, NUL bytes and
 invalid booleans are rejected. No request is evaluated as shell code. Supply
 credentials in a protected JSON file/stdin or saved environment file rather
 than putting them into shell history. Protect request files with mode `600` on
 Unix, and suitable account ACLs on Windows.
+
+Repeated `--container` and `--table` preserve each value literally: a comma in a
+table name is part of that name. An explicit CLI selection replaces the complete
+JSON selection on its first occurrence; further occurrences append to that CLI
+selection. Batch operations accept selected containers or `--all`, not both.
+A batch uses `--destination` so each site receives a distinct output filename;
+a shared `--file` is rejected. Other operations retain one selected container.
+
+```json
+{
+  "type": "joomla",
+  "task": "database",
+  "action": "export",
+  "container": ["first.example.test", "second.example.test"],
+  "options": {
+    "destination": "/private backups",
+    "compression": "gzip",
+    "table": ["cms_content", "archive,2025"],
+    "timestamp": false,
+    "overwrite": false
+  }
+}
+```
 
 ## Menu and command coverage
 
@@ -112,6 +143,13 @@ Each new feature extends these same handlers and completion discovery.
 | PHP image/settings | `joomla php` | `--container --action list|switch|settings`; candidate tag/image or setting flags | Runtime results; cached public tags only during Tab |
 | Apache or Nginx/FPM | `joomla webserver` | `--container --action show|set`, `--webserver apache|nginx` | Existing installation retained; published image options |
 | Document root | `joomla docroot` | `--container --action show|set`, `--docroot`; moving requires `--move-files` | Same selected-root resolver used by commands |
+| Selected website → Change database | `joomla database` | `--container --action change --engine --database-image --data-mode preserve|clone|fresh --confirm yes`; clone also needs destination identity | Shared engine-change handler; explicit data intent and compatibility checks |
+| Selected website → Database export / selected tables | `joomla database` | `--action export --container`; optional repeated `--table`, `--file` or `--destination`, compression/timestamp/overwrite choices | Engine-native export; literal table names and published archive result |
+| Back up databases in selected/all sites | `joomla database` | `--action export`, repeated `--container` or `--all`; destination/preferences once | Same exporter; per-site outcomes and nonzero overall status on partial failure |
+| Selected website → Database import | `joomla database` | `--action import --container --file --import-mode fresh|replace|merge`; optional `--delete-source yes|no` | Explicit import semantics; source deletion only after successful import |
+| Selected website → Tables / SQL console / SQL file | `joomla database` | `--action tables|console|execute --container`; execute needs `--file`, console needs TTY | Native client data/status; no table discovery while completing |
+| Selected website → Backups and restore points | `joomla backup` | `--action create|list|verify|restore|delete|cleanup`; scope/format/destination/label and explicit restore/deletion choices | Same backup/restore handlers; archive, digest, scope and destination outcomes |
+| Back up selected/all websites | `joomla backup` | `--action create`, repeated `--container` or `--all`; shared destination/preferences | Same single-site operation; per-site results and nonzero status on partial failure |
 | OpenSSH → Setup | `openssh setup` | domain, username, key, port, `--ssh-keys`, `--mount-base`, `--mount-dirs`; UID/GID default to current numeric IDs | Same setup function; scoped saved key/mount directories |
 | Traefik / Portainer → Setup | `traefik setup`, `portainer setup` | domain; HTTPS requires secure email for Traefik, optional Cloudflare token | Existing templates; explicit `--enable` |
 | Traefik / Portainer lifecycle | respective `enable`, `disable`, `delete` | Type/task | Original singleton service behavior |
@@ -129,6 +167,10 @@ Setup credentials/settings include `--db-name`, `--db-user`, `--db-password`,
 `--db-root-password`, `--db-prefix`, `--site-name`, `--admin-user`, `--admin-username`,
 `--admin-email`, `--admin-password`, `--extensions`, `--commands`, `--mailcatcher`,
 `--phpmyadmin`, `--persistence`, `--db-persistence`, and `--save-defaults`.
+Database setup accepts `--engine` (alias `--db-engine`) with `mariadb`, `mysql`,
+or `postgres` (`postgresql` is an accepted spelling), and `--database-image`
+(alias `--db-image`) with an explicit published image reference. Engine choices
+remain subject to the selected Joomla/PHP driver's capabilities.
 PHP setting flags are `--memory-limit`, `--max-execution-time`,
 `--max-input-time`, `--max-input-vars`, `--upload-max-filesize`,
 `--post-max-size`, and `--error-reporting`. `--free-ports true` explicitly permits the existing Traefik flow to stop known
@@ -140,6 +182,58 @@ Existing operation-specific restrictions still apply: for example, the original
 cold clone/migration paths can reject unsupported named volumes or custom
 storage layouts. A visible site is not a promise that every operation can safely
 rewrite its configuration. Each operation reports its own limitation.
+
+## Database and backup requests
+
+Database changes require explicit `--engine`, `--database-image`,
+`--data-mode preserve|clone|fresh`, and `--confirm yes`. These choices are not
+inherited from saved setup defaults. A clone additionally needs its destination
+identity; a fresh target starts empty.
+
+A single database export can name its output exactly, including spaces:
+
+```bash
+octojoom --type joomla --task database --action export \
+  --container demo.example.test --file '/private backups/demo.sql.gz' \
+  --compression gzip --timestamp no --overwrite no --non-interactive
+```
+
+Use `--compression none|gzip|custom`; `custom` is PostgreSQL's native archive
+format and requires its matching restore client. Import requires an explicit
+`--import-mode fresh|replace|merge`; the shared handler checks that mode against
+the actual database before applying input. `--delete-source no` retains the
+input file and is the default. `--pre-backup yes` requests a backup before the
+import and stops the import if that backup fails. Database credentials come from the selected
+site's protected configuration; routine results never include SQL contents or
+passwords. Supply setup/replacement credentials through saved ENV or protected
+JSON input instead of process-visible command arguments.
+
+Backups accept `--scope full|website|database|files` and `--format tar.gz|zip`.
+Website scope includes both website files and SQL; files scope explicitly omits
+the database. `--label`, `--destination`, `--timestamp yes|no`, and
+`--overwrite yes|no` select the saved/default naming and publication choices.
+`--retention COUNT` keeps the newest COUNT selected-site backups; zero disables
+retention deletion. Cleanup and delete require `--confirm yes`.
+
+```bash
+octojoom --type joomla --task backup --action create \
+  --container first.example.test --container second.example.test \
+  --scope full --format tar.gz --destination '/private backups' \
+  --timestamp yes --overwrite no --non-interactive --output json
+
+octojoom --type joomla --task backup --action restore \
+  --file '/private backups/before-change.tar.gz' --target new \
+  --key review --domain example.test --sub-domain review --non-interactive
+```
+
+Verification and restore to a new independent site can use an archive even
+when its source site no longer exists. Restoring into an existing site requires
+`--target current`, that site's `--container`, `--pre-backup yes`, and
+`--confirm yes`. Listing, deletion, and retention cleanup remain scoped to the
+selected site. A checksum confirms archive integrity; successful restoration
+also depends on the supported payload, engine, and storage checks in the shared
+restore handler. Batch JSON includes each site's outcome inside the normal
+result envelope, with a failing overall exit status if any selected site fails.
 
 ## Automatically installed Bash discovery
 
@@ -155,8 +249,10 @@ A **new Bash shell** automatically provides Tab candidates and `octojoom_cd
 HOSTNAME`, whose `cd` affects that calling shell. An already-running shell
 cannot be changed by a child executable. Completion is local/read-only: no
 Docker calls, network requests, dependency installation or credential values.
-It discovers public task names from the installed script, local site names and
-cached public image tags. Bash 4+ is required, including Homebrew Bash on macOS
+It discovers public task names from the installed script, task-specific actions,
+local site names, local archive paths, and cached public image tags. Database
+engine, compression, scope, format, and intent choices are available without
+connecting to a database; table names are supplied explicitly. Bash 4+ is required, including Homebrew Bash on macOS
 and Git Bash on Windows. Native PowerShell, zsh and fish integration is not
 provided.
 

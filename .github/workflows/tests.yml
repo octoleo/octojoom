@@ -128,3 +128,19 @@ jobs:
 
       - name: Verify Joomla Apache and Nginx routing and document roots
         run: timeout --signal=TERM --kill-after=30s 22m bash tests/integration/web-runtime.sh
+
+  database-backup-integration:
+    name: Docker database and backups (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [mariadb, mysql, postgres]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify actual database operations and independent Joomla restores
+        env:
+          OCTOJOOM_DB_TEST_ENGINE: ${{ matrix.engine }}
+        run: timeout --signal=TERM --kill-after=30s 42m bash tests/integration/database-backups.sh
