@@ -120,3 +120,38 @@ setup() {
   assert_failure
   refute_file_exists "$SANDBOX/real-parent/stage/manifest.env"
 }
+
+@test "metadata batches equal settings at each depth while processing descendants first" {
+  local directory index calls previous depth path action mode
+  for ((index=0; index<120; index++)); do
+    directory="$PACKAGE/project/joomla/module$index/src"
+    mkdir -p "$directory"
+    printf 'component\n' > "$directory/f1.php"
+    printf 'component\n' > "$directory/f2.php"
+  done
+  joomlaBackupFileMetadata "$PACKAGE"
+  # Fixed modes make the grouping assertion meaningful on Git Bash too. The
+  # filesystem is only observed by this test; existing tests check real chmod.
+  awk -F '\t' 'BEGIN {OFS="\t"} {if($4 ~ /\/f[12][.]php$/) $1=600; else $1=700; print}' \
+    "$PACKAGE/project/files.meta" > "$SANDBOX/metadata"
+  cp "$SANDBOX/metadata" "$PACKAGE/project/files.meta"
+  METADATA_CALLS="$SANDBOX/metadata-calls"
+  : > "$METADATA_CALLS"
+  runPrivileged() {
+    local operation="$1" setting="$2" item
+    shift 2
+    for item in "$@"; do printf '%s\t%s\t%s\n' "$operation" "$setting" "$item" >> "$METADATA_CALLS"; done
+    printf '%s\n' "$operation" >> "$METADATA_CALLS.count"
+  }
+  joomlaBackupApplyMetadata "$PACKAGE"
+  calls=$(wc -l < "$METADATA_CALLS.count")
+  [ "$calls" -lt 20 ]
+  previous=999
+  while IFS=$'\t' read -r action mode path; do
+    [ "$action" = chmod ] || continue
+    path="${path#"$PACKAGE/"}"
+    depth="${path//[^\/]}"; depth="${#depth}"
+    [ "$depth" -le "$previous" ]
+    previous="$depth"
+  done < "$METADATA_CALLS"
+}

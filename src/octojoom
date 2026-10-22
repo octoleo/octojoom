@@ -6953,9 +6953,12 @@ function joomlaBackupApplyMetadata() {
       [ -n "${metadata_seen[${path#"$package/"}]+set}" ] || exit 1
       [ ! -L "$path" ] && { [ -f "$path" ] || [ -d "$path" ]; } || exit 1
     done < "$work/paths"
-    # Reverse path order visits descendants before their parents. Batch adjacent
-    # equal settings without allowing a parent to become inaccessible first.
-    LC_ALL=C sort -t $'\t' -k4,4r "$package/project/files.meta" > "$work/ordered" || exit 1
+    # Deeper paths must precede parents; equal-depth paths cannot be ancestors.
+    # Group equal settings at each depth so alternating directories/files do not
+    # turn a Joomla tree into thousands of individual sudo/chown/chmod calls.
+    awk -F '\t' 'BEGIN {OFS="\t"} {depth=split($4,parts,"/"); print depth,$0}' "$package/project/files.meta" > "$work/depth" || exit 1
+    LC_ALL=C sort -t $'\t' -k1,1nr -k2,2 -k3,3n -k4,4n "$work/depth" > "$work/sorted" || exit 1
+    cut -f2- "$work/sorted" > "$work/ordered" || exit 1
     while IFS=$'\t' read -r mode uid gid path extra; do
       group="$mode:$uid:$gid"
       if [ "${#backup_batch_paths[@]}" -gt 0 ] && { [ "$group" != "$previous" ] || [ "${#backup_batch_paths[@]}" -ge 200 ]; }; then
@@ -7361,10 +7364,13 @@ function joomlaBackupVerifyApplication() {
 # shellcheck disable=SC2016
 function joomlaBackupPortableCompose() {
   local package="$1" key="$2" folder="$3" compose="$1/compose/docker-compose.yml" env="$1/compose/.env"
-  local model project_base service type source target read_only relative replacement mode property compose_root project_root
-  migrationReadEnvValue "$env" VDM_PROJECT_PATH project_base || return 1
+  local model project_base service type source target read_only relative replacement mode property compose_root project_root=''
   compose_root=$(joomlaBackupFilesystemPath "$package/compose") || return 1
-  project_root=$(joomlaBackupFilesystemPath "$project_base/$folder") || return 1
+  # Named-only deployments do not reference VDM_PROJECT_PATH, so their scoped
+  # environment correctly omits it. Only project-local dependency binds need it.
+  if migrationReadEnvValue "$env" VDM_PROJECT_PATH project_base; then
+    project_root=$(joomlaBackupFilesystemPath "$project_base/$folder") || return 1
+  fi
   model=$(migrationRunCompose "$env" "$compose" --project-directory "$package/compose" config --format json) || return 1
   while IFS= read -r service; do
     [ -n "$service" ] || continue
@@ -7385,8 +7391,10 @@ function joomlaBackupPortableCompose() {
           [ "$type" = bind ] || { joomlaBackupError 'An additional named volume has no portable payload.'; return 1; }
           case "$source" in
             "$compose_root/"*) relative="${source#"$compose_root/"}"; replacement="./$relative";;
-            "$project_root/"*) relative="${source#"$project_root/"}"; replacement='${VDM_PROJECT_PATH}/'"$key/$relative";;
-            *) joomlaBackupError "An archived mount cannot be mapped into destination storage: $target"; return 1;;
+            *)
+              if [ -n "$project_root" ] && [[ "$source" == "$project_root/"* ]]; then
+                relative="${source#"$project_root/"}"; replacement='${VDM_PROJECT_PATH}/'"$key/$relative"
+              else joomlaBackupError "An archived mount cannot be mapped into destination storage: $target"; return 1; fi;;
           esac;;
       esac
       [[ "$replacement" != *[\"\\]* && "$replacement" != *[![:print:]]* ]] || return 1

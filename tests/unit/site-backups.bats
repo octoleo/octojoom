@@ -329,7 +329,7 @@ HOOK
     (.services[].volumes[].source) |= ("C:" + .) |
     .services.joomlaalpha.volumes += [{type:"bind",source:("C:"+$directory+"/custom.ini"),target:"/usr/local/etc/php/conf.d/custom.ini",read_only:true}] |
     .configs={app:{file:("C:"+$directory+"/app.conf")}}
-  ' "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
+  ' < "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
   mv "$BACKUP_MODEL.next" "$BACKUP_MODEL"
   joomlaBackupCreate first.vdm.dev "$BACKUP_DIRECTORY/native.tar.gz" full tar.gz false >/dev/null
   mkdir "$SANDBOX/native-restore"
@@ -355,4 +355,40 @@ HOOK
   model=$(printf '%s' "$model" | jq '.services.web.volumes[0].source="C:/unrelated/private"')
   run joomlaBackupValidateDestination "$model" "$SANDBOX/project" "$SANDBOX/site" true
   assert_failure
+}
+
+@test "named-volume archive realigns without an unreferenced source project path" {
+  local compose="$VDM_REPO_PATH/joomla/available/first.vdm.dev/docker-compose.yml"
+  sed -e 's#${VDM_PROJECT_PATH}/alpha/joomla#alpha_web#g' -e 's#${VDM_PROJECT_PATH}/alpha/db#alpha_db#g' "$compose" > "$compose.next"
+  mv "$compose.next" "$compose"
+  printf '\nvolumes:\n  alpha_web:\n  alpha_db:\n' >> "$compose"
+  jq '.services.joomlaalpha.volumes[0]={type:"volume",source:"alpha_web",target:"/var/www/html"} |
+    .services.mariadbalpha.volumes[0]={type:"volume",source:"alpha_db",target:"/var/lib/mysql"} |
+    .volumes={alpha_web:{name:"actual_alpha_web"},alpha_db:{name:"actual_alpha_db"}}' < "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
+  mv "$BACKUP_MODEL.next" "$BACKUP_MODEL"
+  docker() {
+    case "$*" in
+      'volume inspect actual_alpha_web') return 0;;
+      'run '*'-czpf - -C /octojoom-site .') command tar -czpf - -C "$VDM_PROJECT_PATH/alpha/joomla" .;;
+      *) return 0;;
+    esac
+  }
+  joomlaBackupCreate first.vdm.dev "$BACKUP_DIRECTORY/named.tar.gz" full tar.gz false >/dev/null
+  local package="$SANDBOX/named-restore"
+  mkdir "$package"
+  joomlaBackupExtract "$BACKUP_DIRECTORY/named.tar.gz" "$package"
+  run grep -q '^VDM_PROJECT_PATH=' "$package/compose/.env"
+  assert_failure
+  migrationRunCompose() { cat "$BACKUP_MODEL"; }
+  joomlaBackupPortableCompose "$package" alpha alpha
+  rewriteJoomlaComposeIdentity "$package/compose/docker-compose.yml" "$package/compose/renamed.yml" alpha beta ALPHA BETA first second vdm.dev vdm.dev alpha
+  grep -q 'beta_web:/var/www/html' "$package/compose/renamed.yml"
+  grep -q 'beta_db:/var/lib/mysql' "$package/compose/renamed.yml"
+  run grep -q 'alpha_web\|alpha_db' "$package/compose/renamed.yml"
+  assert_failure
+  jq '.services.joomlaalpha.volumes += [{type:"bind",source:"/unrelated/private",target:"/extra"}]' < "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
+  mv "$BACKUP_MODEL.next" "$BACKUP_MODEL"
+  run joomlaBackupPortableCompose "$package" alpha alpha
+  assert_failure
+  assert_output_contains 'cannot be mapped into destination storage'
 }
