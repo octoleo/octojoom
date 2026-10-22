@@ -24,6 +24,62 @@ setup() {
   [ ! -s "$STUB_DIR/commands.log" ]
 }
 
+@test "alignment: missing setting reports its name and effective file without changing the site" {
+  sed '/VDM_ALPHA_DB_ROOT=/d' "$ALIGN_ENV" > "$SANDBOX/incomplete.env"
+  cp "$SANDBOX/incomplete.env" "$ALIGN_ENV"
+  cp "$ALIGN_YML" "$SANDBOX/original"
+  run siteAlignConfiguration alpha.example.test apply
+  assert_failure
+  assert_output_contains "Missing VDM_ALPHA_DB_ROOT in $ALIGN_ENV."
+  assert_output_contains "Restore this setting's existing value, then retry."
+  cmp "$ALIGN_YML" "$SANDBOX/original"
+  cmp "$ALIGN_ENV" "$SANDBOX/incomplete.env"
+  refute_file_exists "$ALIGN_DIR/.env"
+  [ ! -s "$STUB_DIR/commands.log" ]
+}
+
+@test "alignment: malformed assignment reports its actual line without revealing its contents" {
+  printf '%s\n' 'BROKEN-private-secret' >> "$ALIGN_ENV"
+  local line_number
+  line_number=$(awk 'END { print NR }' "$ALIGN_ENV")
+  run siteAlignConfiguration alpha.example.test inspect
+  assert_failure
+  assert_output_contains "Invalid assignment at $ALIGN_ENV:$line_number."
+  assert_output_contains 'Use VDM_NAME=value or a comment, then retry.'
+  [[ "$output" != *private-secret* && "$output" != *'Missing VDM_'* ]]
+  [ ! -s "$STUB_DIR/commands.log" ]
+}
+
+@test "alignment: invalid quotes identify the setting and line without revealing its value" {
+  printf '%s\n' 'VDM_ALPHA_DB_PASS="private-secret' >> "$ALIGN_ENV"
+  local line_number
+  line_number=$(awk 'END { print NR }' "$ALIGN_ENV")
+  run siteAlignConfiguration alpha.example.test inspect
+  assert_failure
+  assert_output_contains "Invalid quoting for VDM_ALPHA_DB_PASS at $ALIGN_ENV:$line_number."
+  [[ "$output" != *private-secret* ]]
+  [ ! -s "$STUB_DIR/commands.log" ]
+}
+
+@test "alignment: multiline value reports the unsupported format instead of a missing setting" {
+  printf '%s\n' 'VDM_ALPHA_DB_PASS="private-secret\nsecond-line"' >> "$ALIGN_ENV"
+  run siteAlignConfiguration alpha.example.test inspect
+  assert_failure
+  assert_output_contains 'Unsupported multiline value for VDM_ALPHA_DB_PASS'
+  assert_output_contains 'Use a single-line value, then retry.'
+  [[ "$output" != *private-secret* && "$output" != *second-line* ]]
+}
+
+@test "alignment: linked environment reports the path and reason instead of a missing setting" {
+  mv "$ALIGN_ENV" "$SANDBOX/shared.env"
+  ln -s "$SANDBOX/shared.env" "$ALIGN_ENV"
+  [ -L "$ALIGN_ENV" ] || skip 'Symbolic links are unavailable'
+  run siteAlignConfiguration alpha.example.test inspect
+  assert_failure
+  assert_output_contains "Environment file $ALIGN_ENV is a symbolic link."
+  assert_output_contains 'Use a regular environment file, then retry.'
+}
+
 @test "scoped environment: referenced credentials and dormant site choices survive, sibling secrets do not" {
   {
     formatEnvAssignment 'VDM_ALPHA_SMTP_PASSWORD="saved $literal secret"'

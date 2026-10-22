@@ -30,6 +30,14 @@ Reports distinguish `pending`, `unchanged`, `updated`, and `action-needed`.
 Batch application continues after an unsupported site and exits unsuccessfully
 if any site could not be handled. A partial result is not reported as complete.
 
+If a required environment setting cannot be read, `action-needed` identifies
+the variable and the effective `.env` file. A malformed assignment or quoted
+value also includes its line number. Values are never included in the report.
+Correct the reported line, or restore a missing setting using its existing site
+value, then run **Update existing configurations** again. A per-site `.env`
+takes precedence over the shared `joomla/.env`, so edit the file named in the
+report. This check leaves the site's files and services unchanged.
+
 The targeted image edit supports the original two-space service/four-space
 property block layout, including custom unrelated services, mounts, labels and
 comments. An ambiguous/duplicate property, advanced interpolation, linked config

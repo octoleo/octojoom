@@ -5364,7 +5364,7 @@ function sitePublishConfiguration() {
 # scoped editable setting. It deliberately does not enable optional services,
 # upgrade an image, regenerate YAML, or change Traefik before such a change exists.
 function siteAlignmentPlan() {
-  local site="$1" directory compose_file effective_env raw image env_key service references name value
+  local site="$1" directory compose_file effective_env raw image env_key service references name value problem
   isValidDomain "$site" || return 1
   directory="${VDM_REPO_PATH}/joomla/available/$site"
   compose_file="$directory/docker-compose.yml"
@@ -5379,8 +5379,8 @@ function siteAlignmentPlan() {
   fi
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    if ! migrationReadEnvValue "$effective_env" "$name" value; then
-      printf 'action-needed\tA required Compose setting is missing or invalid in the effective environment.\n'; return 0
+    if ! migrationReadEnvValue "$effective_env" "$name" value problem; then
+      printf 'action-needed\t%s\n' "$problem"; return 0
     fi
   done <<< "$references"
   if ! raw=$(siteReadServiceScalar "$compose_file" "$service" image); then
@@ -10954,22 +10954,47 @@ EOF
 
 # Read one scoped dotenv assignment without evaluating or exporting its value.
 # The last assignment wins, matching OctoJoom's existing dotenv loader.
+# Optional $4 receives an actionable failure reason containing no setting values.
 function migrationReadEnvValue() {
   local migration_file="$1" migration_name="$2" migration_target="$3"
+  local migration_problem_target="${4:-}" migration_problem='' migration_line_number=0
   local migration_line migration_value='' migration_found=false
   [[ "$migration_name" =~ ^VDM_[A-Za-z0-9_]+$ && "$migration_target" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
-  [ -f "$migration_file" ] && [ ! -L "$migration_file" ] || return 1
-  while IFS= read -r migration_line || [ -n "$migration_line" ]; do
-    migration_line="${migration_line%$'\r'}"
-    [[ "$migration_line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
-    [[ "$migration_line" =~ ^[[:space:]]*(export[[:space:]]+)?(VDM_[A-Za-z0-9_]+)[[:space:]]*=[[:space:]]*(.*)$ ]] || return 1
-    if [ "${BASH_REMATCH[2]}" = "$migration_name" ]; then
-      decodeEnvValue "${BASH_REMATCH[3]}" migration_value || return 1
-      [[ "$migration_value" != *$'\n'* && "$migration_value" != *$'\r'* ]] || return 1
-      migration_found=true
+  [[ -z "$migration_problem_target" || "$migration_problem_target" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
+  [ -z "$migration_problem_target" ] || printf -v "$migration_problem_target" '%s' ''
+  if [ -L "$migration_file" ]; then
+    migration_problem="Environment file $migration_file is a symbolic link. Use a regular environment file, then retry."
+  elif [ ! -f "$migration_file" ] || [ ! -r "$migration_file" ]; then
+    migration_problem="Cannot read environment file $migration_file. Check its path and read permissions, then retry."
+  else
+    while IFS= read -r migration_line || [ -n "$migration_line" ]; do
+      migration_line_number=$((migration_line_number + 1))
+      migration_line="${migration_line%$'\r'}"
+      [[ "$migration_line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+      if [[ ! "$migration_line" =~ ^[[:space:]]*(export[[:space:]]+)?(VDM_[A-Za-z0-9_]+)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+        migration_problem="Invalid assignment at $migration_file:$migration_line_number. Use VDM_NAME=value or a comment, then retry."
+        break
+      fi
+      if [ "${BASH_REMATCH[2]}" = "$migration_name" ]; then
+        if ! decodeEnvValue "${BASH_REMATCH[3]}" migration_value; then
+          migration_problem="Invalid quoting for $migration_name at $migration_file:$migration_line_number. Correct the quoted value, then retry."
+          break
+        fi
+        if [[ "$migration_value" == *$'\n'* || "$migration_value" == *$'\r'* ]]; then
+          migration_problem="Unsupported multiline value for $migration_name at $migration_file:$migration_line_number. Use a single-line value, then retry."
+          break
+        fi
+        migration_found=true
+      fi
+    done < "$migration_file"
+    if [ -z "$migration_problem" ] && ! "$migration_found"; then
+      migration_problem="Missing $migration_name in $migration_file. Restore this setting's existing value, then retry."
     fi
-  done < "$migration_file"
-  "$migration_found" || return 1
+  fi
+  if [ -n "$migration_problem" ]; then
+    [ -z "$migration_problem_target" ] || printf -v "$migration_problem_target" '%s' "$migration_problem"
+    return 1
+  fi
   printf -v "$migration_target" '%s' "$migration_value"
 }
 
