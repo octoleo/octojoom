@@ -5379,7 +5379,7 @@ function joomlaDatabaseDiscoverClients() {
     for tool in mariadb mariadb-dump mysql mysqldump psql pg_dump pg_restore; do
       command -v "$tool" >/dev/null 2>&1 && printf "%s\n" "$tool"
     done
-    exit 0') || return 1
+    exit 0' </dev/null) || return 1
   if [ "$VDM_DB_ENGINE" = postgres ]; then
     for version in psql pg_dump; do printf '%s\n' "$tools" | grep -qxF "$version" || { printf 'Required database client %s is unavailable.\n' "$version" >&2; return 1; }; done
     VDM_DB_CLIENT=psql VDM_DB_DUMP=pg_dump VDM_DB_RESTORE=''
@@ -5387,7 +5387,7 @@ function joomlaDatabaseDiscoverClients() {
   elif printf '%s\n' "$tools" | grep -qxF mariadb && printf '%s\n' "$tools" | grep -qxF mariadb-dump; then
     VDM_DB_ENGINE=mariadb VDM_DB_CLIENT=mariadb VDM_DB_DUMP=mariadb-dump VDM_DB_RESTORE=''
   elif printf '%s\n' "$tools" | grep -qxF mysql && printf '%s\n' "$tools" | grep -qxF mysqldump; then
-    version=$("${inspection[@]}" -c 'exec mysql --version') || return 1
+    version=$("${inspection[@]}" -c 'exec mysql --version' </dev/null) || return 1
     if [[ "$version" == *MariaDB* ]]; then VDM_DB_ENGINE=mariadb; else VDM_DB_ENGINE=mysql; fi
     VDM_DB_CLIENT=mysql VDM_DB_DUMP=mysqldump VDM_DB_RESTORE=''
   else
@@ -5502,8 +5502,10 @@ function joomlaDatabaseClient() {
     fi
     trap 'exit 130' INT
     trap 'exit 143' TERM HUP
-    trap 'status=$?; [ -z "$credential" ] || joomlaDatabaseCompose exec -T --user 0 "$VDM_DB_SERVICE" rm -f -- "$credential" >/dev/null 2>&1 || status=1; [ -z "$errors" ] || rm -f -- "$errors"; exit "$status"' EXIT
-    credential=$(joomlaDatabaseCompose exec -T --user 0 "$VDM_DB_SERVICE" sh -c 'umask 077; mktemp /tmp/octojoom-database.XXXXXXXX') || exit 1
+    trap 'status=$?; [ -z "$credential" ] || joomlaDatabaseCompose exec -T --user 0 "$VDM_DB_SERVICE" rm -f -- "$credential" </dev/null >/dev/null 2>&1 || status=1; [ -z "$errors" ] || rm -f -- "$errors"; exit "$status"' EXIT
+    # Compose exec attaches stdin even with -T. Control commands must not
+    # consume the SQL stream before the actual native client receives it.
+    credential=$(joomlaDatabaseCompose exec -T --user 0 "$VDM_DB_SERVICE" sh -c 'umask 077; mktemp /tmp/octojoom-database.XXXXXXXX' </dev/null) || exit 1
     [[ "$credential" =~ ^/tmp/octojoom-database\.[A-Za-z0-9]+$ ]] || exit 1
     if ! joomlaDatabasePasswordContent | joomlaDatabaseCompose exec -T --user 0 "$VDM_DB_SERVICE" sh -c 'umask 077; cat > "$1" && chmod 600 "$1"' sh "$credential"; then exit 1; fi
     if [ "$VDM_DB_ENGINE" = postgres ]; then
@@ -5602,7 +5604,7 @@ function joomlaDatabaseDumpResolved() {
   local -a arguments=()
   actual=$(joomlaDatabaseTablesResolved) || return 1
   joomlaDatabaseCheckTables "$actual" "$@" || return $?
-  help=$(joomlaDatabaseCompose exec -T --user 0 "$VDM_DB_SERVICE" "$VDM_DB_DUMP" --help 2>/dev/null) || return 1
+  help=$(joomlaDatabaseCompose exec -T --user 0 "$VDM_DB_SERVICE" "$VDM_DB_DUMP" --help </dev/null 2>/dev/null) || return 1
   if [ "$VDM_DB_ENGINE" = postgres ]; then
     arguments=(--no-owner --no-privileges)
     if [ "${VDM_DB_FORMAT:-none}" = custom ]; then arguments+=(--format=custom); else arguments+=(--format=plain --clean --if-exists); fi
@@ -7070,21 +7072,41 @@ function joomlaBackupExtract() {
   chmod 600 "$destination/manifest.env" "$destination/project/checksums" "$destination/project/files.meta" || return 1
 }
 
+# Compose uses native Windows host paths; filesystem guards need Git Bash paths.
+# Check aliases before conversion so cygpath cannot conceal traversal. Container
+# targets and named volumes must never pass through this host-only helper.
+function joomlaBackupFilesystemPath() {
+  local path="$1"
+  if [ "${OS_NUMBER:-0}" = 3 ]; then path="${path//\\//}"; fi
+  [[ -n "$path" && "$path" != *[![:print:]]* ]] || return 1
+  case "$path/" in *'/../'*|*'/./'*|*'//'*) return 1;; esac
+  if [ "${OS_NUMBER:-0}" = 3 ] && command -v cygpath >/dev/null 2>&1; then
+    cygpath -au -- "$path"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
 # Capture only referenced site-local dependencies; unrelated or externally
 # supplied mounts are a precise full-backup limitation, never silently omitted.
 # shellcheck disable=SC2016
 function joomlaBackupDependencies() {
-  local site="$1" package="$2" config="$3" db="$4" project_root="$5" path type target service relative source actual
+  local site="$1" package="$2" config="$3" db="$4" project_root="$5" path type target service relative source actual site_root website_source
+  site_root=$(joomlaBackupFilesystemPath "$VDM_SITE_DIR") || return 1
+  project_root=$(joomlaBackupFilesystemPath "$project_root") || return 1
+  website_source="$VDM_SITE_MOUNT_SOURCE"
+  if [ "$VDM_SITE_MOUNT_TYPE" = bind ]; then website_source=$(joomlaBackupFilesystemPath "$website_source") || return 1; fi
   if grep -qE '^[[:space:]]*(include|extends|build|env_file):' "$VDM_SITE_COMPOSE"; then
     joomlaBackupError 'Complete backup requires in-file Compose services and literal environment references; include/extends/build/env_file must be resolved explicitly.'; return 1
   fi
   while IFS=$'\t' read -r service type source target; do
     [ -n "$service" ] || continue
-    if [ "$source" = "$VDM_SITE_MOUNT_SOURCE" ] && [ "$target" = "$VDM_SITE_MOUNT_TARGET" ]; then continue; fi
+    if [ "$type" = bind ]; then source=$(joomlaBackupFilesystemPath "$source") || return 1; fi
+    if [ "$source" = "$website_source" ] && [ "$target" = "$VDM_SITE_MOUNT_TARGET" ]; then continue; fi
     if [ "$service" = "$db" ] && [[ "$target" = /var/lib/mysql || "$target" = /var/lib/postgresql* ]]; then continue; fi
     [ "$type" = bind ] || { joomlaBackupError "Additional volume on $service cannot be captured as a complete project."; return 1; }
     case "$source" in
-      "$VDM_SITE_DIR/"*) relative="${source#"$VDM_SITE_DIR/"}"; path="$package/compose/$relative";;
+      "$site_root/"*) relative="${source#"$site_root/"}"; path="$package/compose/$relative";;
       "$project_root/"*) relative="${source#"$project_root/"}"; path="$package/project/extra/$relative";;
       *) joomlaBackupError "Required external mount is not site-local: $source"; return 1;;
     esac
@@ -7094,7 +7116,8 @@ function joomlaBackupDependencies() {
   done < <(printf '%s' "$config" | joomlaSiteJSON -r '.services|to_entries[]|.key as $s|.value.volumes[]?|[$s,.type,.source,.target]|@tsv')
   while IFS= read -r source; do
     [ -n "$source" ] || continue
-    case "$source" in "$VDM_SITE_DIR/"*) relative="${source#"$VDM_SITE_DIR/"}";; *) joomlaBackupError 'External Compose config/secret files cannot be captured automatically.'; return 1;; esac
+    source=$(joomlaBackupFilesystemPath "$source") || return 1
+    case "$source" in "$site_root/"*) relative="${source#"$site_root/"}";; *) joomlaBackupError 'External Compose config/secret files cannot be captured automatically.'; return 1;; esac
     joomlaBackupSafeMember "compose/$relative" && ! migrationPathHasSymlink "$source" && [ -f "$source" ] || return 1
     mkdir -p "$package/compose/$(dirname "$relative")" || return 1
     [ -e "$package/compose/$relative" ] || cp -p "$source" "$package/compose/$relative" || return 1
@@ -7105,7 +7128,11 @@ function joomlaBackupDependencies() {
   for target in HOOK_PRE_START HOOK_POST_START HOOK_PRE_STOP HOOK_POST_STOP; do
     migrationReadEnvValue "$VDM_SITE_ENV" "VDM_${VDM_SITE_ENV_KEY}_${target}" source || continue
     [ -n "$source" ] || continue
-    case "$source" in ./*) relative="${source#./}";; "$VDM_SITE_DIR/"*) relative="${source#"$VDM_SITE_DIR/"}";; *) joomlaBackupError 'A configured hook is outside the selected site directory.'; return 1;; esac
+    case "$source" in
+      ./*) relative="${source#./}";;
+      *) source=$(joomlaBackupFilesystemPath "$source") || return 1
+        case "$source" in "$site_root/"*) relative="${source#"$site_root/"}";; *) joomlaBackupError 'A configured hook is outside the selected site directory.'; return 1;; esac;;
+    esac
     joomlaBackupSafeMember "compose/$relative" && ! migrationPathHasSymlink "$VDM_SITE_DIR/$relative" && [ -f "$VDM_SITE_DIR/$relative" ] || return 1
     actual="$package/compose/$relative"
     mkdir -p "${actual%/*}" && cp -p "$VDM_SITE_DIR/$relative" "$actual" && chmod 600 "$actual" || return 1
@@ -7121,7 +7148,7 @@ function joomlaBackupCopyWebsite() {
   mkdir -p "$destination" || return 1
   case "$VDM_SITE_MOUNT_TYPE" in
     bind)
-      source="$VDM_SITE_MOUNT_SOURCE"
+      source=$(joomlaBackupFilesystemPath "$VDM_SITE_MOUNT_SOURCE") || return 1
       ! migrationPathHasSymlink "$source" && migrationValidateTree "$source" || return 1
       runPrivileged cp -a "$source/." "$destination/" || return $?
       ;;
@@ -7333,8 +7360,10 @@ function joomlaBackupVerifyApplication() {
 # shellcheck disable=SC2016
 function joomlaBackupPortableCompose() {
   local package="$1" key="$2" folder="$3" compose="$1/compose/docker-compose.yml" env="$1/compose/.env"
-  local model project_base service type source target read_only relative replacement mode property
+  local model project_base service type source target read_only relative replacement mode property compose_root project_root
   migrationReadEnvValue "$env" VDM_PROJECT_PATH project_base || return 1
+  compose_root=$(joomlaBackupFilesystemPath "$package/compose") || return 1
+  project_root=$(joomlaBackupFilesystemPath "$project_base/$folder") || return 1
   model=$(migrationRunCompose "$env" "$compose" --project-directory "$package/compose" config --format json) || return 1
   while IFS= read -r service; do
     [ -n "$service" ] || continue
@@ -7342,6 +7371,7 @@ function joomlaBackupPortableCompose() {
     printf '    volumes:\n' > "$property"
     while IFS=$'\t' read -r type source target read_only; do
       [ -n "$source" ] || continue
+      if [ "$type" = bind ]; then source=$(joomlaBackupFilesystemPath "$source") || return 1; fi
       [[ "$target" == /* && "$target" != *[\"\$\\]* && "$target" != *[![:print:]]* ]] || return 1
       case "$target" in
         /var/www/html)
@@ -7353,8 +7383,8 @@ function joomlaBackupPortableCompose() {
         *)
           [ "$type" = bind ] || { joomlaBackupError 'An additional named volume has no portable payload.'; return 1; }
           case "$source" in
-            "$package/compose/"*) relative="${source#"$package/compose/"}"; replacement="./$relative";;
-            "$project_base/$folder/"*) relative="${source#"$project_base/$folder/"}"; replacement='${VDM_PROJECT_PATH}/'"$key/$relative";;
+            "$compose_root/"*) relative="${source#"$compose_root/"}"; replacement="./$relative";;
+            "$project_root/"*) relative="${source#"$project_root/"}"; replacement='${VDM_PROJECT_PATH}/'"$key/$relative";;
             *) joomlaBackupError "An archived mount cannot be mapped into destination storage: $target"; return 1;;
           esac;;
       esac
@@ -7372,12 +7402,15 @@ function joomlaBackupPortableCompose() {
 # shellcheck disable=SC2016
 function joomlaBackupValidateDestination() {
   local model="$1" project="$2" directory="$3" require_fresh="${4:-true}" source type target volume path extra_root="${5:-}"
+  project=$(joomlaBackupFilesystemPath "$project") || return 1
+  directory=$(joomlaBackupFilesystemPath "$directory") || return 1
+  if [ -n "$extra_root" ]; then extra_root=$(joomlaBackupFilesystemPath "$extra_root") || return 1; fi
   while IFS=$'\t' read -r type source target; do
     [ -n "$type" ] || continue
     case "$type" in
       bind)
+        source=$(joomlaBackupFilesystemPath "$source") || return 1
         case "$source" in "$project/"*|"$directory/"*) ;; *) if [ -n "$extra_root" ] && [[ "$source" == "$extra_root/"* ]]; then ! migrationPathHasSymlink "$source" || return 1; else joomlaBackupError "Destination mount is outside this site: $target"; return 1; fi;; esac
-        case "$source/" in *'/../'*|*'/./'*|*'//'*) return 1;; esac
         ! migrationPathHasSymlink "$source" || return 1;;
       volume)
         volume=$(printf '%s' "$model" | joomlaSiteJSON -r --arg source "$source" '.volumes[$source].name//empty') || return 1
@@ -7388,6 +7421,7 @@ function joomlaBackupValidateDestination() {
   done < <(printf '%s' "$model" | joomlaSiteJSON -r '.services[].volumes[]?|[.type,.source,.target]|@tsv')
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    path=$(joomlaBackupFilesystemPath "$path") || return 1
     case "$path" in "$directory/"*) ;; *) joomlaBackupError 'Destination config/secret is outside this site.'; return 1;; esac
     ! migrationPathHasSymlink "$path" || return 1
   done < <(printf '%s' "$model" | joomlaSiteJSON -r '(.configs//{}),(.secrets//{})|.[]|.file//empty')
@@ -7473,7 +7507,9 @@ function joomlaBackupRestoreNew() {
     image="$VDM_SITE_IMAGE"
     case "$VDM_SITE_MOUNT_TYPE" in
       bind)
-        [ "$VDM_SITE_MOUNT_SOURCE" = "$project/joomla" ] || { joomlaBackupError 'Destination website bind escaped its reserved project.'; exit 1; }
+        path=$(joomlaBackupFilesystemPath "$VDM_SITE_MOUNT_SOURCE") || exit 1
+        target=$(joomlaBackupFilesystemPath "$project/joomla") || exit 1
+        [ "$path" = "$target" ] || { joomlaBackupError 'Destination website bind escaped its reserved project.'; exit 1; }
         runPrivileged cp -a "$package/project/joomla" "$project/joomla" || exit 1;;
       volume) joomlaBackupRestoreWebsiteVolume "$package/project/joomla" "$VDM_SITE_VOLUME_NAME" "$image" || exit $?;;
       *) exit 1;;

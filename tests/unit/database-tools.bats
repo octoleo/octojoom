@@ -38,7 +38,9 @@ JSON
 stub_native_client() {
   joomlaDatabaseCompose() {
     case "$*" in
-      *'mktemp /tmp/octojoom-database.'*) printf '/tmp/octojoom-database.test123\n';;
+      # Compose exec attaches stdin by default even when its command does not
+      # read it. Model that transport so control commands cannot drain SQL.
+      *'mktemp /tmp/octojoom-database.'*) cat >/dev/null; printf '/tmp/octojoom-database.test123\n';;
       *'cat > "$1"'*) cat > "$SANDBOX/credential";;
       *'rm -f -- /tmp/octojoom-database.'*) touch "$SANDBOX/credential-removed";;
       *)
@@ -194,13 +196,15 @@ YAML
 @test "PostgreSQL clients stop on errors and read piped SQL without user startup files" {
   stub_native_client
   VDM_DB_ENGINE=postgres VDM_DB_CLIENT=psql VDM_DB_PORT=5432 VDM_DB_NAME="name='not-connection-options'"
-  run joomlaDatabaseClient sql --single-transaction < /dev/null
+  printf 'CREATE TABLE marker(id INTEGER);\nINSERT INTO marker VALUES(1);\n' > "$SANDBOX/pgsql-input.sql"
+  run joomlaDatabaseClient sql --single-transaction < "$SANDBOX/pgsql-input.sql"
   assert_success
   assert_file_contains "$SANDBOX/client-arguments" --file=-
   assert_file_contains "$SANDBOX/client-arguments" --set=ON_ERROR_STOP=1
   assert_file_contains "$SANDBOX/client-arguments" --no-psqlrc
   assert_file_contains "$SANDBOX/client-arguments" --single-transaction
   refute_file_contains "$SANDBOX/client-arguments" "$VDM_DB_PASSWORD"
+  cmp "$SANDBOX/pgsql-input.sql" "$SANDBOX/client-input"
 }
 
 @test "export preserves an existing destination when the native dump fails" {
@@ -223,7 +227,8 @@ YAML
   local literal="$SANDBOX/quoted \"name\" \$(never-run).sql"
   run joomlaDatabaseExport example.test "$literal" none false
   assert_success
-  assert_equal "$(file_mode "$literal")" 600
+  # MSYS/NTFS does not expose POSIX permission bits; retain every data check.
+  if ! is_windows; then assert_equal "$(file_mode "$literal")" 600; fi
   assert_file_contains "$literal" 'CREATE TABLE marker'
 }
 

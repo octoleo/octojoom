@@ -315,3 +315,44 @@ HOOK
   run joomlaBackupValidateDestination "$model" "$SANDBOX/project" "$SANDBOX/site" true
   assert_failure
 }
+
+@test "Windows backup copies native website companion and config paths through filesystem guards" {
+  OS_NUMBER=3
+  cygpath() {
+    [ "$1" = -au ] && [ "$2" = -- ] || return 1
+    printf '%s\n' "${3#C:}"
+  }
+  local directory="$VDM_REPO_PATH/joomla/available/first.vdm.dev"
+  printf 'php override' > "$directory/custom.ini"
+  printf 'private config' > "$directory/app.conf"
+  MSYS2_ARG_CONV_EXCL='*' jq --arg directory "$directory" '
+    (.services[].volumes[].source) |= ("C:" + .) |
+    .services.joomlaalpha.volumes += [{type:"bind",source:("C:"+$directory+"/custom.ini"),target:"/usr/local/etc/php/conf.d/custom.ini",read_only:true}] |
+    .configs={app:{file:("C:"+$directory+"/app.conf")}}
+  ' "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
+  mv "$BACKUP_MODEL.next" "$BACKUP_MODEL"
+  joomlaBackupCreate first.vdm.dev "$BACKUP_DIRECTORY/native.tar.gz" full tar.gz false >/dev/null
+  mkdir "$SANDBOX/native-restore"
+  joomlaBackupExtract "$BACKUP_DIRECTORY/native.tar.gz" "$SANDBOX/native-restore"
+  assert_equal "$(cat "$SANDBOX/native-restore/compose/custom.ini")" 'php override'
+  assert_equal "$(cat "$SANDBOX/native-restore/compose/app.conf")" 'private config'
+  cmp "$VDM_PROJECT_PATH/alpha/joomla/upload.txt" "$SANDBOX/native-restore/project/joomla/upload.txt"
+}
+
+@test "Windows destination checks normalize host aliases without concealing traversal" {
+  OS_NUMBER=3
+  cygpath() {
+    [ "$1" = -au ] && [ "$2" = -- ] || return 1
+    printf '%s\n' "${3#C:}"
+  }
+  local model
+  model=$(MSYS2_ARG_CONV_EXCL='*' jq -n --arg project "C:$SANDBOX/project" --arg site "C:$SANDBOX/site" '{services:{web:{volumes:[{type:"bind",source:($project+"/joomla"),target:"/var/www/html"}]}},configs:{app:{file:($site+"/app.conf")}}}')
+  run joomlaBackupValidateDestination "$model" "$SANDBOX/project" "$SANDBOX/site" true
+  assert_success
+  model=$(printf '%s' "$model" | jq '.services.web.volumes[0].source += "/../outside"')
+  run joomlaBackupValidateDestination "$model" "$SANDBOX/project" "$SANDBOX/site" true
+  assert_failure
+  model=$(printf '%s' "$model" | jq '.services.web.volumes[0].source="C:/unrelated/private"')
+  run joomlaBackupValidateDestination "$model" "$SANDBOX/project" "$SANDBOX/site" true
+  assert_failure
+}
