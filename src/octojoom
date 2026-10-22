@@ -2756,7 +2756,7 @@ function joomlaSetupWebPrepare() {
     VDM_WEB_SERVICE+=$(getYMLine2 'volumes:')
     # Only the root data mount is shared with the HTTP server, read-only.
     local root_mount
-    root_mount=$(printf '%s\n' "$VDM_JOOMLA_VOLUMES_MOUNT" | sed -nE 's#^[[:space:]]*-[[:space:]]*"?([^"\n]*:/var/www/html)"?[[:space:]]*$#\1#p')
+    root_mount=$(printf '%s\n' "$VDM_JOOMLA_VOLUMES_MOUNT" | sed -nE 's#^[[:space:]]*-[[:space:]]*"?([^"]*:/var/www/html)"?[[:space:]]*$#\1#p')
     [ -n "$root_mount" ] && [[ "$root_mount" != *$'\n'* ]] || return 1
     VDM_WEB_SERVICE+=$(getYMLine3 "- \"${root_mount}:ro\"")
     VDM_WEB_SERVICE+=$(getYMLine3 '- "./nginx.conf:/etc/nginx/conf.d/default.conf:ro"')
@@ -5418,6 +5418,10 @@ function joomlaDatabaseContext() {
   for field in host name user password; do
     case "$field" in host) configured=JOOMLA_DB_HOST;; name) configured=JOOMLA_DB_NAME;; user) configured=JOOMLA_DB_USER;; password) configured=JOOMLA_DB_PASSWORD;; esac
     value=$(jq -r --arg key "$configured" '.[$key] // empty' <<< "$app") || return 1
+    # `compose config` emits reusable Compose data: every literal dollar is
+    # escaped as $$. Decode that serialization once, without interpolation or
+    # evaluation, before comparing it with the installed application's value.
+    value="${value//\$\$/\$}"
     if [ "$(jq -r '.installed' <<< "$installed")" = true ]; then
       host=$(jq -r --arg key "$field" '.[$key] // empty' <<< "$installed") || return 1
       if [ "$field" = host ]; then value="${value%:"$VDM_DB_PORT"}"; host="${host%:"$VDM_DB_PORT"}"; fi
@@ -7373,7 +7377,7 @@ function joomlaBackupValidateDestination() {
     case "$type" in
       bind)
         case "$source" in "$project/"*|"$directory/"*) ;; *) if [ -n "$extra_root" ] && [[ "$source" == "$extra_root/"* ]]; then ! migrationPathHasSymlink "$source" || return 1; else joomlaBackupError "Destination mount is outside this site: $target"; return 1; fi;; esac
-        case "/$source/" in *'/../'*|*'/./'*|*'//'*) return 1;; esac
+        case "$source/" in *'/../'*|*'/./'*|*'//'*) return 1;; esac
         ! migrationPathHasSymlink "$source" || return 1;;
       volume)
         volume=$(printf '%s' "$model" | joomlaSiteJSON -r --arg source "$source" '.volumes[$source].name//empty') || return 1
@@ -7643,6 +7647,10 @@ function joomlaBackupRestoreCurrent() {
       dbname=$(printf '%s' "$config" | joomlaSiteJSON -r --arg s "$VDM_SITE_SERVICE" '.services[$s].environment.JOOMLA_DB_NAME//empty') || exit 1
       dbuser=$(printf '%s' "$config" | joomlaSiteJSON -r --arg s "$VDM_SITE_SERVICE" '.services[$s].environment.JOOMLA_DB_USER//empty') || exit 1
       dbpass=$(printf '%s' "$config" | joomlaSiteJSON -r --arg s "$VDM_SITE_SERVICE" '.services[$s].environment.JOOMLA_DB_PASSWORD//empty') || exit 1
+      # Compose serializes each literal dollar as $$; JConfig needs its runtime
+      # value. Decode once without evaluating variables or shell expressions.
+      host="${host//\$\$/\$}" dbname="${dbname//\$\$/\$}"
+      dbuser="${dbuser//\$\$/\$}" dbpass="${dbpass//\$\$/\$}"
       [ -n "$host" ] && [ -n "$dbname" ] && [ -n "$dbuser" ] && [ -n "$dbpass" ] || exit 1
     fi
     joomlaDatabasePatchConfiguration "$config_file" "$work/patched.php" "$host" "$driver" "$dbname" "$dbuser" "$dbpass" "$prefix" || exit 1
@@ -7680,12 +7688,13 @@ function joomlaBackupResolveOptions() {
     env="$VDM_SITE_ENV"
     getJoomlaComposeIdentity "$VDM_SITE_COMPOSE" && key="$VDM_SRC_ENV_KEY"
   fi
-  for suffix in PATH FORMAT SCOPE TIMESTAMP OVERWRITE RETENTION; do
+  for suffix in PATH FORMAT SCOPE TIMESTAMP TIMESTAMP_PATTERN OVERWRITE RETENTION; do
     case "$suffix" in
       PATH) name=VDM_DESTINATION; fallback="${VDM_DEFAULT_BACKUP_PATH:-$VDM_HOME_PATH/Backups}";;
       FORMAT) name=VDM_FORMAT; fallback="${VDM_DEFAULT_BACKUP_FORMAT:-tar.gz}";;
       SCOPE) name=VDM_SCOPE; fallback="${VDM_DEFAULT_BACKUP_SCOPE:-full}";;
       TIMESTAMP) name=VDM_TIMESTAMP; fallback="${VDM_DEFAULT_BACKUP_TIMESTAMP:-true}";;
+      TIMESTAMP_PATTERN) name=VDM_TIMESTAMP_PATTERN; fallback="${VDM_DEFAULT_BACKUP_TIMESTAMP_PATTERN:-%Y%m%dT%H%M%SZ}";;
       OVERWRITE) name=VDM_OVERWRITE; fallback="${VDM_DEFAULT_BACKUP_OVERWRITE:-false}";;
       RETENTION) name=VDM_RETENTION; fallback="${VDM_DEFAULT_BACKUP_RETENTION:-0}";;
     esac
@@ -7923,7 +7932,7 @@ function joomla__TRuST__backup() {
 function showJoomlaBackups() {
   local site="$1" action choice rows created scope format size label archive output status
   local VDM_CONTAINER="$1" VDM_ACTION VDM_FILE='' VDM_INPUT_FILE='' VDM_CONFIRM=false VDM_PRE_BACKUP=false VDM_TARGET
-  local VDM_DESTINATION VDM_FORMAT VDM_SCOPE VDM_TIMESTAMP VDM_OVERWRITE VDM_RETENTION VDM_LABEL=''
+  local VDM_DESTINATION VDM_FORMAT VDM_SCOPE VDM_TIMESTAMP VDM_TIMESTAMP_PATTERN VDM_OVERWRITE VDM_RETENTION VDM_LABEL=''
   local VDM_ALL=false VDM_BACKUP_OPTIONS_READY=false
   local -a choices=() VDM_SITES=()
   while true; do
@@ -13502,6 +13511,7 @@ Database: --task database --action change|export|import|tables|console|execute
 Backups: --task backup --action create|list|verify|restore|delete|cleanup
        --scope full|website|database|files --format tar.gz|zip --label TEXT
        --destination DIRECTORY --timestamp yes|no --overwrite yes|no
+       --timestamp-pattern UTC_DATE_PATTERN (default %Y%m%dT%H%M%SZ)
        --file ARCHIVE --target new|current; new needs destination identity;
        current requires --pre-backup yes --confirm yes. --retention COUNT
        keeps the newest COUNT backups; zero disables cleanup. Deletion and
@@ -15033,6 +15043,7 @@ function cliOptionVariable() {
     --data-mode) echo VDM_DATA_MODE;; --compression) echo VDM_COMPRESSION;;
     --destination) echo VDM_DESTINATION;; --format) echo VDM_FORMAT;; --scope) echo VDM_SCOPE;;
     --label) echo VDM_LABEL;; --timestamp) echo VDM_TIMESTAMP;; --overwrite) echo VDM_OVERWRITE;;
+    --timestamp-pattern) echo VDM_TIMESTAMP_PATTERN;;
     --retention) echo VDM_RETENTION;; --target) echo VDM_TARGET;; --delete-source) echo VDM_DELETE_SOURCE;;
     --table) echo VDM_TABLES;; --import-mode) echo VDM_IMPORT_MODE;;
     --progress) echo VDM_PROGRESS;; --pre-backup) echo VDM_PRE_BACKUP;; --confirm) echo VDM_CONFIRM;;
@@ -15376,7 +15387,7 @@ function cliComplete() {
     --enable|--secure|--cloudflare|--customize|--auto-install|--persistence|--db-persistence|--save-defaults|--mailcatcher|--phpmyadmin|--php-settings) printf '%s\n' true false;;
     --timestamp|--overwrite|--delete-source|--progress|--pre-backup|--confirm) printf '%s\n' yes no;;
     --file|--input-json|--repo-path|--project-path|--ssh-dir|--ssh-keys|--mount-base|--destination|--archive) compgen -f -- "$current";;
-    --table|--database-image|--db-image|--label|--retention) :;;
+    --table|--database-image|--db-image|--label|--retention|--timestamp-pattern) :;;
     --image-tag)
       # Cached catalogues contain public tag names only. Tab never refreshes them.
       for path in "${VDM_SRC_PATH}/cache/"php-tags-*; do [ ! -f "$path" ] || cat "$path"; done;;

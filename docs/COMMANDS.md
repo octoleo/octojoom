@@ -212,6 +212,9 @@ Backups accept `--scope full|website|database|files` and `--format tar.gz|zip`.
 Website scope includes both website files and SQL; files scope explicitly omits
 the database. `--label`, `--destination`, `--timestamp yes|no`, and
 `--overwrite yes|no` select the saved/default naming and publication choices.
+`--timestamp-pattern` overrides the saved UTC `date` pattern, whose default is
+`%Y%m%dT%H%M%SZ`. Its output must contain only letters, digits, dots, underscores,
+or hyphens, so the timestamp cannot create directories or change archive paths.
 `--retention COUNT` keeps the newest COUNT selected-site backups; zero disables
 retention deletion. Cleanup and delete require `--confirm yes`.
 

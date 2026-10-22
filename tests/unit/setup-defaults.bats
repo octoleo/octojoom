@@ -307,6 +307,12 @@ saved_nginx_php_setup() {
 
 @test "setup: bulk saved nginx defaults validate and mount the shared PHP override for FPM" {
   saved_nginx_php_setup
+  # BSD sed treats backslash-n inside a bracket expression as a literal n.
+  # Exercise that portable behavior on Linux too, without relying on random keys.
+  sed() { POSIXLY_CORRECT=1 command sed "$@"; }
+  getRandomName() {
+    if [ -d "${VDM_REPO_PATH}/joomla/available/website1.example.test" ]; then printf 'second\n'; else printf 'firstn\n'; fi
+  }
   VDM_TASK=bulk
   VDM_SUBDOMAIN=website
   VDM_NUMBER_CONTAINERS=2
@@ -316,4 +322,6 @@ saved_nginx_php_setup() {
   assert_file_contains "$SANDBOX/php-validation" 'custom/joomla:fpm-build /opt/fpm/conf.d/zz-octojoom.ini'
   assert_file_contains "${VDM_REPO_PATH}/joomla/available/website1.example.test/docker-compose.yml" '/bulk/php.ini:/opt/fpm/conf.d/zz-octojoom.ini'
   assert_file_contains "${VDM_REPO_PATH}/joomla/available/website2.example.test/docker-compose.yml" '/bulk/php.ini:/opt/fpm/conf.d/zz-octojoom.ini'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/website1.example.test/docker-compose.yml" 'firstn_web:/var/www/html:ro'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/website2.example.test/docker-compose.yml" 'second_web:/var/www/html:ro'
 }

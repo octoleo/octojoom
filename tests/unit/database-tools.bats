@@ -63,7 +63,8 @@ stub_native_client() {
 
 @test "database disagreement reports actionable selected paths without exposing credentials" {
   context_fixture
-  sed -i 's/private-secret/different-private-secret/' "$SANDBOX/config.json"
+  jq '.password="different-private-secret"' "$SANDBOX/config.json" > "$SANDBOX/config.next"
+  mv "$SANDBOX/config.next" "$SANDBOX/config.json"
   run joomlaDatabaseContext example.test
   assert_failure
   assert_output_contains 'Database password differs'
@@ -72,10 +73,71 @@ stub_native_client() {
   [[ "$output" != *private-secret* ]]
 }
 
+@test "database context decodes Compose dollar serialization exactly once for installed and prepared sites" {
+  local secret encoded
+  for secret in 'integration-Db-$literal#value' 'two-$$literal-${braces}' 'quotes"and\slashes-$end' '$$$$'; do
+    context_fixture
+    encoded="${secret//\$/\$\$}"
+    jq --arg value "$encoded" '.services.web.environment.JOOMLA_DB_PASSWORD=$value' "$SANDBOX/model.json" > "$SANDBOX/model.next"
+    mv "$SANDBOX/model.next" "$SANDBOX/model.json"
+    jq --arg value "$secret" '.installed=true | .password=$value' "$SANDBOX/config.json" > "$SANDBOX/config.next"
+    mv "$SANDBOX/config.next" "$SANDBOX/config.json"
+    joomlaDatabaseContext example.test
+    assert_equal "$VDM_DB_PASSWORD" "$secret"
+    printf '{"installed":false}\n' > "$SANDBOX/config.json"
+    joomlaDatabaseContext example.test
+    assert_equal "$VDM_DB_PASSWORD" "$secret"
+  done
+}
+
+@test "database context agrees with real Compose serialization of literal credentials" {
+  [ -n "${REAL_DOCKER:-}" ] || skip "Docker Compose is not installed"
+  context_fixture
+  local secret='integration-Db-$literal-$$pair-${braces}#value'
+  mkdir -p "$SANDBOX/site"
+  formatEnvAssignment "VDM_EXAMPLE_DB_PASS=\"$secret\"" > "$SANDBOX/shared.env"
+  cat > "$SANDBOX/site/docker-compose.yml" <<'YAML'
+services:
+  web:
+    image: joomla:latest
+    environment:
+      JOOMLA_DB_HOST: site-database:3306
+      JOOMLA_DB_NAME: joomla
+      JOOMLA_DB_USER: application
+      JOOMLA_DB_PASSWORD: ${VDM_EXAMPLE_DB_PASS}
+  database:
+    image: mariadb:latest
+    container_name: site-database
+YAML
+  jq --arg value "$secret" '.password=$value' "$SANDBOX/config.json" > "$SANDBOX/config.next"
+  mv "$SANDBOX/config.next" "$SANDBOX/config.json"
+  joomlaDatabaseCompose() {
+    docker compose --env-file "$SANDBOX/shared.env" --file "$SANDBOX/site/docker-compose.yml" "$@"
+  }
+  joomlaDatabaseContext example.test
+  assert_equal "$VDM_DB_PASSWORD" "$secret"
+  assert_equal "$VDM_DB_SERVICE" database
+}
+
+@test "dollar decoding does not permit a different installed password" {
+  context_fixture
+  jq '.services.web.environment.JOOMLA_DB_PASSWORD="selected-$$literal"' "$SANDBOX/model.json" > "$SANDBOX/model.next"
+  mv "$SANDBOX/model.next" "$SANDBOX/model.json"
+  jq '.password="different-$literal"' "$SANDBOX/config.json" > "$SANDBOX/config.next"
+  mv "$SANDBOX/config.next" "$SANDBOX/config.json"
+  run joomlaDatabaseContext example.test
+  assert_failure
+  assert_output_contains 'Database password differs'
+  [[ "$output" != *literal* ]]
+  refute_file_exists "$SANDBOX/discovered"
+}
+
 @test "database context refuses an unrelated or external service" {
   context_fixture
-  sed -i 's/site-database/external-database/g' "$SANDBOX/config.json"
-  sed -i 's/site-database:3306/external-database:3306/g' "$SANDBOX/model.json"
+  jq '.host="external-database"' "$SANDBOX/config.json" > "$SANDBOX/config.next"
+  mv "$SANDBOX/config.next" "$SANDBOX/config.json"
+  jq '.services.web.environment.JOOMLA_DB_HOST="external-database:3306"' "$SANDBOX/model.json" > "$SANDBOX/model.next"
+  mv "$SANDBOX/model.next" "$SANDBOX/model.json"
   run joomlaDatabaseContext example.test
   assert_failure
   assert_output_contains 'does not identify one database service'

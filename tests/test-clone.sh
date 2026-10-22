@@ -50,7 +50,7 @@ extract_function() {
 }
 
 for fn in getYMLine1 getYMLine2 getYMLine3 joomlaContainer useSudo runPrivileged getDialogHeight \
-  getJoomlaEnvSuffixes getEscapedRegex getJoomlaComposeIdentity rewriteJoomlaComposeIdentity \
+  getJoomlaEnvSuffixes getEscapedRegex getJoomlaComposeEnvKey getJoomlaComposeIdentity rewriteJoomlaComposeIdentity \
   getJoomlaConfigValue cloneJoomlaConfiguration cloneContainerEnvVariables \
   hasContainerEnvVariables cloneContainerEnvFile removeContainerEnvVariables \
   isJoomlaHostInUse; do

@@ -292,20 +292,24 @@ SH
   make_joomla_container beta BETA second
   writeEnvVariable "$VDM_REPO_PATH/joomla/.env" "VDM_ALPHA_BACKUP_PATH=$SANDBOX/first backups" true
   writeEnvVariable "$VDM_REPO_PATH/joomla/.env" 'VDM_ALPHA_BACKUP_FORMAT=zip' true
+  writeEnvVariable "$VDM_REPO_PATH/joomla/.env" 'VDM_ALPHA_BACKUP_TIMESTAMP_PATTERN=%Y-%m' true
   writeEnvVariable "$VDM_REPO_PATH/joomla/.env" "VDM_BETA_BACKUP_PATH=$SANDBOX/second backups" true
   writeEnvVariable "$VDM_REPO_PATH/joomla/.env" 'VDM_BETA_BACKUP_FORMAT=tar.gz' true
+  writeEnvVariable "$VDM_REPO_PATH/joomla/.env" 'VDM_BETA_BACKUP_TIMESTAMP_PATTERN=%Y%m%d' true
   writeEnvVariable "$VDM_REPO_PATH/joomla/.env" 'VDM_BETA_BACKUP_OVERWRITE=true' true
   OCTOJOOM_CLI_KEYS=()
   VDM_DESTINATION=stale VDM_FORMAT=invalid VDM_TIMESTAMP=stale
   joomlaBackupResolveOptions first.vdm.dev
   assert_equal "$VDM_DESTINATION" "$SANDBOX/first backups"
   assert_equal "$VDM_FORMAT" zip
+  assert_equal "$VDM_TIMESTAMP_PATTERN" '%Y-%m'
   joomlaBackupResolveOptions second.vdm.dev
   assert_equal "$VDM_DESTINATION" "$SANDBOX/second backups"
   assert_equal "$VDM_FORMAT" tar.gz
+  assert_equal "$VDM_TIMESTAMP_PATTERN" '%Y%m%d'
   assert_equal "$VDM_OVERWRITE" true
   parseCLI --type joomla --task backup --action create --container second.vdm.dev \
-    --destination "$SANDBOX/explicit" --format zip --scope files --timestamp no --overwrite no --retention 0
+    --destination "$SANDBOX/explicit" --format zip --scope files --timestamp no --overwrite no --retention 0 --timestamp-pattern '%Y'
   joomlaBackupResolveOptions second.vdm.dev
   assert_equal "$VDM_DESTINATION" "$SANDBOX/explicit"
   assert_equal "$VDM_FORMAT" zip
@@ -313,6 +317,26 @@ SH
   assert_equal "$VDM_TIMESTAMP" false
   assert_equal "$VDM_OVERWRITE" false
   assert_equal "$VDM_RETENTION" 0
+  assert_equal "$VDM_TIMESTAMP_PATTERN" '%Y'
+}
+
+@test "backup timestamp patterns preserve JSON input and reject path or control output" {
+  command -v jq >/dev/null || skip 'JSON transport needs jq'
+  make_joomla_container alpha ALPHA first
+  printf '%s\n' '{"type":"joomla","task":"backup","action":"create","container":"first.vdm.dev","options":{"timestamp":true,"timestamp-pattern":"%Y"}}' > "$SANDBOX/request.json"
+  parseCLI --input-json "$SANDBOX/request.json"
+  joomlaBackupResolveOptions first.vdm.dev
+  assert_equal "$VDM_TIMESTAMP_PATTERN" '%Y'
+  run joomlaBackupFilename first.vdm.dev
+  assert_success
+  assert_equal "$output" "$VDM_HOME_PATH/Backups/first.vdm.dev-full-$(date -u +%Y).tar.gz"
+  VDM_TIMESTAMP_PATTERN='%Y/%m'
+  run joomlaBackupFilename first.vdm.dev
+  assert_status 17
+  VDM_TIMESTAMP_PATTERN='%Y%n%m'
+  run joomlaBackupFilename first.vdm.dev
+  assert_status 17
+  [ ! -s "$STUB_DIR/commands.log" ]
 }
 
 @test "backup batch JSON does not reuse a successful archive in a later failed site result" {

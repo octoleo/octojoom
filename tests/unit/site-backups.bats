@@ -279,3 +279,39 @@ HOOK
   assert_status 17
   [ -f "$BACKUP_DIRECTORY/owned.tar.gz" ]
 }
+
+@test "full current restore writes literal dollar credentials from serialized Compose exactly once" {
+  local secret='literal-$single-$$pair-${braces}' serialized compose
+  serialized="${secret//\$/\$\$}"
+  jq --arg value "$serialized" '.services.joomlaalpha.environment.JOOMLA_DB_PASSWORD=$value' "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
+  mv "$BACKUP_MODEL.next" "$BACKUP_MODEL"
+  writeEnvVariable "$VDM_REPO_PATH/joomla/.env" "VDM_ALPHA_DB_PASS=\"$secret\"" true
+  joomlaBackupCreate first.vdm.dev "$BACKUP_DIRECTORY/literal.tar.gz" full tar.gz false >/dev/null
+  compose="$VDM_REPO_PATH/joomla/available/first.vdm.dev/docker-compose.yml"
+  joomlaDatabaseCopyConfiguration() { cp "$VDM_PROJECT_PATH/alpha/joomla/configuration.php" "$2"; }
+  migrationRunCompose() { cat "$BACKUP_MODEL"; }
+  siteValidateCompose() { return 0; }
+  joomlaDatabaseStageStorage() {
+    VDM_DATABASE_STAGE_COMPOSE="$4/docker-compose.yml" VDM_DATABASE_STAGE_ENV="$4/.env"
+    cp "$compose" "$VDM_DATABASE_STAGE_COMPOSE"
+    cp "$VDM_REPO_PATH/joomla/available/first.vdm.dev/.env" "$VDM_DATABASE_STAGE_ENV"
+  }
+  joomlaDatabaseImport() { return 0; }
+  joomlaBackupVerifyApplication() { return 0; }
+  run joomlaBackupRestoreCurrent first.vdm.dev "$BACKUP_DIRECTORY/literal.tar.gz"
+  assert_success
+  local restored=("$VDM_REPO_PATH/joomla/available/first.vdm.dev/"restore-data-*/configuration.php)
+  assert_equal "${#restored[@]}" 1
+  assert_equal "$(getJoomlaConfigValue "${restored[0]}" password)" "$secret"
+  refute_output_contains "$secret"
+}
+
+@test "destination validation accepts contained absolute binds and rejects path aliases" {
+  local model
+  model=$(MSYS2_ARG_CONV_EXCL='*' jq -n --arg source "$SANDBOX/project/joomla" '{services:{web:{volumes:[{type:"bind",source:$source,target:"/var/www/html"}]}}}')
+  run joomlaBackupValidateDestination "$model" "$SANDBOX/project" "$SANDBOX/site" true
+  assert_success
+  model=$(MSYS2_ARG_CONV_EXCL='*' jq -n --arg source "$SANDBOX/project//joomla" '{services:{web:{volumes:[{type:"bind",source:$source,target:"/var/www/html"}]}}}')
+  run joomlaBackupValidateDestination "$model" "$SANDBOX/project" "$SANDBOX/site" true
+  assert_failure
+}
