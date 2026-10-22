@@ -5404,7 +5404,8 @@ function joomlaDatabaseContext() {
   export -n VDM_DB_PASSWORD
   local site="$1" model installed app field value configured host candidates driver
   command -v jq >/dev/null || { printf 'Database tools require jq.\n' >&2; return 1; }
-  readJoomlaSiteFacts "$site" || return 1
+  # Read-only Compose exec probes must not consume pending console input.
+  readJoomlaSiteFacts "$site" </dev/null || return 1
   [ -n "$VDM_SITE_SERVICE" ] || { printf 'The Joomla service is ambiguous.\n' >&2; return 1; }
   VDM_DB_SITE="$site" VDM_DB_COMPOSE="$VDM_SITE_COMPOSE" VDM_DB_ENV="$VDM_SITE_ENV" VDM_DB_PROJECT_DIR="$VDM_SITE_DIR"
   VDM_DB_NAME='' VDM_DB_USER='' VDM_DB_PASSWORD='' VDM_DB_HOST='' VDM_DB_PORT='' VDM_DB_PREFIX='' VDM_DB_SERVICE=''

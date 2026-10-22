@@ -21,6 +21,7 @@ stub_context() {
 
 context_fixture() {
   readJoomlaSiteFacts() {
+    if [ "${FACTS_DRAIN_STDIN:-false}" = true ]; then cat >/dev/null; fi
     VDM_SITE_SERVICE=web VDM_SITE_DIR="$SANDBOX/site" VDM_SITE_COMPOSE="$SANDBOX/site/docker-compose.yml"
     VDM_SITE_ENV="$SANDBOX/shared.env" VDM_SITE_DOCROOT=/var/www/html VDM_SITE_ENV_KEY=EXAMPLE
   }
@@ -73,6 +74,19 @@ stub_native_client() {
   assert_output_contains "$SANDBOX/shared.env"
   refute_file_exists "$SANDBOX/discovered"
   [[ "$output" != *private-secret* ]]
+}
+
+@test "readonly database context inspection leaves pending console input untouched" {
+  context_fixture
+  FACTS_DRAIN_STDIN=true
+  printf 'SELECT 1;\nquit\n' > "$SANDBOX/console-input"
+  inspect_then_read() {
+    joomlaDatabaseContext example.test || return $?
+    cat > "$SANDBOX/console-remaining"
+  }
+  run inspect_then_read < "$SANDBOX/console-input"
+  assert_success
+  cmp "$SANDBOX/console-input" "$SANDBOX/console-remaining"
 }
 
 @test "database context decodes Compose dollar serialization exactly once for installed and prepared sites" {
