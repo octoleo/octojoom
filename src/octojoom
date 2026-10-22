@@ -7006,9 +7006,9 @@ function showJoomla() {
     isExpert && menu_options+=("bulk" "Bulk deploy")
     # Quit Octoleo Program
     menu_options+=("quit" "Quit ${PROGRAM_NAME}")
-    # Let whiptail fit the dialog and visible rows to the entries and terminal.
+    # Fit the height and visible rows automatically; keep the standard width.
     CHOICE=$(
-      whiptail --menu "Make your selection" 0 0 0 \
+      whiptail --menu "Make your selection" 0 112 0 \
         --title "Joomla | ${PROGRAM_NAME} v${_V}" --fb \
         --backtitle "${BACK_TITLE}" --nocancel --notags \
         "${menu_options[@]}" 3>&2 2>&1 1>&3
