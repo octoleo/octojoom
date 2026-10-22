@@ -23,26 +23,6 @@
 
 ---
 
-## Command and site-management guides
-
-The original menu and `--type`/`--task` commands share their operations. Octojoom
-remains one Bash executable using the existing Compose files, environment
-settings, and persistent project directories.
-
-| Guide | What it covers |
-| --- | --- |
-| [1. Commands and completion](docs/COMMANDS.md) | Noninteractive commands, optional JSON requests/results, Bash completion, and menu-to-command coverage |
-| [2. Website information](docs/SITE-INFORMATION.md) | Select a site, inspect its configuration and running state, and manage it from one screen or command |
-| [3. Setup and defaults](docs/SETUP-DEFAULTS.md) | Guided single and bulk setup, optional customization, and explicit saved defaults |
-| [4. Configuration alignment](docs/CONFIGURATION-ALIGNMENT.md) | Inspect and align existing sites without changing their intended Compose behavior |
-| [5. PHP runtime](docs/PHP-RUNTIME.md) | Select compatible published PHP images and change settings for one site |
-| [6. Webserver and document root](docs/WEBSERVER-DOCUMENT-ROOT.md) | Switch Apache/Nginx and select or explicitly move a site's document root |
-
-See [test coverage and validation limits](tests/README.md) for the portable suite
-and real Docker acceptance checks. Clone and complete project migration
-currently require the original Apache document-root layout; they refuse nested
-roots and Nginx/FPM sites before changing source data or services.
-
 ## 📚 Table of Contents
 
 1. [Overview](#-overview)
@@ -54,6 +34,7 @@ roots and Nginx/FPM sites before changing source data or services.
    - [Windows (MSYS2 / Cygwin / Git Bash)](#windows-msys2--cygwin--git-bash)
    - [Other Linux Distributions (Fedora / Arch / Manjaro / openSUSE)](#other-linux-distributions-fedora--arch--manjaro--opensuse)
 5. [Usage](#-usage)
+   - [Command and site-management guides](#command-and-site-management-guides)
    - [Complete Joomla project migration](#complete-joomla-project-migration)
    - [Help Menu (from the script)](#help-menu-from-the-script)
 6. [Updating Octojoom](#-updating-octojoom)
@@ -238,6 +219,26 @@ Run without arguments to use the interactive menu, or pass CLI flags for automat
 ```bash
 octojoom -h
 ```
+
+### Command and site-management guides
+
+The original menu and `--type`/`--task` commands share their operations. Octojoom
+remains one Bash executable using the existing Compose files, environment
+settings, and persistent project directories.
+
+| Guide | What it covers |
+| --- | --- |
+| [1. Commands and completion](docs/COMMANDS.md) | Noninteractive commands, optional JSON requests/results, Bash completion, and menu-to-command coverage |
+| [2. Website information](docs/SITE-INFORMATION.md) | Select a site, inspect its configuration and running state, and manage it from one screen or command |
+| [3. Setup and defaults](docs/SETUP-DEFAULTS.md) | Guided single and bulk setup, optional customization, and explicit saved defaults |
+| [4. Configuration alignment](docs/CONFIGURATION-ALIGNMENT.md) | Inspect and align existing sites without changing their intended Compose behavior |
+| [5. PHP runtime](docs/PHP-RUNTIME.md) | Select compatible published PHP images and change settings for one site |
+| [6. Webserver and document root](docs/WEBSERVER-DOCUMENT-ROOT.md) | Switch Apache/Nginx and select or explicitly move a site's document root |
+
+See [test coverage and validation limits](tests/README.md) for the portable suite
+and real Docker acceptance checks. Clone and complete project migration
+currently require the original Apache document-root layout; they refuse nested
+roots and Nginx/FPM sites before changing source data or services.
 
 ### Complete Joomla project migration
 
