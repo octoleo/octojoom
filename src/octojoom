@@ -7097,7 +7097,7 @@ function joomlaBackupFilesystemPath() {
 function joomlaBackupDependencies() {
   local site="$1" package="$2" config="$3" db="$4" project_root="$5" path type target service relative source actual site_root website_source
   site_root=$(joomlaBackupFilesystemPath "$VDM_SITE_DIR") || return 1
-  project_root=$(joomlaBackupFilesystemPath "$project_root") || return 1
+  if [ -n "$project_root" ]; then project_root=$(joomlaBackupFilesystemPath "$project_root") || return 1; fi
   website_source="$VDM_SITE_MOUNT_SOURCE"
   if [ "$VDM_SITE_MOUNT_TYPE" = bind ]; then website_source=$(joomlaBackupFilesystemPath "$website_source") || return 1; fi
   if grep -qE '^[[:space:]]*(include|extends|build|env_file):' "$VDM_SITE_COMPOSE"; then
@@ -7111,8 +7111,10 @@ function joomlaBackupDependencies() {
     [ "$type" = bind ] || { joomlaBackupError "Additional volume on $service cannot be captured as a complete project."; return 1; }
     case "$source" in
       "$site_root/"*) relative="${source#"$site_root/"}"; path="$package/compose/$relative";;
-      "$project_root/"*) relative="${source#"$project_root/"}"; path="$package/project/extra/$relative";;
-      *) joomlaBackupError "Required external mount is not site-local: $source"; return 1;;
+      *)
+        if [ -n "$project_root" ] && [[ "$source" == "$project_root/"* ]]; then
+          relative="${source#"$project_root/"}"; path="$package/project/extra/$relative"
+        else joomlaBackupError "Required external mount is not site-local: $source"; return 1; fi;;
     esac
     joomlaBackupSafeMember "${path#"$package/"}" && ! migrationPathHasSymlink "$source" && [ -e "$source" ] || return 1
     if [ -d "$source" ]; then migrationValidateTree "$source" || return 1; else [ -f "$source" ] || return 1; fi
@@ -7249,9 +7251,9 @@ function joomlaBackupCreate() {
     cp "$VDM_SITE_COMPOSE" "$package/compose/docker-compose.yml" || exit 1
     siteWriteScopedEnv "$VDM_SITE_COMPOSE" "$VDM_SITE_ENV" "$env_key" "$package/compose/.env" || exit 1
     if [ "$scope" = full ] || [ "$scope" = website ]; then
-      local project_base
-      migrationReadEnvValue "$VDM_SITE_ENV" VDM_PROJECT_PATH project_base || exit 1
-      joomlaBackupDependencies "$site" "$package" "$config" "$database" "$project_base/$project" || exit 1
+      local project_base project_root=''
+      if migrationReadEnvValue "$VDM_SITE_ENV" VDM_PROJECT_PATH project_base; then project_root="$project_base/$project"; fi
+      joomlaBackupDependencies "$site" "$package" "$config" "$database" "$project_root" || exit 1
     fi
     running=$(joomlaSiteCompose "$site" ps --status running --services 2>/dev/null) || exit $?
     paused=true
@@ -7364,7 +7366,8 @@ function joomlaBackupVerifyApplication() {
 # shellcheck disable=SC2016
 function joomlaBackupPortableCompose() {
   local package="$1" key="$2" folder="$3" compose="$1/compose/docker-compose.yml" env="$1/compose/.env"
-  local model project_base service type source target read_only relative replacement mode property compose_root project_root=''
+  local model project_base service type source target read_only relative replacement mode property compose_root project_root='' volume_definitions
+  local -a retained_volumes=()
   compose_root=$(joomlaBackupFilesystemPath "$package/compose") || return 1
   # Named-only deployments do not reference VDM_PROJECT_PATH, so their scoped
   # environment correctly omits it. Only project-local dependency binds need it.
@@ -7382,10 +7385,10 @@ function joomlaBackupPortableCompose() {
       [[ "$target" == /* && "$target" != *[\"\$\\]* && "$target" != *[![:print:]]* ]] || return 1
       case "$target" in
         /var/www/html)
-          if [ "$type" = volume ] && [ "$source" = "${key,,}_web" ]; then replacement="$source"
+          if [ "$type" = volume ] && [ "$source" = "${key,,}_web" ]; then replacement="$source"; retained_volumes+=("$source")
           else replacement='${VDM_PROJECT_PATH}/'"$key/joomla"; fi;;
         /var/lib/mysql|/var/lib/postgresql|/var/lib/postgresql/data)
-          if [ "$type" = volume ] && [ "$source" = "${key,,}_db" ]; then replacement="$source"
+          if [ "$type" = volume ] && [ "$source" = "${key,,}_db" ]; then replacement="$source"; retained_volumes+=("$source")
           else replacement='${VDM_PROJECT_PATH}/'"$key/db"; fi;;
         *)
           [ "$type" = bind ] || { joomlaBackupError 'An additional named volume has no portable payload.'; return 1; }
@@ -7403,6 +7406,25 @@ function joomlaBackupPortableCompose() {
     done < <(printf '%s' "$model" | joomlaSiteJSON -r --arg service "$service" '.services[$service].volumes[]?|[.type,.source,.target,(.read_only//false)]|@tsv')
     joomlaSetServiceProperty "$compose" "$package/next.yml" "$service" volumes "$property" && mv "$package/next.yml" "$compose" || return 1
   done < <(printf '%s' "$model" | joomlaSiteJSON -r '.services|to_entries[]|select((.value.volumes//[]|length)>0)|.key')
+  # A later compose down -v also removes declared but unused volumes. Drop old
+  # managed storage declarations from this private destination copy, and let
+  # retained canonical volumes acquire the destination project's own names.
+  volume_definitions=$(joomlaSiteJSON -cn '$ARGS.positional|unique' --args "${retained_volumes[@]}") || return 1
+  volume_definitions=$(printf '%s' "$model" | joomlaSiteJSON -c --argjson retained "$volume_definitions" '
+    (.volumes//{}) | with_entries(select(.key as $key | $retained | index($key))) |
+    if any(.[]; (.external//false) or ((.driver//"local")!="local") or ((.driver_opts//{})|length>0))
+    then error("Independent restore cannot realign external or custom-driver volume storage")
+    else with_entries(.value |= ((.//{}) | del(.name,.external))) end') || return 1
+  awk '
+    /^volumes:/ {section=1; count++; next}
+    /^[^[:space:]#]/ {section=0}
+    !section {print}
+    END {if(count>1) exit 1}
+  ' "$compose" > "$package/next.yml" || return 1
+  printf '%s' "$volume_definitions" | joomlaSiteJSON -r '
+    if length==0 then empty else "volumes:", (to_entries[] | "  \(.key): \(.value|tojson)") end
+  ' >> "$package/next.yml" || return 1
+  mv "$package/next.yml" "$compose" || return 1
   rm -f "$package/volumes.property"
 }
 
@@ -7582,7 +7604,12 @@ function joomlaBackupRestoreCurrent() {
     current_key="$VDM_SITE_KEY" current_env="$VDM_SITE_ENV_KEY"
     getJoomlaComposeIdentity "$VDM_SITE_COMPOSE" || exit 1
     current_project="${VDM_SRC_PROJECT_FOLDER:-$current_key}"
-    migrationReadEnvValue "$VDM_SITE_ENV" VDM_PROJECT_PATH current_project_base || exit 1
+    # Managed absolute/named mounts need no project-path interpolation. Use the
+    # configured destination root when their complete scoped ENV omits it.
+    if ! migrationReadEnvValue "$VDM_SITE_ENV" VDM_PROJECT_PATH current_project_base; then
+      current_project_base="${VDM_PROJECT_PATH:-}"
+      [ -n "$current_project_base" ] || { joomlaBackupError 'The configured project root is unavailable.'; exit 1; }
+    fi
     original_dir="$VDM_SITE_DIR" original_env="$VDM_SITE_ENV" original_compose="$VDM_SITE_COMPOSE"
     package=$(mktemp -d "${TMPDIR:-/tmp}/octojoom-restore-payload.XXXXXX") || exit 1
     work=$(mktemp -d "$original_dir/.restore.XXXXXX") || exit 1

@@ -406,6 +406,7 @@ request database --container "$SOURCE" --action change --engine "$ENGINE" --data
   --domain "$DOMAIN" --sub-domain dbclone --enable true --secure false
 assert_application "$clone_target"
 assert_state "$clone_target"
+[ "$(database_version "$clone_target")" = "$TARGET_VERSION" ]
 joomlaSiteCompose "$SOURCE" stop >&2
 assert_application "$clone_target"
 assert_state "$clone_target"
@@ -420,6 +421,9 @@ request database --container "$VOLUME_SITE" --action change --engine "$ENGINE" -
   --data-mode fresh --confirm true --pre-backup true
 joomlaDatabaseContext "$VOLUME_SITE"
 [ -z "$(joomlaDatabaseTables "$VOLUME_SITE")" ]
+[ "$(database_version "$VOLUME_SITE")" = "$TARGET_VERSION" ]
+fresh_new_volume=$(docker inspect "$VDM_DB_SERVICE" | jq -er '.[0].Mounts[] | select(.Destination|startswith("/var/lib/")) | .Name' | head -n 1)
+[ "$fresh_new_volume" != "$fresh_old_volume" ]
 [ "$(docker inspect --format '{{.State.Running}}' "joomla$VOLUME_KEY")" = false ]
 docker volume inspect "$fresh_old_volume" >/dev/null
 

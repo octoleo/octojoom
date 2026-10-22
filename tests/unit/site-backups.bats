@@ -373,6 +373,7 @@ HOOK
       *) return 0;;
     esac
   }
+  siteWriteScopedEnv "$compose" "$VDM_REPO_PATH/joomla/.env" ALPHA "${compose%/*}/.env"
   joomlaBackupCreate first.vdm.dev "$BACKUP_DIRECTORY/named.tar.gz" full tar.gz false >/dev/null
   local package="$SANDBOX/named-restore"
   mkdir "$package"
@@ -381,6 +382,8 @@ HOOK
   assert_failure
   migrationRunCompose() { cat "$BACKUP_MODEL"; }
   joomlaBackupPortableCompose "$package" alpha alpha
+  run grep -q 'actual_alpha_web\|actual_alpha_db' "$package/compose/docker-compose.yml"
+  assert_failure
   rewriteJoomlaComposeIdentity "$package/compose/docker-compose.yml" "$package/compose/renamed.yml" alpha beta ALPHA BETA first second vdm.dev vdm.dev alpha
   grep -q 'beta_web:/var/www/html' "$package/compose/renamed.yml"
   grep -q 'beta_db:/var/lib/mysql' "$package/compose/renamed.yml"
@@ -391,4 +394,79 @@ HOOK
   run joomlaBackupPortableCompose "$package" alpha alpha
   assert_failure
   assert_output_contains 'cannot be mapped into destination storage'
+  jq 'del(.services.joomlaalpha.volumes[1]) | .volumes.alpha_web.driver_opts={device:"/source/website"}' < "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
+  mv "$BACKUP_MODEL.next" "$BACKUP_MODEL"
+  run joomlaBackupPortableCompose "$package" alpha alpha
+  assert_failure
+  assert_output_contains 'cannot realign external or custom-driver volume storage'
+}
+
+@test "independent restore removes unused managed source volume declarations" {
+  local package="$SANDBOX/managed-volume-package" compose
+  mkdir -p "$package/compose"
+  compose="$package/compose/docker-compose.yml"
+  cp "$VDM_REPO_PATH/joomla/available/first.vdm.dev/docker-compose.yml" "$compose"
+  cp "$VDM_REPO_PATH/joomla/.env" "$package/compose/.env"
+  joomlaBackupReplaceMount "$compose" "$compose.next" mariadbalpha /var/lib/mysql octojoom_alpha_db_saved
+  mv "$compose.next" "$compose"
+  printf '\nvolumes:\n  octojoom_alpha_db_saved:\n    name: octojoom_alpha_db_saved\n  octojoom_alpha_db_older:\n    name: octojoom_alpha_db_older\n' >> "$compose"
+  jq '.services.mariadbalpha.volumes[0]={type:"volume",source:"octojoom_alpha_db_saved",target:"/var/lib/mysql"} |
+    .volumes={octojoom_alpha_db_saved:{name:"octojoom_alpha_db_saved"},octojoom_alpha_db_older:{name:"octojoom_alpha_db_older"}}' < "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
+  mv "$BACKUP_MODEL.next" "$BACKUP_MODEL"
+  migrationRunCompose() { cat "$BACKUP_MODEL"; }
+  joomlaBackupPortableCompose "$package" alpha alpha
+  rewriteJoomlaComposeIdentity "$compose" "$package/compose/renamed.yml" alpha beta ALPHA BETA first second vdm.dev vdm.dev alpha
+  assert_file_contains "$package/compose/renamed.yml" '/beta/db:/var/lib/mysql'
+  run grep -q 'octojoom_alpha_db\|^volumes:' "$package/compose/renamed.yml"
+  assert_failure
+}
+
+@test "managed absolute website and named database support scoped backups and another current restore" {
+  local directory="$VDM_REPO_PATH/joomla/available/first.vdm.dev" scope
+  local compose="$directory/docker-compose.yml"
+  BACKUP_ABSOLUTE_ROOT="$directory/restore-data-existing"
+  cp -a "$VDM_PROJECT_PATH/alpha/joomla" "$BACKUP_ABSOLUTE_ROOT"
+  joomlaBackupReplaceMount "$compose" "$compose.next" joomlaalpha /var/www/html "$BACKUP_ABSOLUTE_ROOT"
+  mv "$compose.next" "$compose"
+  joomlaBackupReplaceMount "$compose" "$compose.next" mariadbalpha /var/lib/mysql alpha_candidate_db
+  mv "$compose.next" "$compose"
+  printf '\nvolumes:\n  alpha_candidate_db:\n    name: alpha_candidate_db\n' >> "$compose"
+  MSYS2_ARG_CONV_EXCL='*' jq --arg root "$BACKUP_ABSOLUTE_ROOT" '
+    .services.joomlaalpha.volumes[0].source=$root |
+    .services.mariadbalpha.volumes[0]={type:"volume",source:"alpha_candidate_db",target:"/var/lib/mysql"} |
+    .volumes={alpha_candidate_db:{name:"alpha_candidate_db"}}
+  ' < "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
+  mv "$BACKUP_MODEL.next" "$BACKUP_MODEL"
+  siteWriteScopedEnv "$compose" "$VDM_REPO_PATH/joomla/.env" ALPHA "$directory/.env"
+  run grep -q '^VDM_PROJECT_PATH=' "$directory/.env"
+  assert_failure
+  for scope in full website; do
+    joomlaBackupCreate first.vdm.dev "$BACKUP_DIRECTORY/managed-$scope.tar.gz" "$scope" tar.gz false >/dev/null
+  done
+  mkdir "$SANDBOX/managed-extracted"
+  joomlaBackupExtract "$BACKUP_DIRECTORY/managed-full.tar.gz" "$SANDBOX/managed-extracted"
+  cmp "$BACKUP_ABSOLUTE_ROOT/upload.txt" "$SANDBOX/managed-extracted/project/joomla/upload.txt"
+  jq '.services.joomlaalpha.volumes += [{type:"bind",source:"/unrelated/private",target:"/extra"}]' < "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
+  mv "$BACKUP_MODEL.next" "$BACKUP_MODEL"
+  run joomlaBackupCreate first.vdm.dev "$BACKUP_DIRECTORY/managed-external.tar.gz" full tar.gz false
+  assert_failure
+  assert_output_contains 'Required external mount is not site-local'
+  jq 'del(.services.joomlaalpha.volumes[1])' < "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
+  mv "$BACKUP_MODEL.next" "$BACKUP_MODEL"
+  joomlaDatabaseCopyConfiguration() { cp "$BACKUP_ABSOLUTE_ROOT/configuration.php" "$2"; }
+  migrationRunCompose() { cat "$BACKUP_MODEL"; }
+  siteValidateCompose() { return 0; }
+  joomlaDatabaseStageStorage() {
+    VDM_DATABASE_STAGE_COMPOSE="$4/docker-compose.yml" VDM_DATABASE_STAGE_ENV="$4/.env"
+    cp "$compose" "$VDM_DATABASE_STAGE_COMPOSE"
+    cp "$VDM_REPO_PATH/joomla/available/first.vdm.dev/.env" "$VDM_DATABASE_STAGE_ENV"
+  }
+  joomlaDatabaseImport() { return 0; }
+  joomlaBackupVerifyApplication() { return 0; }
+  run joomlaBackupRestoreCurrent first.vdm.dev "$BACKUP_DIRECTORY/managed-full.tar.gz"
+  assert_success
+  local restored=("$directory/"restore-data-*/configuration.php)
+  assert_equal "${#restored[@]}" 2
+  [ -f "$BACKUP_ABSOLUTE_ROOT/upload.txt" ]
+  [ ! -e "$directory/.octojoom-change.lock" ]
 }
