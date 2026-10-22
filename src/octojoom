@@ -5480,7 +5480,7 @@ function showConfigurationAlignment() {
   fi
 }
 
-# Read-only startup hint, no Docker, cache, settings writes or implicit apply.
+# Read-only menu hint, no Docker, cache, settings writes or implicit apply.
 function configurationAlignmentCount() {
   local site plan count=0
   for site in "${VDM_REPO_PATH}/joomla/available/"*; do
@@ -6950,62 +6950,65 @@ function showJoomlaWebsiteInformation() {
 
 # show Joomla menu
 function showJoomla() {
-  local CHOICE
+  local CHOICE pending_alignment alignment_label
   while true; do
     # menu for dynamic addition
     local menu_options=()
-    # our counter
-    local i=3
     # load the back menu
     menu_options+=("back" "<-- Return to the main menu.")
     # setup new container
     menu_options+=("setup" "Setup new container")
     # Inspect original available sites without requiring enrollment.
-    menu_options+=("information" "Website Information") && i=$((i + 1))
+    menu_options+=("information" "Website Information")
     # enable existing container
     hasDirectories 'joomla/available' &&
-      menu_options+=("enable" "Enable existing container") && i=$((i + 1))
+      menu_options+=("enable" "Enable existing container")
     # disable enabled container
     hasDirectories 'joomla/enabled' &&
-      menu_options+=("disable" "Disable enabled container") && i=$((i + 1))
+      menu_options+=("disable" "Disable enabled container")
     # take all enabled containers down
     hasDirectories 'joomla/enabled' &&
-      menu_options+=("down" "Take all enabled containers down") && i=$((i + 1))
+      menu_options+=("down" "Take all enabled containers down")
     # pull up all enabled containers
     hasDirectories 'joomla/enabled' &&
-      menu_options+=("up" "Pull up all enabled containers") && i=$((i + 1))
+      menu_options+=("up" "Pull up all enabled containers")
     # edit available container
     isExpert && hasDirectories 'joomla/available' &&
-      menu_options+=("edit" "Edit available container") && i=$((i + 1))
+      menu_options+=("edit" "Edit available container")
     # fix permissions
     hasDirectories '' "${VDM_PROJECT_PATH}" &&
-      menu_options+=("fix" "Fix permissions of folders and files of a container") &&
-      i=$((i + 1))
+      menu_options+=("fix" "Fix permissions of folders and files of a container")
     # clone the project files (persistent volume) only
     hasDirectories '' "${VDM_PROJECT_PATH}" &&
-      menu_options+=("clonefiles" "Clone project files") && i=$((i + 1))
+      menu_options+=("clonefiles" "Clone project files")
     # clone a complete container (docker-compose.yml, .env values and project files)
     hasDirectories 'joomla/available' && hasDirectories '' "${VDM_PROJECT_PATH}" &&
-      menu_options+=("clone" "Clone a container") && i=$((i + 1))
+      menu_options+=("clone" "Clone a container")
     # delete a container
     hasDirectories 'joomla/available' &&
-      menu_options+=("delete" "Delete a container") && i=$((i + 1))
+      menu_options+=("delete" "Delete a container")
     # reset a volume
     isExpert && hasDirectories 'joomla/available' &&
-      menu_options+=("reset" "Reset a volume") && i=$((i + 1))
+      menu_options+=("reset" "Reset a volume")
     # Get Joomla env details
     isExpert && hasDirectories 'joomla/available' &&
-      menu_options+=("joomla_env" "Open Joomla .env Details") && i=$((i + 1))
+      menu_options+=("joomla_env" "Open Joomla .env Details")
     # align existing configurations without regenerating customized Compose
-    hasDirectories 'joomla/available' &&
-      menu_options+=("align" "Update existing configurations") && i=$((i + 1))
+    if hasDirectories 'joomla/available'; then
+      pending_alignment=$(configurationAlignmentCount)
+      alignment_label="Update existing configurations"
+      if [ "$pending_alignment" -gt 0 ]; then
+        alignment_label+=" (pending: $pending_alignment)"
+      fi
+      menu_options+=("align" "$alignment_label")
+    fi
     # bulk deploy
-    isExpert && menu_options+=("bulk" "Bulk deploy") && i=$((i + 1))
+    isExpert && menu_options+=("bulk" "Bulk deploy")
     # Quit Octoleo Program
     menu_options+=("quit" "Quit ${PROGRAM_NAME}")
-    # get the selection
+    # Let whiptail fit the dialog and visible rows to the entries and terminal.
     CHOICE=$(
-      whiptail --menu "Make your selection" 23 112 $i \
+      whiptail --menu "Make your selection" 0 0 0 \
         --title "Joomla | ${PROGRAM_NAME} v${_V}" --fb \
         --backtitle "${BACK_TITLE}" --nocancel --notags \
         "${menu_options[@]}" 3>&2 2>&1 1>&3
@@ -7488,8 +7491,7 @@ function migrateMenu() {
 
 # MAIN MENU
 function mainMenu() {
-  local CHOICE pending_alignment
-  pending_alignment=$(configurationAlignmentCount)
+  local CHOICE
 
   # get the selection
   while true; do
@@ -7499,11 +7501,6 @@ function mainMenu() {
     local i=6
     # Joomla containers
     menu_options+=("joomla" "Joomla Containers")
-    # Startup detection is read-only; applying remains an explicit action.
-    if [ "$pending_alignment" -gt 0 ]; then
-      menu_options+=("align" "Update existing configurations ($pending_alignment websites)")
-      i=$((i + 1))
-    fi
     # Openssh containers
     menu_options+=("openssh" "Openssh Containers")
     # Traefik container
@@ -7536,10 +7533,6 @@ function mainMenu() {
     case $CHOICE in
     "joomla")
       showJoomla
-      ;;
-    "align")
-      showConfigurationAlignment
-      pending_alignment=$(configurationAlignmentCount)
       ;;
     "openssh")
       showOpenssh

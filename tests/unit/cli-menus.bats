@@ -266,3 +266,43 @@ record_calls() {
   assert_equal "$(cat "${SANDBOX}/calls")" "joomla__TRuST__setup"
   assert_answers_used
 }
+
+@test "showJoomla: pending update count refreshes after applying existing configurations" {
+  make_joomla_container jcb JCB jcb
+  # Called by the application functions loaded through the test harness.
+  # shellcheck disable=SC2317
+  whiptail() {
+    if [ "$1" = --menu ]; then
+      printf '%s\n' "$@" >>"${SANDBOX}/menu-arguments"
+    fi
+    command whiptail "$@"
+  }
+  answers align yes back
+  run showJoomla
+  assert_success
+  assert_answers_used
+  assert_file_contains "${SANDBOX}/menu-arguments" 'Update existing configurations (pending: 1)'
+  # The reopened menu no longer shows a pending count after the actual update.
+  [ "$(grep -cxF 'Update existing configurations' "${SANDBOX}/menu-arguments")" -eq 1 ]
+  assert_file_exists "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/.env"
+  assert_equal "$(configurationAlignmentCount)" 0
+}
+
+@test "mainMenu: existing-site updates belong to the Joomla menu" {
+  make_joomla_container jcb JCB jcb
+  # Called by the application functions loaded through the test harness.
+  # shellcheck disable=SC2317
+  whiptail() {
+    printf '%s\n' "$@" >"${SANDBOX}/menu-arguments"
+    command whiptail "$@"
+  }
+  answers '<esc>'
+  run mainMenu
+  assert_status 255
+  assert_answers_used
+  assert_file_contains "${SANDBOX}/menu-arguments" 'Joomla Containers'
+  run grep -xF align "${SANDBOX}/menu-arguments"
+  assert_failure
+  # Merely opening a menu must not apply pending configuration updates.
+  refute_file_exists "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/.env"
+}

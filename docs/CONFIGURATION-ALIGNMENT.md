@@ -2,8 +2,9 @@
 
 Use **Joomla Containers → Update existing configurations** for all discovered
 websites, or the alignment action in **Website Information** for the selected
-website. The normal main menu offers the same action with a pending-site count.
-Detection is local and read-only; it never starts Docker or changes a site.
+website. The Joomla menu entry shows the number of websites with pending
+configuration updates and refreshes after each action. Detection is local and
+read-only; it never starts Docker or changes a site.
 
 ```bash
 octojoom --type joomla --task align --all --action inspect --non-interactive
