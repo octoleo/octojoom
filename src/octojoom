@@ -6768,7 +6768,7 @@ function joomlaTLSPatchConfiguration() {
     /^[[:space:]]*public[[:space:]]+\$live_site[[:space:]]*=/ {
       if ($0 !~ /^[[:space:]]*public[[:space:]]+\$live_site[[:space:]]*=[[:space:]]*\047[^\047]*\047;[[:space:]]*$/ || ++live>1) exit 1
       value=$0; sub(/^[^\047]*\047/,"",value); sub(/\047;[[:space:]]*$/,"",value)
-      if (value!="") {sub(/^https?:\/\/[^/]+/,url,value); print "\tpublic $live_site = \047" value "\047;"} else print
+      if (value!="") {sub(/^https?:\/\/[^\/]+/,url,value); print "\tpublic $live_site = \047" value "\047;"} else print
       next
     }
     mode=="http" && /^[[:space:]]*public[[:space:]]+\$force_ssl[[:space:]]*=/ {
