@@ -145,3 +145,41 @@ jobs:
         env:
           OCTOJOOM_DB_TEST_ENGINE: ${{ matrix.engine }}
         run: timeout --signal=TERM --kill-after=30s 42m bash tests/integration/database-backups.sh
+
+  local-trust:
+    name: Local certificate trust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mkcert (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y mkcert libnss3-tools
+      - name: Install mkcert and Bash (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install mkcert nss bash
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+      - name: Install mkcert (Windows)
+        if: runner.os == 'Windows'
+        run: choco install mkcert -y --no-progress
+      - name: Verify native host trust and certificate hostnames
+        run: bash tests/integration/local-trust.sh
+
+  local-https:
+    name: Docker local HTTPS integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mkcert
+        run: sudo apt-get update && sudo apt-get install -y mkcert libnss3-tools
+      - name: Verify trusted Joomla HTTPS and connection changes
+        run: timeout 17m bash tests/integration/local-https.sh

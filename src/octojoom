@@ -692,7 +692,7 @@ ${VDM_REMOVE_CLOUDFLARE_SERVICE}      - --certificatesresolvers.cfresolver.acme.
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - "\${VDM_PROJECT_PATH}/traefik/logs:/logs"
       - "\${VDM_PROJECT_PATH}/traefik/errors:/errors"
-      - "\${VDM_PROJECT_PATH}/traefik/conf:/conf"
+      - "\${VDM_PROJECT_PATH}/traefik/conf:/conf:ro"
 ${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/acme.json:/acme.json"
 ${VDM_REMOVE_SECURE}      - "\${VDM_PROJECT_PATH}/traefik/acme-cloudflare.json:/acme-cloudflare.json"
 
@@ -978,6 +978,7 @@ function joomlaSetupDatabaseChoices() {
 # Explicit request presence is retained by the CLI until setup has finished.
 function joomlaSetupDefaults() {
   local persistence_default=true setting variable
+  [ "${VDM_TLS_CHOICE+x}" = x ] || VDM_TLS_CHOICE="${VDM_DEFAULT_JOOMLA_TLS_CHOICE:-default}"
   [ "${VDM_TASK:-}" != bulk ] || persistence_default=false
   if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || ! isExpert; then
     [ -n "${VDM_J_REPO:-}" ] || VDM_J_REPO="${VDM_DEFAULT_JOOMLA_IMAGE_SOURCE:-}"
@@ -1073,6 +1074,7 @@ function joomlaSetupPreflight() {
 function joomlaValidateSetupOptions() {
   local name item
   local -a items=()
+  case "${VDM_TLS_CHOICE:-default}" in default|http|local|acme|cloudflare) ;; *) printf 'Invalid --tls-mode.\n' >&2; return 17;; esac
   joomlaSetupDatabaseValidate || return $?
   joomlaSetupDatabaseCredentials || return $?
   if [ "${VDM_J_DB_PREFIX+x}" = x ]; then joomlaValidateDatabasePrefix "$VDM_J_DB_PREFIX" || return $?; fi
@@ -1216,6 +1218,7 @@ function joomlaSetupCustomization() {
     if isFunc joomlaSetupPHPChoices; then joomlaSetupPHPChoices || return $?; fi
     if isFunc joomlaSetupWebChoices; then joomlaSetupWebChoices || return $?; fi
     joomlaSetupDatabaseChoices || return $?
+    joomlaSetupTLSChoice || return $?
     if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ]; then
       if joomlaSetupBoolean VDM_SAVE_DEFAULTS 'Use these image and runtime choices as defaults for future websites?' 'Save Site Defaults' defaultno; then :
       else status=$?; [ "$status" -eq 1 ] || return "$status"; fi
@@ -1230,7 +1233,11 @@ function joomlaSetupCustomization() {
       VDM_J_REPO="${image%:*}" VDM_JV="${image##*:}"
     fi
   fi
-  joomlaSetupDatabaseValidate
+  joomlaSetupDatabaseValidate || return $?
+  if [ "${VDM_TLS_CHOICE:-default}" != default ]; then
+    joomlaTLSProxy "$VDM_TLS_CHOICE" || return $?
+    if [ "$VDM_TLS_CHOICE" = local ]; then joomlaTLSPrerequisites || return $?; fi
+  fi
 }
 
 # Remember the entrypoint belonging to a selected source, including a custom
@@ -1255,7 +1262,7 @@ function joomlaImageEntrypoint() {
 
 function joomlaSaveSetupChoices() {
   local suffix variable
-  for suffix in IMAGE_SOURCE IMAGE_TAG AUTO_INSTALL WEBSERVER DOCROOT PHPMYADMIN DB_ENGINE DB_IMAGE; do
+  for suffix in IMAGE_SOURCE IMAGE_TAG AUTO_INSTALL WEBSERVER DOCROOT PHPMYADMIN DB_ENGINE DB_IMAGE TLS_CHOICE; do
     case "$suffix" in IMAGE_SOURCE) variable=VDM_J_REPO ;; IMAGE_TAG) variable=VDM_JV ;; AUTO_INSTALL) variable=VDM_AUTO_INSTALL ;; *) variable="VDM_${suffix}" ;; esac
     [ "${!variable+x}" != x ] || setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_${suffix}=\"${!variable}\"" || return $?
   done
@@ -1263,7 +1270,7 @@ function joomlaSaveSetupChoices() {
 
 function joomlaSaveSetupDefaults() {
   local suffix variable
-  for suffix in IMAGE_SOURCE IMAGE_TAG AUTO_INSTALL WEBSERVER DOCROOT PHPMYADMIN DB_ENGINE DB_IMAGE; do
+  for suffix in IMAGE_SOURCE IMAGE_TAG AUTO_INSTALL WEBSERVER DOCROOT PHPMYADMIN DB_ENGINE DB_IMAGE TLS_CHOICE; do
     case "$suffix" in IMAGE_SOURCE) variable=VDM_J_REPO ;; IMAGE_TAG) variable=VDM_JV ;; AUTO_INSTALL) variable=VDM_AUTO_INSTALL ;; *) variable="VDM_${suffix}" ;; esac
     [ "${!variable+x}" != x ] || setUniqueEnvVariable "VDM_DEFAULT_JOOMLA_${suffix}=\"${!variable}\"" || return $?
   done
@@ -1379,7 +1386,13 @@ function joomla__TRuST__setup() {
   # One optional fork extends the original questions only with implemented choices.
   joomlaSetupCustomization || return $?
   # check if we have secure switch set
-  setSecureState || return $?
+  if [ "${VDM_TLS_CHOICE:-default}" = default ]; then
+    setSecureState || return $?
+  else
+    # Explicit site choices must not rewrite the host-wide ACME preference.
+    local VDM_SECURE=false VDM_SECURE_CLOUDFLARE=false
+    case "$VDM_TLS_CHOICE" in acme) VDM_SECURE=true;; cloudflare) VDM_SECURE=true; VDM_SECURE_CLOUDFLARE=true;; esac
+  fi
   # setup letsencrypt stuff
   VDM_JOOMLA_SECURE_LABELS=''
   VDM_PHPMYADMIN_SECURE_LABELS=''
@@ -1388,7 +1401,7 @@ function joomla__TRuST__setup() {
   VDM_HTTP_SCHEME="https://"
   VDM_CERT_RESOLVER="vdmresolver"
   if $VDM_SECURE; then
-    setSecureCloudflareState "joomla" || return $?
+    if [ "${VDM_TLS_CHOICE:-default}" = default ]; then setSecureCloudflareState "joomla" || return $?; fi
     if $VDM_SECURE_CLOUDFLARE; then
       VDM_CERT_RESOLVER="cfresolver"
     fi
@@ -1643,6 +1656,12 @@ function joomla__TRuST__setup() {
   if isFunc joomlaSetupWebPrepare; then joomlaSetupWebPrepare || return $?; fi
   joomlaSaveSetupChoices || return $?
   joomlaPublishSetup || return $?
+  if [ "${VDM_TLS_CHOICE:-default}" != default ]; then
+    (VDM_TLS_NEW_SITE=true; joomlaTLSSet "${VDM_SUBDOMAIN}.${VDM_DOMAIN}" "$VDM_TLS_CHOICE") || {
+      printf 'The new site configuration is saved but not enabled. Retry Connection / SSL for %s.%s.\n' "$VDM_SUBDOMAIN" "$VDM_DOMAIN" >&2
+      return 1
+    }
+  fi
   # Update hosts only after the complete configuration was validated and saved.
   updateHostFile || return $?
   if [ "${VDM_PHPMYADMIN:-true}" = true ]; then updateHostFile "${VDM_SUBDOMAIN}db" || return $?; fi
@@ -5795,11 +5814,12 @@ function joomlaDatabaseConfigurationFile() {
   else return 1; fi
   [[ "$source" != *,* && "$VDM_SITE_MOUNT_TARGET" != *,* ]] || return 1
   mount="type=$VDM_SITE_MOUNT_TYPE,source=$source,target=$VDM_SITE_MOUNT_TARGET"
-  if [ "$operation" = read ]; then
+  if [ "$operation" = read ] || [ "$operation" = read-optional ]; then
     MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker run --rm --network none --read-only --user 0 \
       --mount "$mount,readonly" --entrypoint php "$VDM_SITE_IMAGE" -r '
-        $file=$argv[1]; if(is_link($file)||!is_file($file)){exit(1);} readfile($file);
-      ' -- "$VDM_SITE_DOCROOT/configuration.php" > "$file" || return 1
+        $file=$argv[1]; if($argv[2]==="read-optional" && !file_exists($file) && !is_link($file)){exit(0);}
+        if(is_link($file)||!is_file($file)){exit(1);} if(readfile($file)===false){exit(1);}
+      ' -- "$VDM_SITE_DOCROOT/configuration.php" "$operation" > "$file" || return 1
     chmod 600 "$file"
   elif [ "$operation" = write ]; then
     [ -f "$file" ] && [ ! -L "$file" ] || return 1
@@ -6473,6 +6493,443 @@ function joomla__TRuST__database() {
   )
 }
 
+######################################## LOCAL HTTPS
+
+# TLS choices are per website. Never change VDM_SECURE (the host ACME default).
+function joomlaTLSModes() {
+  printf '%s\n' http local acme cloudflare
+}
+
+# Inspect Compose's resolved labels, but edit the original file rather than
+# serializing its resolved model (which would expand secrets and lose comments).
+# shellcheck disable=SC2016
+function joomlaTLSDiscover() {
+  local site="$1" model rows main key service router host mode
+  resolveJoomlaSite "$site" || return 1
+  model=$(joomlaSiteCompose "$site" config --format json) || return 1
+  rows=$(printf '%s' "$model" | joomlaSiteJSON -r '
+    .services | to_entries[] | .key as $service | (.value.labels // {}) as $labels |
+    $labels | to_entries[] | select(.key | test("^traefik[.]http[.]routers[.][^.]+[.]rule$")) |
+    select(.value | test("^Host\\(`[-A-Za-z0-9.]+`\\)$")) |
+    .key[21:-5] as $router | .value[6:-2] as $host |
+    [$service,$router,$host,
+      (if $labels["traefik.http.routers."+$router+".tls.certresolver"] == "cfresolver" then "cloudflare"
+       elif ($labels["traefik.http.routers."+$router+".tls.certresolver"] // "") != "" then "acme"
+       elif $labels["traefik.http.routers."+$router+".tls"] == "true" then "local" else "http" end)] | @tsv') || return 1
+  main=$(printf '%s\n' "$rows" | awk -F '\t' -v host="$site" '$3==host && $2 ~ /^joomla[A-Za-z]+$/ {print}')
+  if [ "$(printf '%s\n' "$main" | wc -l | tr -d ' ')" != 1 ] || [ -z "$main" ]; then
+    printf 'Cannot identify one Joomla Host router for %s; inspect its Traefik labels.\n' "$site" >&2; return 1;
+  fi
+  IFS=$'\t' read -r service router host mode <<< "$main"
+  key="${router#joomla}"
+  VDM_TLS_MODE="$mode" VDM_TLS_ROUTES=''
+  while IFS=$'\t' read -r service router host mode; do
+    case "$router" in "joomla$key"|"phpmyadmin$key"|"mailcatcher$key")
+      isValidDomain "$host" || return 1
+      VDM_TLS_ROUTES+="$service"$'\t'"$router"$'\t'"$host"$'\n';;
+    esac
+  done <<< "$rows"
+  # Reject duplicate router identities rather than changing both services.
+  [ "$(printf '%s' "$VDM_TLS_ROUTES" | cut -f2 | sort | uniq -d | wc -l | tr -d ' ')" = 0 ] || return 1
+}
+
+# Require the existing proxy's watched bind directory and published entrypoint.
+# A remote Docker daemon cannot consume this host's certificate files.
+# shellcheck disable=SC2016
+function joomlaTLSProxy() {
+  local mode="$1" file="${VDM_REPO_PATH}/traefik/docker-compose.yml" env_file model address resolver target=443 endpoint
+  [ -f "$file" ] || { printf 'Set up the existing Traefik container first.\n' >&2; return 1; }
+  endpoint="${DOCKER_HOST:-}"
+  if [ -z "$endpoint" ]; then endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}') || return 1; fi
+  case "$endpoint" in unix://*|npipe://*) ;; *) printf 'Local HTTPS needs a local Docker context, not a remote daemon.\n' >&2; return 1;; esac
+  env_file=$(getContainerEnvFile traefik '')
+  model=$(migrationRunCompose "$env_file" "$file" config --format json) || return 1
+  [ "$mode" != http ] || target=80
+  address=websecure; [ "$mode" != http ] || address=web
+  printf '%s' "$model" | joomlaSiteJSON -e --arg entry "--entrypoints.$address.address=:$target" '
+    (.services.traefik.command // []) | index($entry) != null' >/dev/null || {
+    printf 'Traefik must configure the %s entrypoint on port %s.\n' "$address" "$target" >&2; return 1;
+  }
+  VDM_TLS_PORT=$(printf '%s' "$model" | joomlaSiteJSON -r --argjson port "$target" '
+    [.services.traefik.ports[]? | select(.target==$port) | .published | tostring] | unique |
+    if length==1 then .[0] else empty end') || return 1
+  [[ "$VDM_TLS_PORT" =~ ^[0-9]+$ ]] || { printf 'Traefik needs one fixed published %s port.\n' "$address" >&2; return 1; }
+  # Entrypoint redirects cannot be overridden by a site's HTTP router.
+  if [ "$mode" = http ]; then
+    printf '%s' "$model" | joomlaSiteJSON -e '
+      [.services.traefik.command[]? | select(startswith("--entrypoints.web.http.redirections."))] | length==0' >/dev/null || {
+      printf 'Traefik has a global web entrypoint redirect; remove it explicitly before choosing HTTP.\n' >&2; return 1;
+    }
+  fi
+  if [ "$mode" = acme ] || [ "$mode" = cloudflare ]; then
+    resolver=vdmresolver; [ "$mode" != cloudflare ] || resolver=cfresolver
+    printf '%s' "$model" | joomlaSiteJSON -e --arg prefix "--certificatesresolvers.$resolver.acme." '
+      [.services.traefik.command[]? | select(startswith($prefix))] | length>0' >/dev/null || {
+      printf 'Configure the existing Traefik %s resolver first.\n' "$resolver" >&2; return 1;
+    }
+  fi
+  VDM_TLS_CONF=$(printf '%s' "$model" | joomlaSiteJSON -r '
+    [.services.traefik.volumes[]? | select(.type=="bind" and .target=="/conf") | .source] |
+    if length==1 then .[0] else empty end') || return 1
+  if [ "$mode" = local ]; then
+    printf '%s' "$model" | joomlaSiteJSON -e '
+      (.services.traefik.command // []) as $c |
+      ($c | index("--providers.file.directory=/conf")) != null and
+      ($c | index("--providers.file.watch=true")) != null' >/dev/null || {
+      printf 'Enable Traefik file provider directory /conf and watch=true first.\n' >&2; return 1;
+    }
+    if [ ! -d "$VDM_TLS_CONF" ] || migrationPathHasSymlink "$VDM_TLS_CONF"; then
+      printf 'The Traefik /conf bind directory must exist locally without symbolic links.\n' >&2; return 1;
+    fi
+    printf '%s' "$model" | joomlaSiteJSON -e '(.services.traefik.user // "root") | .=="root" or .=="0" or .=="0:0"' >/dev/null || {
+      printf 'Local leaf keys require the standard root Traefik user; configure access explicitly for a custom proxy user.\n' >&2; return 1;
+    }
+  fi
+  [ -z "$VDM_TLS_CONF" ] || VDM_TLS_CONF="$VDM_TLS_CONF/octojoom"
+}
+
+function joomlaTLSURL() {
+  local mode="$1" host="$2" port="$3" scheme=https
+  [ "$mode" != http ] || scheme=http
+  if [ "$scheme:$port" = http:80 ] || [ "$scheme:$port" = https:443 ]; then printf '%s://%s\n' "$scheme" "$host"
+  else printf '%s://%s:%s\n' "$scheme" "$host" "$port"; fi
+}
+
+# OS trust is distinct from a successful verification against an explicit CA.
+# Browser-specific NSS stores are installed by mkcert; browser verification is
+# reported separately, never inferred from this check.
+function joomlaTLSTrusted() {
+  local root="$1" fingerprint
+  [ -f "$root" ] || return 1
+  case "${OS_NUMBER:-0}" in
+    1) openssl verify "$root" >/dev/null 2>&1;;
+    2) security verify-cert -c "$root" >/dev/null 2>&1;;
+    3)
+      fingerprint=$(openssl x509 -in "$root" -noout -fingerprint -sha1) || return 1
+      fingerprint="${fingerprint#*=}"; fingerprint="${fingerprint//:/}"
+      [[ "$fingerprint" =~ ^[A-Fa-f0-9]{40}$ ]] || return 1
+      powershell.exe -NoProfile -NonInteractive -Command \
+        "if (@(Get-ChildItem Cert:\CurrentUser\Root,Cert:\LocalMachine\Root | Where-Object { \$_.Thumbprint -eq '$fingerprint' }).Count -eq 0) { exit 1 }" >/dev/null 2>&1;;
+    *) return 1;;
+  esac
+}
+
+function joomlaTLSPrerequisites() {
+  local root
+  if ! command -v openssl >/dev/null || ! command -v mkcert >/dev/null; then
+    printf 'Local HTTPS requires mkcert and OpenSSL. Install mkcert from https://github.com/FiloSottile/mkcert#installation (Linux: mkcert + libnss3-tools; macOS: brew install mkcert nss; Windows: choco install mkcert).\n' >&2
+    return 2
+  fi
+  root=$(mkcert -CAROOT) || return 1
+  root="${root//$'\r'/}"
+  if command -v cygpath >/dev/null 2>&1; then root=$(cygpath -u "$root") || return 1; fi
+  VDM_TLS_CAROOT="$root"
+  if ! joomlaTLSTrusted "$root/rootCA.pem"; then
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+      printf 'Host trust is not installed. Run mkcert -install interactively on this host, then retry. No site settings were changed.\n' >&2
+      return 2
+    fi
+    getInputYesNo 'Install the mkcert local certificate authority in this computer trust store? The operating system may request administrator authorization. Its private key stays on this host.' 'Local HTTPS trust' 12 112 || return 1
+    mkcert -install >&2 || return 1
+    joomlaTLSTrusted "$root/rootCA.pem" || { printf 'The operating-system trust check failed after mkcert -install.\n' >&2; return 1; }
+  fi
+}
+
+# Only ordinary list-style labels are rewritten; custom map/anchor syntax is
+# refused before publication. Unowned lines and middleware order are preserved.
+function joomlaTLSRewrite() {
+  local source="$1" destination="$2" routes="$3" mode="$4" work="$5" service router host block line value name middle item prefix
+  local current="$work/tls-current.yml" next="$work/tls-next.yml" property="$work/tls-labels"
+  local -a parts=()
+  cp "$source" "$current" || return 1
+  while IFS=$'\t' read -r service router host; do
+    [ -n "$service" ] || continue
+    prefix="traefik.http.routers.$router."
+    block=$(joomlaServiceProperty "$current" "$service" labels) || return 1
+    [ -n "$block" ] || return 1
+    printf '    labels:\n' > "$property"
+    middle=''
+    while IFS= read -r line; do
+      [[ "$line" = '    labels:' ]] && continue
+      if [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]]; then printf '%s\n' "$line" >> "$property"; continue; fi
+      if [[ "$line" =~ ^[[:space:]]+-[[:space:]]+(.*)$ ]]; then value="${BASH_REMATCH[1]}"
+      else printf 'Connection changes require ordinary list-style labels on %s; convert its labels before retrying.\n' "$service" >&2; return 1; fi
+      decodeEnvValue "$value" value || return 1
+      name="${value%%=*}"
+      case "$name" in
+        "${prefix}entrypoints"|"${prefix}tls"|"${prefix}tls.certresolver") continue;;
+        "${prefix}middlewares")
+          IFS=',' read -r -a parts <<< "${value#*=}"
+          for item in "${parts[@]}"; do
+            case "$item" in cloudflare|cloudflare@docker|joomla-security|joomla-security@docker|redirect-https|redirect-https@docker) ;;
+              *) [ -z "$item" ] || middle+="${middle:+,}$item";; esac
+          done
+          continue;;
+        "${prefix}tls."*)
+          [ "$mode" != http ] || { printf 'Remove the custom TLS settings on router %s explicitly before choosing HTTP.\n' "$router" >&2; return 1; };;
+      esac
+      printf '%s\n' "$line" >> "$property"
+    done <<< "$block"
+    if [ "$mode" = http ]; then
+      # This beats Octojoom's legacy HostRegexp catch-all redirect.
+      if ! grep -qF "${prefix}priority=" "$property"; then printf '      - "%spriority=10000"\n' "$prefix" >> "$property"; fi
+      printf '      - "%sentrypoints=web"\n' "$prefix" >> "$property"
+    else
+      printf '      - "%sentrypoints=websecure"\n      - "%stls=true"\n' "$prefix" "$prefix" >> "$property"
+      case "$mode" in
+        acme) printf '      - "%stls.certresolver=vdmresolver"\n' "$prefix" >> "$property"; middle="joomla-security${middle:+,$middle}";;
+        cloudflare) printf '      - "%stls.certresolver=cfresolver"\n' "$prefix" >> "$property"; middle="cloudflare,joomla-security${middle:+,$middle}";;
+      esac
+    fi
+    [ -z "$middle" ] || printf '      - "%smiddlewares=%s"\n' "$prefix" "$middle" >> "$property"
+    joomlaSetServiceProperty "$current" "$next" "$service" labels "$property" && mv "$next" "$current" || return 1
+  done <<< "$routes"
+  mv "$current" "$destination"
+}
+
+function joomlaTLSCertificateValid() {
+  local cert="$1" root="$2" routes="$3" service router host
+  [ -f "$cert" ] && openssl x509 -in "$cert" -noout -checkend 2592000 >/dev/null 2>&1 || return 1
+  while IFS=$'\t' read -r service router host; do
+    [ -n "$host" ] || continue
+    openssl verify -CAfile "$root/rootCA.pem" -verify_hostname "$host" "$cert" >/dev/null 2>&1 || return 1
+  done <<< "$routes"
+}
+
+# Retain nonempty Joomla paths and cookie settings. Only the URL scheme/port
+# changes; force_ssl is cleared for HTTP and never enabled behind the proxy.
+function joomlaTLSPatchConfiguration() {
+  local source="$1" destination="$2" site="$3" url="$4" mode="$5" live
+  live=$(getJoomlaConfigValue "$source" live_site) || return 1
+  if [ -n "$live" ] && [[ "$live" != "http://$site" && "$live" != "http://$site/"* && "$live" != "http://$site:"* && "$live" != "https://$site" && "$live" != "https://$site/"* && "$live" != "https://$site:"* ]]; then
+    printf 'Joomla live_site names another hostname; align it explicitly before changing this connection.\n' >&2; return 1
+  fi
+  awk -v url="$url" -v mode="$mode" '
+    /^[[:space:]]*public[[:space:]]+\$live_site[[:space:]]*=/ {
+      if ($0 !~ /^[[:space:]]*public[[:space:]]+\$live_site[[:space:]]*=[[:space:]]*\047[^\047]*\047;[[:space:]]*$/ || ++live>1) exit 1
+      value=$0; sub(/^[^\047]*\047/,"",value); sub(/\047;[[:space:]]*$/,"",value)
+      if (value!="") {sub(/^https?:\/\/[^/]+/,url,value); print "\tpublic $live_site = \047" value "\047;"} else print
+      next
+    }
+    mode=="http" && /^[[:space:]]*public[[:space:]]+\$force_ssl[[:space:]]*=/ {
+      if ($0 !~ /^[[:space:]]*public[[:space:]]+\$force_ssl[[:space:]]*=[[:space:]]*[0-2];[[:space:]]*$/ || ++force>1) exit 1
+      print "\tpublic $force_ssl = 0;"; next
+    }
+    {print}
+    END {if(live!=1) exit 1}
+  ' "$source" > "$destination"
+}
+
+# The global certificate lock serializes publication, including renewals. The
+# existing site transaction handles Compose/ENV and running-service rollback.
+# shellcheck disable=SC2016
+function joomlaTLSSet() {
+  (
+    umask 077
+    local site="$1" mode="$2" renew="${3:-false}" work='' lock='' site_lock='' directory compose env_file env_key routes conf='' dynamic='' previous=false published=false success=false app_changed=false
+    local url cert='' leaf='' service router host existing='' status=0
+    local -a hosts=() services=()
+    case "$mode" in http|local|acme|cloudflare) ;; *) printf 'Choose mode http, local, acme or cloudflare.\n' >&2; exit 2;; esac
+    command -v jq >/dev/null || { printf 'Connection changes require jq.\n' >&2; exit 2; }
+    joomlaTLSDiscover "$site" || exit 1
+    directory="$VDM_SITE_DIR" compose="$VDM_SITE_COMPOSE" env_file="$VDM_SITE_ENV" routes="$VDM_TLS_ROUTES"
+    env_key=$(getJoomlaComposeEnvKey "$compose") || exit 1
+    joomlaTLSProxy "$mode" || exit 1
+    url=$(joomlaTLSURL "$mode" "$site" "$VDM_TLS_PORT")
+    conf="$VDM_TLS_CONF"
+    if [ "$mode" = local ]; then
+      joomlaTLSPrerequisites || exit $?
+      ! migrationPathHasSymlink "$conf" || exit 1
+      if [ ! -d "$conf" ]; then
+        # Only our child directory becomes user-owned, never the proxy's ACME
+        # files or other dynamic configuration. OS authorization is explicit.
+        cliSudo mkdir -p -- "$conf" && cliSudo chown "$(id -u):$(id -g)" "$conf" && chmod 700 "$conf" || exit 1
+      fi
+      [ -w "$conf" ] || { printf 'Local certificate directory is not writable: %s\n' "$conf" >&2; exit 1; }
+    fi
+    work=$(mktemp -d "$directory/.octojoom-tls.XXXXXX") || exit 1
+    trap 'status=$?; if [ "$success" != true ]; then
+      if [ "$app_changed" = true ]; then joomlaDatabaseWriteConfiguration "$site" "$work/configuration.original" >&2 || printf "Restore Joomla configuration from %s\n" "$work/configuration.original" >&2; fi
+      if [ "$published" = true ]; then if [ "$previous" = true ]; then cp -p "$work/previous.json" "$dynamic"; else rm -f -- "$dynamic"; fi; fi
+    fi; [ -z "$lock" ] || rmdir "$lock" 2>/dev/null || true
+    [ -z "$site_lock" ] || rmdir "$site_lock" 2>/dev/null || true
+    if [ "$success" = true ] || [ "$app_changed" != true ]; then rm -rf -- "$work"; fi
+    exit "$status"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    site_lock="$directory/.octojoom-change.lock"
+    mkdir "$site_lock" 2>/dev/null || { site_lock=''; printf 'Another configuration change is using %s.\n' "$site" >&2; exit 1; }
+    local OCTOJOOM_SITE_HELD_LOCK="$site_lock"
+    siteWriteScopedEnv "$compose" "$env_file" "$env_key" "$work/.env" || exit 1
+    writeEnvVariable "$work/.env" "VDM_${env_key}_TLS_MODE=\"$mode\"" true || exit 1
+    joomlaTLSRewrite "$compose" "$work/docker-compose.yml" "$routes" "$mode" "$work" || exit 1
+    siteValidateCompose "$work/docker-compose.yml" "$work/.env" "$directory" || exit 1
+    while IFS=$'\t' read -r service router host; do
+      [ -n "$host" ] || continue
+      hosts+=("$host")
+      if ! printf '%s\n' "${services[@]}" | grep -qxF "$service"; then services+=("$service"); fi
+    done <<< "$routes"
+    if [ -n "$conf" ] && [ -d "$conf" ]; then
+      lock="$conf/.octojoom-tls.lock"
+      mkdir "$lock" 2>/dev/null || { lock=''; printf 'Another local certificate change is in progress.\n' >&2; exit 1; }
+      dynamic="$conf/octojoom-$site.json"
+      ! migrationPathHasSymlink "$dynamic" || exit 1
+      if [ -e "$dynamic" ]; then
+        cp -p "$dynamic" "$work/previous.json" || exit 1
+        previous=true
+        existing=$(joomlaSiteJSON -r '.tls.certificates[0].certFile // empty' < "$dynamic") || exit 1
+        if [[ "$existing" = "/conf/octojoom/octojoom-$site-"*.pem && "$existing" != *'/../'* ]]; then cert="$conf/${existing#/conf/octojoom/}"
+        else printf 'Refusing to replace unmanaged %s.\n' "$dynamic" >&2; exit 1; fi
+      fi
+    fi
+    if [ "$mode" = local ]; then
+      if [ "$renew" = true ] || [ -z "$cert" ] || [ ! -f "${cert%.pem}.key" ] || ! joomlaTLSCertificateValid "$cert" "$VDM_TLS_CAROOT" "$routes"; then
+        leaf="octojoom-$site-$(date +%s)-${BASHPID}"
+        mkcert -cert-file "$work/$leaf.pem" -key-file "$work/$leaf.key" "${hosts[@]}" >&2 || exit 1
+        joomlaTLSCertificateValid "$work/$leaf.pem" "$VDM_TLS_CAROOT" "$routes" || exit 1
+        cp "$work/$leaf.pem" "$conf/$leaf.pem" && cp "$work/$leaf.key" "$conf/$leaf.key" || exit 1
+        chmod 600 "$conf/$leaf.key" "$conf/$leaf.pem" || exit 1
+        cert="$conf/$leaf.pem"
+      fi
+      # JSON is accepted by Traefik's existing file provider. Never mount CAROOT.
+      joomlaSiteJSON -n --arg cert "/conf/octojoom/${cert##*/}" --arg key "/conf/octojoom/$(basename "${cert%.pem}.key")" \
+        '{tls:{certificates:[{certFile:$cert,keyFile:$key}]}}' > "$work/certificate.json" || exit 1
+      # Publish an adjacent temporary file; directory watches see the rename.
+      cp "$work/certificate.json" "$conf/.octojoom-$site.tmp" && mv "$conf/.octojoom-$site.tmp" "$dynamic" || exit 1
+      published=true
+      # Reuse the platform-specific hosts-file policy. Explicit --update-hosts
+      # is honored and headless sudo remains noninteractive.
+      for host in "${hosts[@]}"; do updateHostFile "${host%%.*}" "${host#*.}" >&2 || exit 1; done
+    elif [ "$previous" = true ]; then
+      # A loaded local certificate would otherwise shadow an ACME certificate
+      # with the same SNI even after the router selects a public resolver.
+      rm -f -- "$dynamic" || exit 1
+      published=true
+    fi
+    # An absent configuration is normal before the first Joomla installation.
+    # Other read failures are actionable and must not be silently ignored.
+    if [ "${VDM_TLS_NEW_SITE:-false}" != true ]; then
+      joomlaDatabaseConfigurationFile "$site" read-optional "$work/configuration.original" || exit 1
+    fi
+    if [ -s "$work/configuration.original" ]; then
+      joomlaTLSPatchConfiguration "$work/configuration.original" "$work/configuration.php" "$site" "$url" "$mode" || exit 1
+      if ! cmp -s "$work/configuration.original" "$work/configuration.php"; then
+        app_changed=true
+        joomlaDatabaseWriteConfiguration "$site" "$work/configuration.php" || exit 1
+      fi
+    fi
+    if ! cmp -s "$compose" "$work/docker-compose.yml" || ! cmp -s "$env_file" "$work/.env"; then
+      sitePublishConfiguration "$site" "$work/docker-compose.yml" "$work/.env" "${services[@]}" || exit 1
+    fi
+    success=true
+    printf '%s\n' "$url"
+  )
+}
+
+# Status is read-only, including its trust check. Endpoint verification uses the
+# normal client trust store and DNS; it never hides a failure with curl -k.
+# shellcheck disable=SC2016
+function joomlaTLSStatus() {
+  local site="$1" mode url certificate=unavailable trust=unchecked endpoint=unchecked root='' cert='' expiry='' dynamic
+  joomlaTLSDiscover "$site" || return 1
+  mode="$VDM_TLS_MODE"
+  joomlaTLSProxy "$mode" || return 1
+  url=$(joomlaTLSURL "$mode" "$site" "$VDM_TLS_PORT")
+  if [ "$mode" = local ] && command -v mkcert >/dev/null && command -v openssl >/dev/null; then
+    root=$(mkcert -CAROOT) || return 1
+    root="${root//$'\r'/}"
+    if command -v cygpath >/dev/null 2>&1; then root=$(cygpath -u "$root") || return 1; fi
+    trust=missing; joomlaTLSTrusted "$root/rootCA.pem" && trust=trusted
+    dynamic="$VDM_TLS_CONF/octojoom-$site.json"
+    if [ -f "$dynamic" ]; then
+      cert=$(joomlaSiteJSON -r '.tls.certificates[0].certFile // empty' < "$dynamic") || return 1
+      if [[ "$cert" = "/conf/octojoom/octojoom-$site-"*.pem && "$cert" != *'/../'* ]]; then
+        cert="$VDM_TLS_CONF/${cert#/conf/octojoom/}"
+        certificate=invalid
+        joomlaTLSCertificateValid "$cert" "$root" "$VDM_TLS_ROUTES" && certificate=valid
+        expiry=$(openssl x509 -in "$cert" -noout -enddate 2>/dev/null) || expiry=''
+      fi
+    fi
+  fi
+  if command -v curl >/dev/null; then
+    endpoint=unreachable
+    curl --noproxy '*' --silent --show-error --max-time 10 --output /dev/null "$url" 2>/dev/null && endpoint=verified
+  fi
+  if [ "${OCTOJOOM_OUTPUT:-text}" = json ]; then
+    joomlaSiteJSON -n --arg site "$site" --arg mode "$mode" --arg url "$url" --arg cert "$certificate" --arg trust "$trust" --arg endpoint "$endpoint" --arg expiry "${expiry#*=}" \
+      '{site:$site,mode:$mode,url:$url,certificate:$cert,expires:$expiry,host_trust:$trust,browser_trust:"unchecked",endpoint:$endpoint}'
+  else
+    printf 'Website: %s\nMode: %s\nURL: %s\nCertificate: %s\nExpires: %s\nHost trust: %s\nEndpoint: %s\nBrowser trust: check in your browser\n' "$site" "$mode" "$url" "$certificate" "${expiry#*=}" "$trust" "$endpoint"
+  fi
+}
+
+function showJoomlaTLS() {
+  local site="$1" choice mode details url
+  while true; do
+    details=$(joomlaTLSStatus "$site" 2>&1) || details="${details}\nInspect the proxy and site configuration before applying a change."
+    choice=$(whiptail --menu "$details" 0 112 0 --title "Connection / SSL | $site" --backtitle "$BACK_TITLE" \
+      back '<-- Return to website details' local 'Local trusted HTTPS' http 'HTTP' acme 'Public HTTPS (Lets Encrypt)' cloudflare 'Public HTTPS (Cloudflare)' renew 'Renew local certificate' 3>&2 2>&1 1>&3) || return 0
+    [ "$choice" != back ] || return 0
+    mode="$choice"
+    if [ "$choice" = renew ]; then mode=local; fi
+    if ! joomlaTLSProxy "$mode"; then showError 'The selected connection needs the Traefik settings reported above.'; continue; fi
+    url=$(joomlaTLSURL "$mode" "$site" "$VDM_TLS_PORT")
+    getInputYesNo "Apply $choice to $site and its configured companion UIs?\nProposed URL: $url" 'Connection / SSL' 10 112 || continue
+    if url=$(joomlaTLSSet "$site" "$mode" "$([ "$choice" = renew ] && echo true || echo false)" 2>&1); then
+      showNotice "$url\nStopped websites remain stopped. Open the HTTPS address to check your browser’s trust store."
+      return 0
+    else showError "$url"; fi
+  done
+}
+
+function showJoomlaTLSSelection() {
+  local site selected result mode
+  local -a choices=() sites=()
+  while IFS= read -r site; do
+    mode=$(joomlaTLSDiscover "$site" >/dev/null 2>&1 && printf '%s' "$VDM_TLS_MODE") || continue
+    [ "$mode" != local ] || continue
+    choices+=("$site" "$mode -> local HTTPS" OFF)
+  done < <(listJoomlaSites)
+  [ "${#choices[@]}" -gt 0 ] || { showNotice 'No websites without local HTTPS are available.'; return 0; }
+  selected=$(whiptail --checklist 'Select websites to enable local trusted HTTPS.' 0 112 0 --separate-output --title 'Local HTTPS' --backtitle "$BACK_TITLE" "${choices[@]}" 3>&2 2>&1 1>&3) || return 0
+  while IFS= read -r site; do [ -z "$site" ] || sites+=("$site"); done <<< "$selected"
+  for site in "${sites[@]}"; do
+    if result=$(joomlaTLSSet "$site" local 2>&1); then showNotice "$site\n$result"
+    else showError "$site\n$result"; fi
+  done
+}
+
+function joomla__TRuST__ssl() {
+  (
+    local site="${VDM_CONTAINER:-}" action="${VDM_ACTION:-}" mode="${VDM_MODE:-}" url
+    if [ -z "$action" ] && [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ]; then
+      if [ -n "$site" ]; then showJoomlaTLS "$site"; else showJoomlaTLSSelection; fi
+      exit $?
+    fi
+    isValidDomain "$site" || { printf 'Connection / SSL requires --container.\n' >&2; exit 2; }
+    case "$action" in
+      status) joomlaTLSStatus "$site";;
+      set|renew)
+        if [ "$action" = renew ]; then
+          joomlaTLSDiscover "$site" || exit 1
+          [ "$VDM_TLS_MODE" = local ] || { printf 'Only local certificates can be renewed here.\n' >&2; exit 2; }
+          mode=local
+        fi
+        url=$(joomlaTLSSet "$site" "$mode" "$([ "$action" = renew ] && echo true || echo false)") || exit $?
+        if [ "${OCTOJOOM_OUTPUT:-text}" = json ]; then joomlaTLSStatus "$site"
+        else printf '%s\n' "$url"; fi;;
+      *) printf 'Choose --action status, set or renew; set requires --mode.\n' >&2; exit 2;;
+    esac
+  )
+}
+
+function joomlaSetupTLSChoice() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && ! cliHasValue VDM_TLS_CHOICE; then
+    VDM_TLS_CHOICE=$(whiptail --menu 'Choose the website connection.' 0 112 0 --title 'Connection / SSL' --backtitle "$BACK_TITLE" --default-item "${VDM_TLS_CHOICE:-default}" \
+      default 'Keep current host defaults' local 'Local trusted HTTPS' http 'HTTP' acme 'Public HTTPS (Lets Encrypt)' cloudflare 'Public HTTPS (Cloudflare)' 3>&2 2>&1 1>&3) || return $?
+  fi
+}
+
 ######################################## EXISTING SITE CONFIGURATION
 
 # Copy the complete effective configuration needed by one site. Shared files are
@@ -6587,8 +7044,12 @@ function sitePublishConfiguration() {
     done
     changed=0
     lock="$directory/.octojoom-change.lock"
-    mkdir "$lock" 2>/dev/null || { printf 'Another configuration change is using %s.\n' "$site" >&2; exit 1; }
-    trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+    if [ "${OCTOJOOM_SITE_HELD_LOCK:-}" != "$lock" ]; then
+      mkdir "$lock" 2>/dev/null || { printf 'Another configuration change is using %s.\n' "$site" >&2; exit 1; }
+      trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+    else
+      [ -d "$lock" ] || exit 1
+    fi
     siteValidateCompose "$staged_compose" "$staged_env" "$directory" || exit 1
     if [ "$#" -gt 0 ] || [ "${#stop_services[@]}" -gt 0 ]; then
       running=$(migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" ps --status running --services) || {
@@ -8082,7 +8543,7 @@ function showJoomlaBackupSelection() {
 # the env variable name suffixes a Joomla container reads through its env key (VDM_<ENV_KEY>_<suffix>)
 # returned as an extended regular expression alternation
 function getJoomlaEnvSuffixes() {
-  echo 'DB|DB_USER|DB_PASS|DB_ROOT|DB_ENGINE|DB_IMAGE|DATABASE_EXPORT_DIR|DATABASE_IMPORT_DIR|DATABASE_COMPRESSION|DATABASE_TIMESTAMP|PUID|PGID|JOOMLA_[A-Z_]+|EXTENSIONS_URLS|CLI_COMMANDS|IMAGE|IMAGE_SOURCE|IMAGE_TAG|AUTO_INSTALL|PHPMYADMIN|PHP_IMAGE|PHP_MAX_EXECUTION_TIME|PHP_MAX_INPUT_TIME|PHP_MAX_INPUT_VARS|PHP_ERROR_REPORTING|PHP_UPLOAD_MAX_FILESIZE|PHP_POST_MAX_SIZE|PHP_MEMORY_LIMIT|WEBSERVER|DOCROOT|NGINX_IMAGE|SMTP_HOST|SMTP_PORT|SMTP_USERNAME|SMTP_PASSWORD|SMTP_SECURITY|SMTP_AUTH|SMTP_FROM|SMTP_FROM_NAME|HOOKS_ENABLED|HOOK_PRE_START|HOOK_POST_START|HOOK_PRE_STOP|HOOK_POST_STOP|BACKUP_PATH|BACKUP_FORMAT|BACKUP_RETENTION|BACKUP_SCOPE|BACKUP_TIMESTAMP|BACKUP_TIMESTAMP_PATTERN|BACKUP_OVERWRITE|TOOLS_IMAGE|TOOLS_ENABLED'
+  echo 'DB|DB_USER|DB_PASS|DB_ROOT|DB_ENGINE|DB_IMAGE|DATABASE_EXPORT_DIR|DATABASE_IMPORT_DIR|DATABASE_COMPRESSION|DATABASE_TIMESTAMP|PUID|PGID|JOOMLA_[A-Z_]+|EXTENSIONS_URLS|CLI_COMMANDS|IMAGE|IMAGE_SOURCE|IMAGE_TAG|AUTO_INSTALL|PHPMYADMIN|PHP_IMAGE|PHP_MAX_EXECUTION_TIME|PHP_MAX_INPUT_TIME|PHP_MAX_INPUT_VARS|PHP_ERROR_REPORTING|PHP_UPLOAD_MAX_FILESIZE|PHP_POST_MAX_SIZE|PHP_MEMORY_LIMIT|WEBSERVER|DOCROOT|NGINX_IMAGE|SMTP_HOST|SMTP_PORT|SMTP_USERNAME|SMTP_PASSWORD|SMTP_SECURITY|SMTP_AUTH|SMTP_FROM|SMTP_FROM_NAME|HOOKS_ENABLED|HOOK_PRE_START|HOOK_POST_START|HOOK_PRE_STOP|HOOK_POST_STOP|BACKUP_PATH|BACKUP_FORMAT|BACKUP_RETENTION|BACKUP_SCOPE|BACKUP_TIMESTAMP|BACKUP_TIMESTAMP_PATTERN|BACKUP_OVERWRITE|TLS_MODE|TLS_CHOICE|TOOLS_IMAGE|TOOLS_ENABLED'
 }
 
 # Read a generated database reference in list or ordinary block-map notation.
@@ -9481,6 +9942,7 @@ function runJoomlaSiteAction() {
       database) showJoomlaDatabaseTools "$site" ;;
       database-change) showJoomlaDatabaseChange "$site" ;;
       backups) showJoomlaBackups "$site" ;;
+      ssl) showJoomlaTLS "$site" ;;
       edit) joomla__TRuST__edit ;;
       env)
         [ -n "$VDM_SITE_ENV" ] || { showError 'This website has no environment file.'; exit 1; }
@@ -9552,6 +10014,7 @@ function showJoomlaWebsiteInformation() {
       isFunc showJoomlaDatabaseTools && actions+=(database 'Database tools')
       isFunc showJoomlaDatabaseChange && actions+=(database-change 'Change database')
       isFunc showJoomlaBackups && actions+=(backups 'Backups and restore points')
+      actions+=(ssl 'Connection / SSL')
       actions+=(clone 'Clone website' migrate 'Migrate website' delete 'Delete website configuration')
       if isExpert; then actions+=(edit 'Edit Compose configuration' env 'View or edit environment and credentials'); fi
       choice=$(whiptail --menu "$details" 0 112 0 --title "Website Information | ${site}" --backtitle "$BACK_TITLE" "${actions[@]}" 3>&2 2>&1 1>&3) || break
@@ -9576,6 +10039,7 @@ function showJoomla() {
     menu_options+=("setup" "Setup new container")
     # Inspect original available sites without requiring enrollment.
     menu_options+=("information" "Website Information")
+    hasDirectories 'joomla/available' && menu_options+=("ssl" "Enable local HTTPS for websites")
     # enable existing container
     hasDirectories 'joomla/available' &&
       menu_options+=("enable" "Enable existing container")
@@ -9635,6 +10099,9 @@ function showJoomla() {
 
     # menu actions
     case $CHOICE in
+    "ssl")
+      showJoomlaTLSSelection
+      ;;
     "information")
       showJoomlaWebsiteInformation
       ;;
@@ -14832,6 +15299,13 @@ function joomla__TRuST__migrate() {
 function cliPreflightOtherTask() {
   [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || return 0
   case "${VDM_CONTAINER_TYPE:-}:${VDM_TASK:-}" in
+    joomla:ssl)
+      isValidDomain "${VDM_CONTAINER:-}" || { printf 'Connection / SSL requires --container.\n' >&2; return 17; }
+      case "${VDM_ACTION:-}" in
+        status|renew) ;;
+        set) case "${VDM_MODE:-}" in http|local|acme|cloudflare) ;; *) printf 'Choose --mode http, local, acme or cloudflare.\n' >&2; return 17;; esac;;
+        *) printf 'Choose --action status, set or renew.\n' >&2; return 17;;
+      esac;;
     joomla:clone)
       if ! isValidDomain "${VDM_CONTAINER:-}" || ! [[ "${VDM_KEY:-}" =~ ^[A-Za-z]{2,}$ ]] || ! isValidDomain "${VDM_DOMAIN:-}"; then
         printf '%s\n' 'ERROR: clone requires --container, a new --key, and --domain.' >&2; return 17
@@ -15135,6 +15609,7 @@ function cliOptionVariable() {
     --docroot) echo VDM_DOCROOT;; --nginx-config) echo VDM_NGINX_CONFIG;; --nginx-image) echo VDM_NGINX_IMAGE;;
     --service) echo VDM_SERVICE;; --tail) echo VDM_TAIL;; --version-prefix) echo VDM_VERSION_PREFIX;;
     --file) echo VDM_INPUT_FILE;; --config-kind) echo VDM_CONFIG_KIND;;
+    --tls-mode) echo VDM_TLS_CHOICE;;
     --mode) echo VDM_MODE;; --free-ports) echo VDM_FREE_PORTS;; --update-hosts) echo VDM_UPDATE_HOST;; --secure) echo VDM_SECURE;; --cloudflare) echo VDM_SECURE_CLOUDFLARE;;
     --secure-email) echo VDM_SECURE_EMAIL;; --cloudflare-token) echo VDM_CLOUDFLARE_DNS_API_TOKEN;;
     --traefik-network) echo VDM_TRAEFIK_GATEWAY;; --openssh-network) echo VDM_OPENSSH_GATEWAY;;
@@ -15444,6 +15919,7 @@ function cliComplete() {
       done;;
     --action)
       case "$type/$task" in
+        joomla/ssl) printf '%s\n' status set renew;;
         joomla/database) printf '%s\n' change export import tables console execute;;
         joomla/backup) printf '%s\n' create list verify restore delete cleanup;;
         *) printf '%s\n' show list inspect apply set switch settings path read replace script complete change export import tables console execute create verify restore delete cleanup;;
@@ -15454,7 +15930,8 @@ function cliComplete() {
     --format) printf '%s\n' tar.gz zip;; --scope) printf '%s\n' full website database files;;
     --target) printf '%s\n' new current;; --import-mode) printf '%s\n' fresh replace merge;;
     --output) printf '%s\n' text json;; --webserver) printf '%s\n' apache nginx;;
-    --mode) printf '%s\n' basic expert;; --direction) printf '%s\n' push pull;;
+    --mode) if [ "$type/$task" = joomla/ssl ]; then joomlaTLSModes; else printf '%s\n' basic expert; fi;;
+    --tls-mode) printf '%s\n' default; joomlaTLSModes;; --direction) printf '%s\n' push pull;;
     --config-kind) printf '%s\n' compose env;; --channel) printf '%s\n' master staging;;
     --enable|--secure|--cloudflare|--customize|--auto-install|--persistence|--db-persistence|--save-defaults|--mailcatcher|--phpmyadmin|--php-settings) printf '%s\n' true false;;
     --timestamp|--overwrite|--delete-source|--progress|--pre-backup|--confirm) printf '%s\n' yes no;;
