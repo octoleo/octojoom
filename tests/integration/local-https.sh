@@ -142,7 +142,7 @@ verify_https() {
   return 1
 }
 VDM_CONTAINER="$SITE_NAME"
-VDM_ACTION=set
+VDM_ACTION='set'
 VDM_MODE=local
 joomla__TRuST__ssl
 verify_https
@@ -156,26 +156,26 @@ VDM_ACTION=status
 joomla__TRuST__ssl > "$WORK/status.json"
 jq -e '.mode=="local" and .host_trust=="trusted" and .certificate=="valid" and .endpoint=="verified"' "$WORK/status.json"
 OCTOJOOM_OUTPUT=text
-VDM_ACTION=set
+VDM_ACTION='set'
 before=$(docker inspect --format '{{.Id}}' "$WEB")
 joomla__TRuST__ssl
 [ "$(docker inspect --format '{{.Id}}' "$WEB")" = "$before" ]
 # Renewal is hot-loaded; no application or proxy container is recreated.
-first=$(jq -r '.tls.certificates[0].certFile' "$VDM_PROJECT_PATH/traefik/conf/octojoom/octojoom-$SITE_NAME.json")
+first=$(jq -r '.tls.certificates[0].certFile' "$VDM_PROJECT_PATH/traefik/conf/octojoom/octojoom-$SITE_NAME.yaml")
 VDM_ACTION=renew
 joomla__TRuST__ssl
-second=$(jq -r '.tls.certificates[0].certFile' "$VDM_PROJECT_PATH/traefik/conf/octojoom/octojoom-$SITE_NAME.json")
+second=$(jq -r '.tls.certificates[0].certFile' "$VDM_PROJECT_PATH/traefik/conf/octojoom/octojoom-$SITE_NAME.yaml")
 [ "$first" != "$second" ]
 verify_https
 [ "$(docker inspect --format '{{.Id}}' "$WEB")" = "$before" ]
 # Nginx takes over the same labels; HTTPS must remain effective after switching.
-VDM_ACTION=set
+VDM_ACTION='set'
 VDM_WEBSERVER=nginx
 joomla__TRuST__webserver
 verify_https
 VDM_MODE=http
 joomla__TRuST__ssl
-[ ! -e "$VDM_PROJECT_PATH/traefik/conf/octojoom/octojoom-$SITE_NAME.json" ]
+[ ! -e "$VDM_PROJECT_PATH/traefik/conf/octojoom/octojoom-$SITE_NAME.yaml" ]
 for attempt in $(seq 1 30); do
   if curl --noproxy '*' --fail --silent "http://$SITE_NAME:18080/" > "$WORK/page.html"; then break; fi
   sleep 2

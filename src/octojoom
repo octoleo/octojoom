@@ -6571,6 +6571,9 @@ function joomlaTLSProxy() {
   VDM_TLS_CONF=$(printf '%s' "$model" | joomlaSiteJSON -r '
     [.services.traefik.volumes[]? | select(.type=="bind" and .target=="/conf") | .source] |
     if length==1 then .[0] else empty end') || return 1
+  if [ "${OS_NUMBER:-0}" = 3 ] && [ -n "$VDM_TLS_CONF" ] && command -v cygpath >/dev/null 2>&1; then
+    VDM_TLS_CONF=$(cygpath -u "$VDM_TLS_CONF") || return 1
+  fi
   if [ "$mode" = local ]; then
     printf '%s' "$model" | joomlaSiteJSON -e '
       (.services.traefik.command // []) as $c |
@@ -6727,7 +6730,7 @@ function joomlaTLSSet() {
   (
     umask 077
     local site="$1" mode="$2" renew="${3:-false}" work='' lock='' site_lock='' directory compose env_file env_key routes conf='' dynamic='' previous=false published=false success=false app_changed=false
-    local url cert='' leaf='' service router host existing='' status=0
+    local url cert='' leaf='' service router host existing='' status=0 rollback_failed=false
     local -a hosts=() services=()
     case "$mode" in http|local|acme|cloudflare) ;; *) printf 'Choose mode http, local, acme or cloudflare.\n' >&2; exit 2;; esac
     command -v jq >/dev/null || { printf 'Connection changes require jq.\n' >&2; exit 2; }
@@ -6749,11 +6752,15 @@ function joomlaTLSSet() {
     fi
     work=$(mktemp -d "$directory/.octojoom-tls.XXXXXX") || exit 1
     trap 'status=$?; if [ "$success" != true ]; then
-      if [ "$app_changed" = true ]; then joomlaDatabaseWriteConfiguration "$site" "$work/configuration.original" >&2 || printf "Restore Joomla configuration from %s\n" "$work/configuration.original" >&2; fi
-      if [ "$published" = true ]; then if [ "$previous" = true ]; then cp -p "$work/previous.json" "$dynamic"; else rm -f -- "$dynamic"; fi; fi
+      if [ "$app_changed" = true ]; then joomlaDatabaseWriteConfiguration "$site" "$work/configuration.original" >&2 || rollback_failed=true; fi
+      if [ "$published" = true ]; then
+        if [ "$previous" = true ]; then cp -p "$work/previous.json" "$dynamic" || rollback_failed=true
+        else rm -f -- "$dynamic" || rollback_failed=true; fi
+      fi
     fi; [ -z "$lock" ] || rmdir "$lock" 2>/dev/null || true
     [ -z "$site_lock" ] || rmdir "$site_lock" 2>/dev/null || true
-    if [ "$success" = true ] || [ "$app_changed" != true ]; then rm -rf -- "$work"; fi
+    if [ "$rollback_failed" = true ]; then printf "Connection recovery is incomplete. Retained recovery files: %s\n" "$work" >&2
+    else rm -rf -- "$work"; fi
     exit "$status"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM HUP
@@ -6772,7 +6779,7 @@ function joomlaTLSSet() {
     if [ -n "$conf" ] && [ -d "$conf" ]; then
       lock="$conf/.octojoom-tls.lock"
       mkdir "$lock" 2>/dev/null || { lock=''; printf 'Another local certificate change is in progress.\n' >&2; exit 1; }
-      dynamic="$conf/octojoom-$site.json"
+      dynamic="$conf/octojoom-$site.yaml"
       ! migrationPathHasSymlink "$dynamic" || exit 1
       if [ -e "$dynamic" ]; then
         cp -p "$dynamic" "$work/previous.json" || exit 1
@@ -6791,7 +6798,8 @@ function joomlaTLSSet() {
         chmod 600 "$conf/$leaf.key" "$conf/$leaf.pem" || exit 1
         cert="$conf/$leaf.pem"
       fi
-      # JSON is accepted by Traefik's existing file provider. Never mount CAROOT.
+      # JSON flow syntax is valid YAML; the file provider requires a .yaml suffix.
+      # Never mount CAROOT.
       joomlaSiteJSON -n --arg cert "/conf/octojoom/${cert##*/}" --arg key "/conf/octojoom/$(basename "${cert%.pem}.key")" \
         '{tls:{certificates:[{certFile:$cert,keyFile:$key}]}}' > "$work/certificate.json" || exit 1
       # Publish an adjacent temporary file; directory watches see the rename.
@@ -6840,7 +6848,7 @@ function joomlaTLSStatus() {
     root="${root//$'\r'/}"
     if command -v cygpath >/dev/null 2>&1; then root=$(cygpath -u "$root") || return 1; fi
     trust=missing; joomlaTLSTrusted "$root/rootCA.pem" && trust=trusted
-    dynamic="$VDM_TLS_CONF/octojoom-$site.json"
+    dynamic="$VDM_TLS_CONF/octojoom-$site.yaml"
     if [ -f "$dynamic" ]; then
       cert=$(joomlaSiteJSON -r '.tls.certificates[0].certFile // empty' < "$dynamic") || return 1
       if [[ "$cert" = "/conf/octojoom/octojoom-$site-"*.pem && "$cert" != *'/../'* ]]; then
