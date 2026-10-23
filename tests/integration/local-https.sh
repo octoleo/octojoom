@@ -94,6 +94,9 @@ OCTOJOOM_OUTPUT=text
 OCTOJOOM_CLI_KEYS=(VDM_KEY VDM_ENV_KEY VDM_DOMAIN VDM_SUBDOMAIN VDM_J_REPO VDM_JV VDM_AUTO_INSTALL VDM_J_EMAIL VDM_J_SITE_NAME VDM_J_USERNAME VDM_J_USER VDM_J_PASSWORD VDM_ENABLE VDM_PHPMYADMIN VDM_SECURE VDM_UPDATE_HOST VDM_MULTI_DOMAIN VDM_CUSTOMIZE)
 OCTOJOOM_CLI_VALUES=("$VDM_KEY" "$VDM_ENV_KEY" "$VDM_DOMAIN" "$VDM_SUBDOMAIN" "$VDM_J_REPO" "$VDM_JV" true "$VDM_J_EMAIL" "$VDM_J_SITE_NAME" "$VDM_J_USERNAME" "$VDM_J_USER" "$VDM_J_PASSWORD" false false false false false false)
 # The actual headless questionnaire/generator writes the site's Compose and ENV.
+cliRememberValue VDM_PHPMYADMIN true
+cliRememberValue VDM_MAILCATCHER true
+cliApplyValues
 joomla__TRuST__setup
 [ -f "$COMPOSE" ]
 [ ! -e "$VDM_REPO_PATH/joomla/enabled/$SITE_NAME" ]
@@ -132,14 +135,16 @@ cp "$ENV_FILE" "$WORK/shared-original.env"
 proxy_id=$(docker inspect --format '{{.Id}}' "tls-$RUN_ID")
 
 verify_https() {
-  local attempt
-  for attempt in $(seq 1 30); do
-    if curl --noproxy '*' --fail --silent --show-error "https://$SITE_NAME:18443/" > "$WORK/page.html"; then
-      grep -qi '<html' "$WORK/page.html" && return 0
-    fi
-    sleep 2
+  local attempt hostname
+  for hostname in "$SITE_NAME" "webdb.$RUN_ID.localhost" "webmail.$RUN_ID.localhost"; do
+    for attempt in $(seq 1 30); do
+      if curl --noproxy '*' --fail --silent --show-error "https://$hostname:18443/" > "$WORK/page.html"; then
+        grep -qi '<html' "$WORK/page.html" && break
+      fi
+      sleep 2
+    done
+    [ "$attempt" -lt 30 ] || return 1
   done
-  return 1
 }
 VDM_CONTAINER="$SITE_NAME"
 VDM_ACTION='set'
@@ -161,10 +166,10 @@ before=$(docker inspect --format '{{.Id}}' "$WEB")
 joomla__TRuST__ssl
 [ "$(docker inspect --format '{{.Id}}' "$WEB")" = "$before" ]
 # Renewal is hot-loaded; no application or proxy container is recreated.
-first=$(jq -r '.tls.certificates[0].certFile' "$VDM_PROJECT_PATH/traefik/conf/octojoom/octojoom-$SITE_NAME.yaml")
+first=$(jq -r '.tls.certificates[0].certFile' "$VDM_PROJECT_PATH/traefik/conf/octojoom-$SITE_NAME.yaml")
 VDM_ACTION=renew
 joomla__TRuST__ssl
-second=$(jq -r '.tls.certificates[0].certFile' "$VDM_PROJECT_PATH/traefik/conf/octojoom/octojoom-$SITE_NAME.yaml")
+second=$(jq -r '.tls.certificates[0].certFile' "$VDM_PROJECT_PATH/traefik/conf/octojoom-$SITE_NAME.yaml")
 [ "$first" != "$second" ]
 verify_https
 [ "$(docker inspect --format '{{.Id}}' "$WEB")" = "$before" ]
@@ -175,7 +180,7 @@ joomla__TRuST__webserver
 verify_https
 VDM_MODE=http
 joomla__TRuST__ssl
-[ ! -e "$VDM_PROJECT_PATH/traefik/conf/octojoom/octojoom-$SITE_NAME.yaml" ]
+[ ! -e "$VDM_PROJECT_PATH/traefik/conf/octojoom-$SITE_NAME.yaml" ]
 for attempt in $(seq 1 30); do
   if curl --noproxy '*' --fail --silent "http://$SITE_NAME:18080/" > "$WORK/page.html"; then break; fi
   sleep 2
