@@ -6554,6 +6554,11 @@ function joomlaTLSProxy() {
     [.services.traefik.ports[]? | select(.target==$port) | .published | tostring] | unique |
     if length==1 then .[0] else empty end') || return 1
   [[ "$VDM_TLS_PORT" =~ ^[0-9]+$ ]] || { printf 'Traefik needs one fixed published %s port.\n' "$address" >&2; return 1; }
+  VDM_TLS_ADDRESS=$(printf '%s' "$model" | joomlaSiteJSON -r --argjson port "$target" '
+    [.services.traefik.ports[]? | select(.target==$port) | (.host_ip // "127.0.0.1")] | unique |
+    if length==1 then .[0] else empty end') || return 1
+  case "$VDM_TLS_ADDRESS" in ''|0.0.0.0) VDM_TLS_ADDRESS=127.0.0.1;; '::') VDM_TLS_ADDRESS='[::1]';; esac
+  if [[ "$VDM_TLS_ADDRESS" = *:* && "$VDM_TLS_ADDRESS" != \[*\] ]]; then VDM_TLS_ADDRESS="[$VDM_TLS_ADDRESS]"; fi
   # Entrypoint redirects cannot be overridden by a site's HTTP router.
   if [ "$mode" = http ]; then
     printf '%s' "$model" | joomlaSiteJSON -e '
@@ -6596,6 +6601,30 @@ function joomlaTLSURL() {
   [ "$mode" != http ] || scheme=http
   if [ "$scheme:$port" = http:80 ] || [ "$scheme:$port" = https:443 ]; then printf '%s://%s\n' "$scheme" "$host"
   else printf '%s://%s:%s\n' "$scheme" "$host" "$port"; fi
+}
+
+# Traefik watches the configured directory, not changes inside child directories.
+# Keep only leaf material below /conf/octojoom; publish the watched YAML in /conf.
+function joomlaTLSInstallDynamic() {
+  local source="$1" target="$2" temporary
+  ! migrationPathHasSymlink "$target" || return 1
+  if [ -w "${target%/*}" ]; then
+    temporary=$(mktemp "${target}.XXXXXX") || return 1
+    if ! cp "$source" "$temporary" || ! chmod 644 "$temporary" || ! mv -f "$temporary" "$target"; then
+      rm -f -- "$temporary"; return 1
+    fi
+  else
+    temporary=$(cliSudo mktemp "${target}.XXXXXX") || return 1
+    if ! cliSudo cp "$source" "$temporary" || ! cliSudo chmod 644 "$temporary" || ! cliSudo mv -f "$temporary" "$target"; then
+      cliSudo rm -f -- "$temporary"; return 1
+    fi
+  fi
+}
+
+function joomlaTLSRemoveDynamic() {
+  local target="$1"
+  ! migrationPathHasSymlink "$target" || return 1
+  if [ -w "${target%/*}" ]; then rm -f -- "$target"; else cliSudo rm -f -- "$target"; fi
 }
 
 # OS trust is distinct from a successful verification against an explicit CA.
@@ -6699,6 +6728,34 @@ function joomlaTLSCertificateValid() {
   done <<< "$routes"
 }
 
+# Validate SNI and certificate trust through the published local proxy port.
+# Explicit CA validation also works with Git Bash curl's separate CA bundle;
+# the OS trust check has already succeeded before any publication.
+function joomlaTLSVerify() {
+  local site="$1" proxy="$VDM_REPO_PATH/traefik/docker-compose.yml" env_file running attempt service router host url
+  env_file=$(getContainerEnvFile traefik '')
+  running=$(migrationRunCompose "$env_file" "$proxy" ps --status running --services) || return 1
+  if ! printf '%s\n' "$running" | grep -qxF traefik; then
+    printf 'Traefik is stopped; HTTPS is configured and will be available when the proxy starts.\n' >&2
+    return 0
+  fi
+  while IFS=$'\t' read -r service router host; do
+    [ -n "$host" ] || continue
+    running=$(joomlaSiteCompose "$site" ps --status running --services) || return 1
+    printf '%s\n' "$running" | grep -qxF "$service" || continue
+    url=$(joomlaTLSURL local "$host" "$VDM_TLS_PORT")
+    for ((attempt=0; attempt<15; attempt++)); do
+      if curl --noproxy '*' --silent --show-error --max-time 3 --output /dev/null \
+        --cacert "$VDM_TLS_CAROOT/rootCA.pem" --resolve "$host:$VDM_TLS_PORT:$VDM_TLS_ADDRESS" "$url" 2>/dev/null; then break; fi
+      sleep 1
+    done
+    if [ "$attempt" -eq 15 ]; then
+      printf 'Certificate verification failed at %s. Inspect Traefik logs and its /conf mount; restoring the previous connection.\n' "$url" >&2
+      return 1
+    fi
+  done <<< "$VDM_TLS_VERIFY_ROUTES"
+}
+
 # Retain nonempty Joomla paths and cookie settings. Only the URL scheme/port
 # changes; force_ssl is cleared for HTTP and never enabled behind the proxy.
 function joomlaTLSPatchConfiguration() {
@@ -6732,6 +6789,7 @@ function joomlaTLSSet() {
     local site="$1" mode="$2" renew="${3:-false}" work='' lock='' site_lock='' directory compose env_file env_key routes conf='' dynamic='' previous=false published=false success=false app_changed=false
     local url cert='' leaf='' service router host existing='' status=0 rollback_failed=false
     local -a hosts=() services=()
+    local OCTOJOOM_SITE_VALIDATE_FUNCTION='' VDM_TLS_VERIFY_ROUTES=''
     case "$mode" in http|local|acme|cloudflare) ;; *) printf 'Choose mode http, local, acme or cloudflare.\n' >&2; exit 2;; esac
     command -v jq >/dev/null || { printf 'Connection changes require jq.\n' >&2; exit 2; }
     joomlaTLSDiscover "$site" || exit 1
@@ -6742,6 +6800,9 @@ function joomlaTLSSet() {
     conf="$VDM_TLS_CONF"
     if [ "$mode" = local ]; then
       joomlaTLSPrerequisites || exit $?
+      command -v curl >/dev/null || { printf 'Local HTTPS verification requires curl.\n' >&2; exit 2; }
+      OCTOJOOM_SITE_VALIDATE_FUNCTION=joomlaTLSVerify
+      VDM_TLS_VERIFY_ROUTES="$routes"
       ! migrationPathHasSymlink "$conf" || exit 1
       if [ ! -d "$conf" ]; then
         # Only our child directory becomes user-owned, never the proxy's ACME
@@ -6754,8 +6815,8 @@ function joomlaTLSSet() {
     trap 'status=$?; if [ "$success" != true ]; then
       if [ "$app_changed" = true ]; then joomlaDatabaseWriteConfiguration "$site" "$work/configuration.original" >&2 || rollback_failed=true; fi
       if [ "$published" = true ]; then
-        if [ "$previous" = true ]; then cp -p "$work/previous.json" "$dynamic" || rollback_failed=true
-        else rm -f -- "$dynamic" || rollback_failed=true; fi
+        if [ "$previous" = true ]; then joomlaTLSInstallDynamic "$work/previous.json" "$dynamic" || rollback_failed=true
+        else joomlaTLSRemoveDynamic "$dynamic" || rollback_failed=true; fi
       fi
     fi; [ -z "$lock" ] || rmdir "$lock" 2>/dev/null || true
     [ -z "$site_lock" ] || rmdir "$site_lock" 2>/dev/null || true
@@ -6779,7 +6840,7 @@ function joomlaTLSSet() {
     if [ -n "$conf" ] && [ -d "$conf" ]; then
       lock="$conf/.octojoom-tls.lock"
       mkdir "$lock" 2>/dev/null || { lock=''; printf 'Another local certificate change is in progress.\n' >&2; exit 1; }
-      dynamic="$conf/octojoom-$site.yaml"
+      dynamic="${conf%/octojoom}/octojoom-$site.yaml"
       ! migrationPathHasSymlink "$dynamic" || exit 1
       if [ -e "$dynamic" ]; then
         cp -p "$dynamic" "$work/previous.json" || exit 1
@@ -6803,7 +6864,7 @@ function joomlaTLSSet() {
       joomlaSiteJSON -n --arg cert "/conf/octojoom/${cert##*/}" --arg key "/conf/octojoom/$(basename "${cert%.pem}.key")" \
         '{tls:{certificates:[{certFile:$cert,keyFile:$key}]}}' > "$work/certificate.json" || exit 1
       # Publish an adjacent temporary file; directory watches see the rename.
-      cp "$work/certificate.json" "$conf/.octojoom-$site.tmp" && mv "$conf/.octojoom-$site.tmp" "$dynamic" || exit 1
+      joomlaTLSInstallDynamic "$work/certificate.json" "$dynamic" || exit 1
       published=true
       # Reuse the platform-specific hosts-file policy. Explicit --update-hosts
       # is honored and headless sudo remains noninteractive.
@@ -6811,7 +6872,7 @@ function joomlaTLSSet() {
     elif [ "$previous" = true ]; then
       # A loaded local certificate would otherwise shadow an ACME certificate
       # with the same SNI even after the router selects a public resolver.
-      rm -f -- "$dynamic" || exit 1
+      joomlaTLSRemoveDynamic "$dynamic" || exit 1
       published=true
     fi
     # An absent configuration is normal before the first Joomla installation.
@@ -6828,6 +6889,8 @@ function joomlaTLSSet() {
     fi
     if ! cmp -s "$compose" "$work/docker-compose.yml" || ! cmp -s "$env_file" "$work/.env"; then
       sitePublishConfiguration "$site" "$work/docker-compose.yml" "$work/.env" "${services[@]}" || exit 1
+    elif [ "$mode" = local ]; then
+      joomlaTLSVerify "$site" || exit 1
     fi
     success=true
     printf '%s\n' "$url"
@@ -6848,7 +6911,7 @@ function joomlaTLSStatus() {
     root="${root//$'\r'/}"
     if command -v cygpath >/dev/null 2>&1; then root=$(cygpath -u "$root") || return 1; fi
     trust=missing; joomlaTLSTrusted "$root/rootCA.pem" && trust=trusted
-    dynamic="$VDM_TLS_CONF/octojoom-$site.yaml"
+    dynamic="${VDM_TLS_CONF%/octojoom}/octojoom-$site.yaml"
     if [ -f "$dynamic" ]; then
       cert=$(joomlaSiteJSON -r '.tls.certificates[0].certFile // empty' < "$dynamic") || return 1
       if [[ "$cert" = "/conf/octojoom/octojoom-$site-"*.pem && "$cert" != *'/../'* ]]; then

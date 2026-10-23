@@ -163,7 +163,7 @@ PHP
 # certificate/container IO is replaced here. Real IO has its own acceptance job.
 tls_transaction_fixture() {
   joomlaTLSDiscover() { resolveJoomlaSite "$1"; VDM_TLS_ROUTES=$'joomlaalpha\tjoomlaalpha\talpha.example.test\nphpmyadminalpha\tphpmyadminalpha\talphadb.example.test\n'; VDM_TLS_MODE=http; }
-  joomlaTLSProxy() { VDM_TLS_CONF="$VDM_PROJECT_PATH/traefik/conf"; VDM_TLS_PORT=8443; }
+  joomlaTLSProxy() { VDM_TLS_CONF="$VDM_PROJECT_PATH/traefik/conf/octojoom"; mkdir -p "$VDM_TLS_CONF"; VDM_TLS_PORT=8443; }
   joomlaTLSPrerequisites() { VDM_TLS_CAROOT="$work/ca"; }
   joomlaTLSCertificateValid() { [ -f "$1" ]; }
   mkcert() { printf 'certificate\n' > "$2"; printf 'leaf-key\n' > "$4"; }
@@ -205,7 +205,7 @@ tls_transaction_fixture() {
   run joomlaTLSSet "$site" local
   assert_failure
   refute_file_exists "$directory/.env"
-  [ -z "$(ls -A "$VDM_PROJECT_PATH/traefik/conf")" ]
+  [ -z "$(find "$VDM_PROJECT_PATH/traefik/conf" -type f)" ]
 }
 
 @test "TLS rejects concurrent site changes and retains their lock" {
@@ -238,4 +238,42 @@ tls_transaction_fixture() {
   assert_equal "$VDM_CONTAINER" alpha.example.test
   assert_equal "$VDM_UPDATE_HOST" true
   cliPreflightOtherTask
+}
+
+@test "TLS runtime verification uses real hostname validation and preserves stopped companions" {
+  VDM_TLS_PORT=8443 VDM_TLS_ADDRESS=127.0.0.1 VDM_TLS_CAROOT="$work/ca" VDM_TLS_VERIFY_ROUTES="$routes"
+  mkdir -p "$VDM_REPO_PATH/traefik"
+  migrationRunCompose() { printf 'traefik\n'; }
+  joomlaSiteCompose() { printf 'joomlaalpha\n'; }
+  curl() { printf '%s\n' "$*" >> "$work/verify-arguments"; }
+  joomlaTLSVerify "$site"
+  assert_file_contains "$work/verify-arguments" '--resolve alpha.example.test:8443:127.0.0.1'
+  assert_file_contains "$work/verify-arguments" '--cacert'
+  refute_file_contains "$work/verify-arguments" alphadb
+  refute_file_contains "$work/verify-arguments" '--insecure'
+}
+
+@test "TLS runtime verification reports a bad served certificate as a failed transaction" {
+  VDM_TLS_PORT=8443 VDM_TLS_ADDRESS=127.0.0.1 VDM_TLS_CAROOT="$work/ca" VDM_TLS_VERIFY_ROUTES="$routes"
+  migrationRunCompose() { printf 'traefik\n'; }
+  joomlaSiteCompose() { printf 'joomlaalpha\n'; }
+  curl() { return 60; }
+  sleep() { :; }
+  run joomlaTLSVerify "$site"
+  assert_failure
+  assert_output_contains 'Certificate verification failed'
+}
+
+@test "TLS local routing preserves unrelated public ACME and Cloudflare routers" {
+  joomlaServiceProperty "$compose" joomlaalpha labels > "$work/labels"
+  printf '%s\n' '      - "traefik.http.routers.public.rule=Host(`public.example.test`)"' \
+    '      - "traefik.http.routers.public.tls.certresolver=vdmresolver"' \
+    '      - "traefik.http.routers.cloud.rule=Host(`cloud.example.test`)"' \
+    '      - "traefik.http.routers.cloud.tls.certresolver=cfresolver"' >> "$work/labels"
+  joomlaSetServiceProperty "$compose" "$work/custom.yml" joomlaalpha labels "$work/labels"
+  joomlaTLSRewrite "$work/custom.yml" "$work/result.yml" "$routes" local "$work"
+  assert_file_contains "$work/result.yml" 'public.tls.certresolver=vdmresolver'
+  assert_file_contains "$work/result.yml" 'cloud.tls.certresolver=cfresolver'
+  assert_file_contains "$work/result.yml" 'joomlaalpha.tls=true'
+  refute_file_contains "$work/result.yml" 'joomlaalpha.tls.certresolver='
 }

@@ -97,7 +97,9 @@ the stopped site; retry its Connection / SSL action rather than creating it agai
   other sites' secrets are not copied. `VDM_<ENV>_TLS_MODE` records the selected
   mode, while discovery reads actual labels rather than trusting stale metadata.
 - Certificates and leaf keys live in the existing `/conf` bind directory's
-  `octojoom` child directory. Dynamic YAML files are watched by Traefik. New
+  `octojoom` child directory. Dynamic YAML files live directly in `/conf`, where
+  Traefik watches changes. Publication requests OS authorization when this
+  directory is root-owned, without changing its ownership. New
   Traefik setups mount `/conf` read-only; existing mounts are reused as configured.
   Only this child directory is made writable for the invoking user when needed.
   Rootless/custom-user Traefik configurations require explicit file access setup
@@ -107,6 +109,10 @@ the stopped site; retry its Connection / SSL action rather than creating it agai
   archive. Keep it private: it can issue certificates trusted by this computer.
 - Candidate Compose/ENV files are validated before publication. Only affected
   services that are already running are recreated; stopped sites remain stopped.
+  When Traefik is running, the operation verifies each running selected router's
+  hostname and certificate through the published port. This uses the trusted
+  local CA explicitly, so it also works with clients that have a separate CA
+  bundle; it does not disable TLS validation. Failed verification triggers recovery.
   Renewal is picked up by the file provider without recreating application or
   proxy containers. Repeating an unchanged selection is a no-op for containers.
 - A failed publication restores the prior routing, environment, local certificate
@@ -152,7 +158,7 @@ to this computer; it is not a public certificate or a sharing mechanism.
 The unit suite covers label preservation, environment isolation, mode round trips,
 unknown-label rejection, URL changes, CLI discovery and failed transactions.
 Native trust jobs exercise mkcert on Linux, macOS and Windows. The Docker
-acceptance job installs Joomla and verifies trusted HTTPS through Traefik with a
+acceptance job installs Joomla and its companion viewers and verifies trusted HTTPS through Traefik with a
 nondefault port, renewal, repeat application, Apache/Nginx, HTTP return and
 stopped-site behavior. It also verifies that database and proxy containers are
 not unnecessarily recreated. Browser trust must still be checked in the actual
