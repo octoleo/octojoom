@@ -97,7 +97,7 @@ the stopped site; retry its Connection / SSL action rather than creating it agai
   other sites' secrets are not copied. `VDM_<ENV>_TLS_MODE` records the selected
   mode, while discovery reads actual labels rather than trusting stale metadata.
 - Certificates and leaf keys live in the existing `/conf` bind directory's
-  `octojoom` child directory. Dynamic JSON files are watched by Traefik. New
+  `octojoom` child directory. Dynamic YAML files are watched by Traefik. New
   Traefik setups mount `/conf` read-only; existing mounts are reused as configured.
   Only this child directory is made writable for the invoking user when needed.
   Rootless/custom-user Traefik configurations require explicit file access setup
@@ -125,7 +125,7 @@ octojoom --type joomla --task ssl --container demo.example.test \
 Use `--mode acme` or `--mode cloudflare` for the existing public certificate
 policies. Switching away from local mode removes its dynamic certificate entry so
 it cannot shadow the public certificate. Leaf files are host-only and can be
-removed when no longer referenced by the site's dynamic JSON.
+removed when no longer referenced by the site's dynamic YAML.
 
 HTTP mode removes Octojoom's TLS/HSTS/Cloudflare middleware selection and adds a
 host-router priority above the original catch-all redirect. A global Traefik

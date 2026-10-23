@@ -179,10 +179,10 @@ tls_transaction_fixture() {
   assert_output_contains "https://$site:8443"
   cmp "$VDM_REPO_PATH/joomla/.env" "$work/shared-before"
   assert_file_contains "$directory/.env" 'VDM_ALPHA_TLS_MODE="local"'
-  [ -f "$VDM_PROJECT_PATH/traefik/conf/octojoom-$site.json" ]
+  [ -f "$VDM_PROJECT_PATH/traefik/conf/octojoom-$site.yaml" ]
   run joomlaTLSSet "$site" acme
   assert_success
-  refute_file_exists "$VDM_PROJECT_PATH/traefik/conf/octojoom-$site.json"
+  refute_file_exists "$VDM_PROJECT_PATH/traefik/conf/octojoom-$site.yaml"
   assert_file_contains "$compose" '.tls.certresolver=vdmresolver'
   refute_file_exists "$directory/.octojoom-change.lock"
 }
@@ -195,7 +195,7 @@ tls_transaction_fixture() {
   assert_failure
   cmp "$compose" "$work/before.yml"
   refute_file_exists "$directory/.env"
-  refute_file_exists "$VDM_PROJECT_PATH/traefik/conf/octojoom-$site.json"
+  refute_file_exists "$VDM_PROJECT_PATH/traefik/conf/octojoom-$site.yaml"
   refute_file_exists "$directory/.octojoom-change.lock"
 }
 
@@ -215,4 +215,27 @@ tls_transaction_fixture() {
   assert_failure
   assert_output_contains 'Another configuration change'
   [ -d "$directory/.octojoom-change.lock" ]
+}
+
+@test "TLS selector excludes local sites and changes only checked websites" {
+  make_joomla_container beta BETA beta example.test
+  joomlaTLSDiscover() { VDM_TLS_MODE=http; [ "$1" != beta.example.test ] || VDM_TLS_MODE=local; }
+  joomlaTLSSet() { printf '%s\n' "$1" >> "$SANDBOX/selected-sites"; }
+  whiptail() { printf '%s\n' "$*" >> "$SANDBOX/menu-arguments"; command whiptail "$@"; }
+  answers alpha.example.test
+  showJoomlaTLSSelection
+  assert_equal "$(cat "$SANDBOX/selected-sites")" alpha.example.test
+  assert_file_contains "$SANDBOX/menu-arguments" '0 112 0'
+  refute_file_contains "$SANDBOX/menu-arguments" beta.example.test
+}
+
+@test "TLS JSON input uses the same action and mode as direct flags" {
+  printf '%s' '{"type":"joomla","task":"ssl","container":"alpha.example.test","action":"set","options":{"mode":"local","update-hosts":true}}' > "$work/request.json"
+  parseCLI --input-json "$work/request.json"
+  cliApplyValues
+  assert_equal "$VDM_MODE" local
+  assert_equal "$VDM_ACTION" set
+  assert_equal "$VDM_CONTAINER" alpha.example.test
+  assert_equal "$VDM_UPDATE_HOST" true
+  cliPreflightOtherTask
 }
