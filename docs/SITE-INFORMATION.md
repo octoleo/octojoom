@@ -5,6 +5,38 @@ action. The details refresh after each action. Back returns to the website list,
 then the original Joomla menu. Existing Compose directories appear immediately;
 no registration, conversion or additional project record is needed.
 
+## Information and actions
+
+The selected website opens with focus in its information area. This area shows
+up to ten lines at a time; on shorter terminals it uses less space so the actions
+remain visible underneath. The complete report is available by scrolling.
+
+- **Up/Down** or **Page Up/Page Down** scroll the information.
+- **Tab** moves from the information to the actions. Use **Up/Down** to choose an
+  action, then **Enter** to select it.
+- **Shift+Tab** returns from the actions to the information. Further Tab presses
+  cycle through the **Select** and **Back** buttons using normal whiptail behavior.
+- **Back** or **Escape** leaves the selected website without running an action.
+
+The dialog uses the usual 112-column width when space permits and fits inside
+narrower terminals. Long paths, URLs and image identifiers wrap within the
+information area; the report is neither shortened nor horizontally scrolled.
+Its length does not reduce the action-list height. A 24-row terminal provides
+eight action rows; taller terminals show more. The remaining actions are reached
+by scrolling the list.
+
+The layout is recalculated whenever the website dialog opens or refreshes after
+an action. Whiptail does not rearrange an already-open dialog when the terminal
+is resized; close and reopen the website details after resizing.
+
+This uses the existing whiptail controls. Some whiptail/newt versions draw an
+incomplete right border around a menu with scrollable text, and Debian/Ubuntu
+builds can also hide the information scrollbar
+([newt issue 945320](https://bugs.debian.org/945320)). The text still wraps and
+scrolls with the keys above, and the action-list scrollbar remains available.
+
+## Website state and details
+
 The list includes enabled and disabled websites. Enabled normally means the
 enabled symlink points at that site's available directory. Git Bash can copy a
 directory instead of creating a native symlink; that entry is recognized only
