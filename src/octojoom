@@ -1237,7 +1237,7 @@ function joomlaSetupCustomization() {
   if [ "${VDM_TLS_CHOICE:-default}" != default ]; then
     if [ "$VDM_TLS_CHOICE" = local ]; then
       joomlaTLSPrerequisites || return $?
-      traefikPrepareLocalHTTPS false || return $?
+      runActionProgress 'Prepare Traefik' 'Checking the proxy for local HTTPS' traefikPrepareLocalHTTPS false || return $?
     fi
     joomlaTLSProxy "$VDM_TLS_CHOICE" || return $?
   fi
@@ -1660,7 +1660,10 @@ function joomla__TRuST__setup() {
   joomlaSaveSetupChoices || return $?
   joomlaPublishSetup || return $?
   if [ "${VDM_TLS_CHOICE:-default}" != default ]; then
-    (VDM_TLS_NEW_SITE=true; joomlaTLSSet "${VDM_SUBDOMAIN}.${VDM_DOMAIN}" "$VDM_TLS_CHOICE") || {
+    (VDM_TLS_NEW_SITE=true
+      if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then joomlaTLSSet "${VDM_SUBDOMAIN}.${VDM_DOMAIN}" "$VDM_TLS_CHOICE"
+      else showJoomlaTLSChange "${VDM_SUBDOMAIN}.${VDM_DOMAIN}" "$VDM_TLS_CHOICE"; fi
+    ) || {
       printf 'The new site configuration is saved but not enabled. Retry Connection / SSL for %s.%s.\n' "$VDM_SUBDOMAIN" "$VDM_DOMAIN" >&2
       return 1
     }
@@ -2396,7 +2399,7 @@ function joomla__TRuST__webserver() {
     if isFunc cliHasValue && cliHasValue VDM_JV; then requested_tag="${VDM_JV:-}"; fi
     image=$(joomlaRuntimeSelectImage "$site" "$flavor" "$requested_tag") || exit 1
     if [ "$choice" = nginx ]; then
-      docker pull "$nginx_image" >&2 || exit 1
+      runActionProgress 'Download webserver image' "Downloading $nginx_image." docker pull "$nginx_image" >&2 || exit 1
       if [ -z "${VDM_NGINX_CONFIG:-}" ]; then
         local htaccess_status=0
         joomlaHasCustomHtaccess "$site" "$VDM_SITE_SERVICE" "$root" || htaccess_status=$?
@@ -3544,6 +3547,35 @@ function saveContainerCompose() {
 
 # Run Compose exactly once with the selected environment. A failed operation must
 # never be retried without its credentials or hidden by later filesystem changes.
+function runComposeProgress() {
+  local compose_file="$1" argument operation='' message='' skip_value=false
+  shift
+  # Inspect only Compose's command position. A path or project called "up"
+  # must not turn config/log/exec output into a progress display.
+  for argument in "$@"; do
+    if "$skip_value"; then skip_value=false; continue; fi
+    case "$argument" in
+      compose) ;;
+      --file|-f|--env-file|--project-directory|--project-name|-p|--profile|--ansi|--progress|--parallel) skip_value=true;;
+      --file=*|--env-file=*|--project-directory=*|--project-name=*|--profile=*|--ansi=*|--progress=*|--parallel=*|--compatibility|--all-resources) ;;
+      up|start|stop|restart|down|pull|build) operation="$argument"; break;;
+      *) break;;
+    esac
+  done
+  case "$operation" in
+    up) message='Preparing images and starting the selected services';;
+    start) message='Starting the selected services';;
+    stop) message='Stopping the selected services safely';;
+    restart) message='Restarting the selected services';;
+    down) message='Stopping and removing the selected containers';;
+    pull) message='Downloading the selected container images';;
+    build) message='Building the selected container images';;
+    *) docker "$@"; return $?;;
+  esac
+  runActionProgress 'Docker Compose' "$message
+Configuration: $compose_file" docker "$@"
+}
+
 function runContainerCompose() {
   local env_file="${1:-}"
   local compose_file="${2:-}"
@@ -3554,9 +3586,9 @@ function runContainerCompose() {
     return 1
   fi
   if [ -n "${env_file}" ]; then
-    docker compose --env-file "${env_file}" --file "${compose_file}" "$@" || compose_status=$?
+    runComposeProgress "$compose_file" compose --env-file "${env_file}" --file "${compose_file}" "$@" || compose_status=$?
   else
-    docker compose --file "${compose_file}" "$@" || compose_status=$?
+    runComposeProgress "$compose_file" compose --file "${compose_file}" "$@" || compose_status=$?
   fi
   if [ "${compose_status}" -ne 0 ]; then
     showError "Docker Compose failed for (${compose_file}), exit status ${compose_status}.\n\nCheck the Docker output before trying again."
@@ -4194,7 +4226,6 @@ function cloneJoomlaContainerUnlocked() {
   local host_conflict
   local host_suffix
   local shared_note=''
-  local copy_pid
   local source_state=0
   local restart_status=0
   ##########################
@@ -4509,18 +4540,10 @@ to start (${container}) again." 12
     return 1
   fi
   project_created=true
-  rm -f "${VDM_SRC_PATH}/.clone_status"
-  progressSwitchOn
-  {
-    runPrivileged cp -a "${VDM_PROJECT_PATH}/${project}/." "${new_project}/" 2>"${VDM_SRC_PATH}/.clone_error"
-    echo $? >"${VDM_SRC_PATH}/.clone_status"
-    progressSwitchOff
-  } &
-  copy_pid=$!
-  showProgress "Copying the (${project}) project folder to (${VDM_KEY}).\n(cp -a ${project}/. ${VDM_KEY}/)" "Cloning Project Files"
-  # wait for the copy only, never for other background jobs of the shell
-  wait "${copy_pid}"
-  copy_status=$(cat "${VDM_SRC_PATH}/.clone_status" 2>/dev/null)
+  copy_status=0
+  runActionProgress 'Cloning project files' "Copying $project to $VDM_KEY.
+Destination: $new_project" runPrivileged cp -a "${VDM_PROJECT_PATH}/${project}/." "${new_project}/" \
+    2>"${VDM_SRC_PATH}/.clone_error" || copy_status=$?
   ##########################
   ### 18. start the source containers again (even when the copy failed)
   if ${source_running}; then
@@ -4535,11 +4558,11 @@ Use (Enable existing container) or (Pull up all enabled containers) to start (${
   fi
   if [ "${copy_status}" != "0" ]; then
     showError "The project folder could not be copied, so the clone was rolled back:\n\n$(cat "${VDM_SRC_PATH}/.clone_error" 2>/dev/null)" 16
-    rm -f "${VDM_SRC_PATH}/.clone_status" "${VDM_SRC_PATH}/.clone_error"
+    rm -f "${VDM_SRC_PATH}/.clone_error"
     cloneJoomlaRollback "${new_dir}" "${new_project}" "${project_created}" "${shared_env}" "${env_added}"
     return 1
   fi
-  rm -f "${VDM_SRC_PATH}/.clone_status" "${VDM_SRC_PATH}/.clone_error"
+  rm -f "${VDM_SRC_PATH}/.clone_error"
   ##########################
   ### 19. point the cloned configuration.php at the clone's own database (and mailcatcher)
   if ${patch_host}; then
@@ -4610,9 +4633,9 @@ function composeSourceContainer() {
   # check if image has its own env file also
   evn_file=$(getContainerEnvFile "${VDM_CONTAINER_TYPE}" "${container}")
   if [ ${#evn_file} -ge 1 ]; then
-    docker compose --env-file "${evn_file}" --file "${yml}" "${action}"
+    runComposeProgress "$yml" compose --env-file "${evn_file}" --file "${yml}" "${action}"
   else
-    docker compose --file "${yml}" "${action}"
+    runComposeProgress "$yml" compose --file "${yml}" "${action}"
   fi
 }
 
@@ -5046,25 +5069,14 @@ function migrateContainer() {
   main
 }
 
-# Run a permission operation in the background for the gauge, then wait for
-# that specific job and preserve its result before another operation starts.
+# Complete each permission operation before another stage starts. The shared
+# display retains native failures and keeps authentication foregrounded.
 function runPermissionProgress() {
   local message="${1:-}"
-  local permission_pid permission_status=0
+  local permission_status=0
   shift
-  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
-    "$@"
-    return $?
-  fi
-  progressSwitchOn || return 1
-  {
-    "$@" || permission_status=$?
-    progressSwitchOff
-    exit "${permission_status}"
-  } &
-  permission_pid=$!
-  showProgress "${message}"
-  wait "${permission_pid}" || permission_status=$?
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then "$@"; return $?; fi
+  runActionProgress 'Updating permissions' "$message" "$@" || permission_status=$?
   if [ "${permission_status}" -ne 0 ]; then
     showError "The permission update failed (exit status ${permission_status}).\n\nReview the command output and correct the failure before continuing."
   fi
@@ -5334,7 +5346,8 @@ Would you like to continue anyway?" "Database Is Running" 12 112 "defaultno"; th
         mkdir "${VDM_PROJECT_PATH}/${new_persistent}" || return $?
         # clone or (copy) the files to a new directory (including hidden files).
         local copy_status=0
-        runPrivileged cp -a "${VDM_PROJECT_PATH}/${persistent}/." "${VDM_PROJECT_PATH}/${new_persistent}/" || copy_status=$?
+        runActionProgress 'Copy project files' "Copying $persistent to $new_persistent." \
+          runPrivileged cp -a "${VDM_PROJECT_PATH}/${persistent}/." "${VDM_PROJECT_PATH}/${new_persistent}/" || copy_status=$?
         if [ "${copy_status}" -ne 0 ]; then
           runPrivileged rm -rf "${VDM_PROJECT_PATH}/${new_persistent}" ||
             showError "The incomplete copy (${new_persistent}) could not be removed."
@@ -6498,6 +6511,34 @@ function joomla__TRuST__database() {
 
 ######################################## LOCAL HTTPS
 
+# A curated action receipt, separate from command diagnostics and machine output.
+# Callers create the private file; only known descriptions and paths are recorded.
+function joomlaTLSReport() {
+  [ -n "${OCTOJOOM_TLS_REPORT:-}" ] || return 0
+  [ -f "$OCTOJOOM_TLS_REPORT" ] && [ ! -L "$OCTOJOOM_TLS_REPORT" ] || return 0
+  printf '%s\n' "$1" >> "$OCTOJOOM_TLS_REPORT" || true
+}
+
+# Dialogs and native authorization must have sole ownership of the terminal.
+function joomlaTLSPrompt() {
+  local status=0
+  actionProgressPause
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && [ "${OCTOJOOM_OUTPUT:-text}" != json ] && [ -t 0 ] && [ -e /dev/tty ]; then "$@" >/dev/tty 2>/dev/tty || status=$?
+  else "$@" || status=$?; fi
+  actionProgressResume
+  return "$status"
+}
+
+function joomlaTLSSaveReport() {
+  local report="$1" target="$2" temporary
+  ! migrationPathHasSymlink "$target" || return 1
+  [ ! -e "$target" ] || [ -f "$target" ] || return 1
+  temporary=$(mktemp "${target}.XXXXXX") || return 1
+  if ! cp "$report" "$temporary" || ! chmod 600 "$temporary" || ! mv -f "$temporary" "$target"; then
+    rm -f -- "$temporary"; return 1
+  fi
+}
+
 # Match the environment used by Traefik's existing enable action.
 function traefikComposeEnvFile() {
   if [ -f "$VDM_REPO_PATH/traefik/.env" ]; then printf '%s\n' "$VDM_REPO_PATH/traefik/.env"
@@ -6598,6 +6639,7 @@ function traefikPrepareLocalHTTPS() {
     local start="${1:-false}" directory="$VDM_REPO_PATH/traefik" file="$VDM_REPO_PATH/traefik/docker-compose.yml"
     local work='' lock='' original=false published=false success=false runtime=false running=false model value conf network item
     local changed=false status=0 recovery_failed=false
+    actionProgressStep 20 'Checking Traefik configuration and local Docker access'
     command -v jq >/dev/null || { printf 'Preparing local HTTPS requires jq. Install jq and retry.\n' >&2; exit 2; }
     traefikLocalContext || exit 1
     ! migrationPathHasSymlink "$file" || { printf 'Traefik configuration uses a symbolic link: %s. Use a regular configuration file before preparing local HTTPS.\n' "$file" >&2; exit 1; }
@@ -6607,6 +6649,7 @@ function traefikPrepareLocalHTTPS() {
     work=$(mktemp -d "$directory/.octojoom-https.XXXXXX") || { rmdir "$lock"; exit 1; }
     trap 'status=$?
       if [ "$success" != true ] && { [ "$published" = true ] || [ "$runtime" = true ]; }; then
+        actionProgressStep 95 "Recovering the previous Traefik configuration and running state"
         if [ "$original" = true ]; then
           traefikPublishConfiguration "$work/original.yml" "$file" || recovery_failed=true
           if [ "$runtime" = true ] && [ "$running" = true ]; then
@@ -6623,6 +6666,7 @@ function traefikPrepareLocalHTTPS() {
         else printf "The previous Traefik configuration and running state were restored.\n" >&2; fi
       elif [ "$success" = true ] && [ "$changed" = true ] && [ "$original" = true ]; then
         printf "Previous Traefik configuration: %s/original.yml\n" "$work" >&2
+        joomlaTLSReport "Previous Traefik configuration: $work/original.yml"
       else rm -rf -- "$work"; fi
       rmdir "$lock" 2>/dev/null || true
       exit "$status"' EXIT
@@ -6658,6 +6702,7 @@ function traefikPrepareLocalHTTPS() {
     if [ -z "$conf" ] || migrationPathHasSymlink "$conf"; then printf 'Traefik /conf must use one local bind directory. Check the volumes in %s.\n' "$file" >&2; exit 1; fi
     if [ ! -d "$conf" ]; then
       mkdir -p "$conf" 2>/dev/null || cliSudo mkdir -p "$conf" || { printf 'Cannot create the certificate configuration directory: %s\n' "$conf" >&2; exit 1; }
+      joomlaTLSReport "Created Traefik certificate configuration directory: $conf"
     fi
     OCTOJOOM_TRAEFIK_COMPOSE="$work/candidate.yml" joomlaTLSProxy local || exit 1
     if [ "$original" = true ]; then
@@ -6669,6 +6714,9 @@ function traefikPrepareLocalHTTPS() {
       traefikPublishConfiguration "$work/candidate.yml" "$file" || { printf 'Cannot save Traefik configuration: %s\n' "$file" >&2; exit 1; }
       published=true
       printf 'Updated Traefik for local HTTPS: HTTPS port and watched certificate directory are ready.\n' >&2
+      joomlaTLSReport "Updated Traefik Compose: $file (HTTPS entrypoint, published port and watched /conf directory ready)."
+    else
+      joomlaTLSReport "Reused Traefik Compose without changes: $file"
     fi
     if { [ "$running" = true ] && [ "$changed" = true ]; } || { [ "$running" != true ] && [ "$start" = true ]; }; then
       while IFS= read -r network; do
@@ -6676,10 +6724,16 @@ function traefikPrepareLocalHTTPS() {
         docker network inspect "$network" >/dev/null 2>&1 || docker network create "$network" >&2 || exit 1
       done < <(printf '%s' "$model" | joomlaSiteJSON -r '.networks // {} | to_entries[] | select(.value.external==true) | .value.name // .key')
       runtime=true
+      actionProgressStep 35 'Starting Traefik and waiting for Docker readiness; the proxy may briefly restart'
       printf 'Starting the prepared Traefik service; an existing proxy may briefly restart.\n' >&2
       traefikRunCompose "$file" up -d --no-deps --force-recreate --wait --wait-timeout 90 traefik >&2 || {
         printf 'Traefik could not start. Check Docker and any published-port conflict reported above; your site connection has not been changed.\n' >&2; exit 1;
       }
+      joomlaTLSReport 'Started the prepared Traefik service; Docker readiness check passed.'
+    elif [ "$running" = true ]; then
+      joomlaTLSReport 'Traefik was already running; no proxy restart was needed.'
+    else
+      joomlaTLSReport 'Traefik remains stopped; enabling local HTTPS on a website will start it.'
     fi
     success=true
     printf 'Traefik is prepared for local HTTPS.\n' >&2
@@ -6843,7 +6897,11 @@ function joomlaTLSTrusted() {
 # remain predictable: they report prerequisites without installing software.
 function joomlaTLSInstallPrerequisites() {
   local manager='' install_command='' status=0 prefix
-  if command -v mkcert >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then return 0; fi
+  actionProgressStep 5 'Checking mkcert and OpenSSL certificate tools'
+  if command -v mkcert >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
+    joomlaTLSReport "Reused installed certificate tools: mkcert ($(command -v mkcert)); OpenSSL ($(command -v openssl))."
+    return 0
+  fi
   if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
     printf 'Local HTTPS requires mkcert and OpenSSL. Install these host tools, run mkcert -install interactively, then retry. Automatic package installation is only available from the interactive local HTTPS action.\n' >&2
     return 2
@@ -6869,12 +6927,14 @@ function joomlaTLSInstallPrerequisites() {
     return 2
   fi
   printf 'Preparing local HTTPS: installing certificate tools with %s. Administrator authorization may be requested.\n' "$manager" >&2
+  actionProgressStep 8 "Installing certificate tools with $manager; downloads can take several minutes"
   case "$manager" in
     apt-get)
-      cliSudo apt-get update >&2 && cliSudo apt-get install -y mkcert openssl libnss3-tools ca-certificates >&2 || status=$?;;
-    dnf) cliSudo dnf install -y mkcert openssl nss-tools ca-certificates >&2 || status=$?;;
-    brew) brew install mkcert nss openssl@3 >&2 || status=$?;;
-    choco) choco install mkcert openssl.light --yes --no-progress >&2 || status=$?;;
+      runActionProgress 'Certificate tools' 'Refreshing the package index before installing certificate tools' cliSudo apt-get update >&2 &&
+        runActionProgress 'Certificate tools' 'Installing mkcert, OpenSSL, NSS tools and CA certificates' cliSudo apt-get install -y mkcert openssl libnss3-tools ca-certificates >&2 || status=$?;;
+    dnf) runActionProgress 'Certificate tools' 'Installing mkcert, OpenSSL, NSS tools and CA certificates' cliSudo dnf install -y mkcert openssl nss-tools ca-certificates >&2 || status=$?;;
+    brew) joomlaTLSPrompt brew install mkcert nss openssl@3 >&2 || status=$?;;
+    choco) joomlaTLSPrompt choco install mkcert openssl.light --yes --no-progress >&2 || status=$?;;
   esac
   if [ "$status" -ne 0 ]; then
     printf 'The certificate-tool installation failed (exit %s). Resolve the package-manager error shown above, or run: %s\nThen choose Local trusted HTTPS again. On Windows, Chocolatey may require an administrator terminal.\n' "$status" "$install_command" >&2
@@ -6899,6 +6959,8 @@ function joomlaTLSInstallPrerequisites() {
     printf 'The package manager finished, but mkcert or OpenSSL is still unavailable in this terminal. Reopen the terminal to load its updated PATH, then choose Local trusted HTTPS again.\n' >&2
     return 2
   fi
+  joomlaTLSReport "Installed certificate packages using: $install_command"
+  joomlaTLSReport "Certificate tools: mkcert ($(command -v mkcert)); OpenSSL ($(command -v openssl))."
 }
 
 function joomlaTLSPrerequisites() {
@@ -6908,15 +6970,20 @@ function joomlaTLSPrerequisites() {
   root="${root//$'\r'/}"
   if command -v cygpath >/dev/null 2>&1; then root=$(cygpath -u "$root") || return 1; fi
   VDM_TLS_CAROOT="$root"
+  actionProgressStep 12 'Checking operating-system trust for the local certificate authority'
   if ! joomlaTLSTrusted "$root/rootCA.pem"; then
     if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
       printf 'Host trust is not installed. Run mkcert -install interactively on this host, then retry. No site settings were changed.\n' >&2
       return 2
     fi
-    joomlaTLSConfirmTrust || { printf 'Certificate trust was not approved; the website connection was not changed.\n' >&2; return 1; }
-    mkcert -install >&2 || return 1
+    joomlaTLSPrompt joomlaTLSConfirmTrust || { printf 'Certificate trust was not approved; the website connection was not changed.\n' >&2; return 1; }
+    joomlaTLSPrompt mkcert -install >&2 || return 1
     joomlaTLSTrusted "$root/rootCA.pem" || { printf 'The operating-system trust check failed after mkcert -install.\n' >&2; return 1; }
+    joomlaTLSReport "Installed local CA trust with mkcert -install. CA certificate: $root/rootCA.pem"
+  else
+    joomlaTLSReport "Reused trusted local CA: $root/rootCA.pem"
   fi
+  joomlaTLSReport "Local CA directory (host only): $root. Its private key stays on this computer."
 }
 
 # Only ordinary list-style labels are rewritten; custom map/anchor syntax is
@@ -6984,26 +7051,48 @@ function joomlaTLSCertificateValid() {
 # Explicit CA validation also works with Git Bash curl's separate CA bundle;
 # the OS trust check has already succeeded before any publication.
 function joomlaTLSVerify() {
-  local site="$1" proxy="$VDM_REPO_PATH/traefik/docker-compose.yml" running attempt service router host url
+  local site="$1" proxy="$VDM_REPO_PATH/traefik/docker-compose.yml" running attempt service router host url code='' verified=false message
   running=$(traefikRunCompose "$proxy" ps --status running --services) || return 1
   if ! printf '%s\n' "$running" | grep -qxF traefik; then
-    printf 'Traefik is stopped; HTTPS is configured and will be available when the proxy starts.\n' >&2
+    message='Traefik is stopped; HTTPS is configured. Start the proxy and website before opening the URL.'
+    printf '%s\n' "$message" >&2
+    joomlaTLSReport "$message"
     return 0
   fi
+  running=$(joomlaSiteCompose "$site" ps --status running --services) || return 1
   while IFS=$'\t' read -r service router host; do
     [ -n "$host" ] || continue
-    running=$(joomlaSiteCompose "$site" ps --status running --services) || return 1
-    printf '%s\n' "$running" | grep -qxF "$service" || continue
     url=$(joomlaTLSURL local "$host" "$VDM_TLS_PORT")
+    if ! printf '%s\n' "$running" | grep -qxF "$service"; then
+      joomlaTLSReport "Configured $url; $service is stopped, so its endpoint was not checked."
+      continue
+    fi
     for ((attempt=0; attempt<15; attempt++)); do
-      if curl --noproxy '*' --silent --show-error --max-time 3 --output /dev/null \
-        --cacert "$VDM_TLS_CAROOT/rootCA.pem" --resolve "$host:$VDM_TLS_PORT:$VDM_TLS_ADDRESS" "$url" 2>/dev/null; then break; fi
-      sleep 1
+      actionProgressStep 90 "Waiting for HTTPS routing: $host (check $((attempt+1)) of 15)"
+      verified=false
+      if code=$(curl --noproxy '*' --silent --show-error --max-time 3 --output /dev/null --write-out '%{http_code}' \
+        --cacert "$VDM_TLS_CAROOT/rootCA.pem" --resolve "$host:$VDM_TLS_PORT:$VDM_TLS_ADDRESS" "$url" 2>/dev/null) && [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]; then
+        verified=true
+        # Traefik can present the new certificate before its Docker routers or
+        # the restarted application are ready. A successful TLS handshake alone
+        # must not end that wait. Permanent application errors remain visible,
+        # but do not undo an otherwise valid certificate configuration.
+        case "$code" in 404|502|503|504) ;; *) break;; esac
+      fi
+      [ "$attempt" -ge 14 ] || sleep 1
     done
-    if [ "$attempt" -eq 15 ]; then
+    if [ "$verified" != true ]; then
       printf 'Certificate verification failed at %s. Inspect Traefik logs and its /conf mount; restoring the previous connection.\n' "$url" >&2
       return 1
     fi
+    case "$code" in
+      2??|3??) joomlaTLSReport "Verified HTTPS: $url (HTTP $code).";;
+      401|403) joomlaTLSReport "HTTPS verified: $url (HTTP $code; the website requires authorization).";;
+      *)
+        message="HTTPS certificate verified, but $url returned HTTP $code. The website is not confirmed ready; check its application and Traefik logs. Connection settings were saved."
+        printf '%s\n' "$message" >&2
+        joomlaTLSReport "$message";;
+    esac
   done <<< "$VDM_TLS_VERIFY_ROUTES"
 }
 
@@ -7041,6 +7130,8 @@ function joomlaTLSSet() {
     local url cert='' leaf='' service router host existing='' status=0 rollback_failed=false
     local -a hosts=() services=()
     local OCTOJOOM_SITE_VALIDATE_FUNCTION='' VDM_TLS_VERIFY_ROUTES=''
+    actionProgressStep 2 "Inspecting the current connection for $site"
+    joomlaTLSReport "Connection change: $site -> $mode ($(date '+%Y-%m-%d %H:%M:%S %Z'))"
     case "$mode" in http|local|acme|cloudflare) ;; *) printf 'Choose mode http, local, acme or cloudflare.\n' >&2; exit 2;; esac
     command -v jq >/dev/null || { printf 'Connection changes require jq.\n' >&2; exit 2; }
     joomlaTLSDiscover "$site" || exit 1
@@ -7067,6 +7158,7 @@ function joomlaTLSSet() {
     fi
     work=$(mktemp -d "$directory/.octojoom-tls.XXXXXX") || exit 1
     trap 'status=$?; if [ "$success" != true ]; then
+      actionProgressStep 95 "Recovering the previous website connection after an error"
       if [ "$app_changed" = true ]; then joomlaDatabaseWriteConfiguration "$site" "$work/configuration.original" >&2 || rollback_failed=true; fi
       if [ "$published" = true ]; then
         if [ "$previous" = true ]; then joomlaTLSInstallDynamic "$work/previous.json" "$dynamic" || rollback_failed=true
@@ -7082,6 +7174,7 @@ function joomlaTLSSet() {
     site_lock="$directory/.octojoom-change.lock"
     mkdir "$site_lock" 2>/dev/null || { site_lock=''; printf 'Another configuration change is using %s.\n' "$site" >&2; exit 1; }
     local OCTOJOOM_SITE_HELD_LOCK="$site_lock"
+    actionProgressStep 45 'Preparing and validating the website Compose and environment files'
     siteWriteScopedEnv "$compose" "$env_file" "$env_key" "$work/.env" || exit 1
     writeEnvVariable "$work/.env" "VDM_${env_key}_TLS_MODE=\"$mode\"" true || exit 1
     joomlaTLSRewrite "$compose" "$work/docker-compose.yml" "$routes" "$mode" "$work" || exit 1
@@ -7106,13 +7199,18 @@ function joomlaTLSSet() {
     fi
     if [ "$mode" = local ]; then
       if [ "$renew" = true ] || [ -z "$cert" ] || [ ! -f "${cert%.pem}.key" ] || ! joomlaTLSCertificateValid "$cert" "$VDM_TLS_CAROOT" "$routes"; then
+        actionProgressStep 55 'Issuing and validating the local certificate for the website and companion URLs'
         leaf="octojoom-$site-$(date +%s)-${BASHPID}"
         mkcert -cert-file "$work/$leaf.pem" -key-file "$work/$leaf.key" "${hosts[@]}" >&2 || exit 1
         joomlaTLSCertificateValid "$work/$leaf.pem" "$VDM_TLS_CAROOT" "$routes" || exit 1
         cp "$work/$leaf.pem" "$conf/$leaf.pem" && cp "$work/$leaf.key" "$conf/$leaf.key" || exit 1
         chmod 600 "$conf/$leaf.key" "$conf/$leaf.pem" || exit 1
         cert="$conf/$leaf.pem"
+        joomlaTLSReport "Issued local certificate: $cert"
+      else
+        joomlaTLSReport "Reused valid local certificate: $cert"
       fi
+      joomlaTLSReport "Leaf private key (permissions 600): ${cert%.pem}.key"
       # JSON flow syntax is valid YAML; the file provider requires a .yaml suffix.
       # Never mount CAROOT.
       joomlaSiteJSON -n --arg cert "/conf/octojoom/${cert##*/}" --arg key "/conf/octojoom/$(basename "${cert%.pem}.key")" \
@@ -7120,15 +7218,28 @@ function joomlaTLSSet() {
       # Publish an adjacent temporary file; directory watches see the rename.
       joomlaTLSInstallDynamic "$work/certificate.json" "$dynamic" || exit 1
       published=true
+      joomlaTLSReport "Published Traefik certificate configuration: $dynamic"
       # Reuse the platform-specific hosts-file policy. Explicit --update-hosts
       # is honored and headless sudo remains noninteractive.
-      for host in "${hosts[@]}"; do updateHostFile "${host%%.*}" "${host#*.}" >&2 || exit 1; done
+      actionProgressStep 65 'Checking local hostname mappings'
+      local hosts_file=/etc/hosts
+      [ "${OS_NUMBER:-0}" != 3 ] || hosts_file=/c/Windows/System32/drivers/etc/hosts
+      for host in "${hosts[@]}"; do
+        existing=false; hostFileHasHost "$host" "$hosts_file" && existing=true
+        joomlaTLSPrompt updateHostFile "${host%%.*}" "${host#*.}" >&2 || exit 1
+        if hostFileHasHost "$host" "$hosts_file"; then
+          if [ "$existing" = true ]; then joomlaTLSReport "Reused hostname entry: $host in $hosts_file"
+          else joomlaTLSReport "Added hostname entry: $host in $hosts_file"; fi
+        else joomlaTLSReport "No hosts-file entry added for $host; use your existing DNS or map it to this computer."; fi
+      done
     elif [ "$previous" = true ]; then
       # A loaded local certificate would otherwise shadow an ACME certificate
       # with the same SNI even after the router selects a public resolver.
       joomlaTLSRemoveDynamic "$dynamic" || exit 1
       published=true
+      joomlaTLSReport "Removed the local certificate configuration: $dynamic"
     fi
+    actionProgressStep 70 'Checking Joomla URL settings while preserving the site configuration'
     # An absent configuration is normal before the first Joomla installation.
     # Other read failures are actionable and must not be silently ignored.
     if [ "${VDM_TLS_NEW_SITE:-false}" != true ]; then
@@ -7139,13 +7250,28 @@ function joomlaTLSSet() {
       if ! cmp -s "$work/configuration.original" "$work/configuration.php"; then
         app_changed=true
         joomlaDatabaseWriteConfiguration "$site" "$work/configuration.php" || exit 1
+        if [ -n "${VDM_SITE_HOST_PATH:-}" ]; then
+          joomlaTLSReport "Updated Joomla URL/SSL settings: $VDM_SITE_HOST_PATH/configuration.php"
+        else
+          joomlaTLSReport "Updated Joomla URL/SSL settings: ${VDM_SITE_DOCROOT:-website document root}/configuration.php in the website container."
+        fi
       fi
     fi
+    [ "$app_changed" = true ] || joomlaTLSReport 'Joomla configuration.php did not need a URL/SSL change.'
+    actionProgressStep 80 'Applying the connection and waiting for affected running services to restart'
     if ! cmp -s "$compose" "$work/docker-compose.yml" || ! cmp -s "$env_file" "$work/.env"; then
       sitePublishConfiguration "$site" "$work/docker-compose.yml" "$work/.env" "${services[@]}" || exit 1
+      joomlaTLSReport "Saved website Compose: $compose"
+      joomlaTLSReport "Saved scoped website environment: $directory/.env"
     elif [ "$mode" = local ]; then
       joomlaTLSVerify "$site" || exit 1
+      joomlaTLSReport "Website Compose and environment were already aligned: $compose; $env_file"
+    else
+      joomlaTLSReport "Website Compose and environment were already aligned: $compose; $env_file"
     fi
+    for host in "${hosts[@]}"; do joomlaTLSReport "Configured URL: $(joomlaTLSURL "$mode" "$host" "$VDM_TLS_PORT")"; done
+    case "$mode" in acme|cloudflare) joomlaTLSReport 'Public HTTPS routing is configured. Certificate issuance is managed by the existing Traefik resolver; this action has not verified public DNS or certificate issuance.';; esac
+    actionProgressStep 98 'Connection configuration completed; preparing the change summary'
     success=true
     printf '%s\n' "$url"
   )
@@ -7155,7 +7281,7 @@ function joomlaTLSSet() {
 # normal client trust store and DNS; it never hides a failure with curl -k.
 # shellcheck disable=SC2016
 function joomlaTLSStatus() {
-  local site="$1" mode url certificate=unavailable trust=unchecked endpoint=unchecked root='' cert='' expiry='' dynamic
+  local site="$1" mode url certificate=unavailable trust=unchecked endpoint=unchecked root='' cert='' expiry='' dynamic http_status=unchecked
   joomlaTLSDiscover "$site" || return 1
   mode="$VDM_TLS_MODE"
   joomlaTLSProxy "$mode" || return 1
@@ -7178,13 +7304,15 @@ function joomlaTLSStatus() {
   fi
   if command -v curl >/dev/null; then
     endpoint=unreachable
-    curl --noproxy '*' --silent --show-error --max-time 10 --output /dev/null "$url" 2>/dev/null && endpoint=verified
+    if http_status=$(curl --noproxy '*' --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' "$url" 2>/dev/null) && [[ "$http_status" =~ ^[1-5][0-9][0-9]$ ]]; then
+      case "$http_status" in 2??|3??) endpoint=verified;; *) endpoint="http-$http_status";; esac
+    else http_status=unavailable; fi
   fi
   if [ "${OCTOJOOM_OUTPUT:-text}" = json ]; then
-    joomlaSiteJSON -n --arg site "$site" --arg mode "$mode" --arg url "$url" --arg cert "$certificate" --arg trust "$trust" --arg endpoint "$endpoint" --arg expiry "${expiry#*=}" \
-      '{site:$site,mode:$mode,url:$url,certificate:$cert,expires:$expiry,host_trust:$trust,browser_trust:"unchecked",endpoint:$endpoint}'
+    joomlaSiteJSON -n --arg site "$site" --arg mode "$mode" --arg url "$url" --arg cert "$certificate" --arg trust "$trust" --arg endpoint "$endpoint" --arg expiry "${expiry#*=}" --arg http_status "$http_status" \
+      '{site:$site,mode:$mode,url:$url,certificate:$cert,expires:$expiry,host_trust:$trust,browser_trust:"unchecked",endpoint:$endpoint,http_status:$http_status}'
   else
-    printf 'Website: %s\nMode: %s\nURL: %s\nCertificate: %s\nExpires: %s\nHost trust: %s\nEndpoint: %s\nBrowser trust: check in your browser\n' "$site" "$mode" "$url" "$certificate" "${expiry#*=}" "$trust" "$endpoint"
+    printf 'Website: %s\nMode: %s\nURL: %s\nCertificate: %s\nExpires: %s\nHost trust: %s\nEndpoint: %s\nHTTP status: %s\nBrowser trust: check in your browser\n' "$site" "$mode" "$url" "$certificate" "${expiry#*=}" "$trust" "$endpoint" "$http_status"
   fi
 }
 
@@ -7201,17 +7329,23 @@ function showJoomlaTLSError() {
 }
 
 function showJoomlaTLSChange() {
-  local site="$1" mode="$2" renew="${3:-false}" log url status=0
-  log=$(mktemp) || return 1
-  chmod 600 "$log" || { rm -f "$log"; return 1; }
-  showInfo "Preparing $site ...\nLocal HTTPS prepares Traefik and certificate trust automatically.\nThe operating system may request authorization." 10
-  if url=$(joomlaTLSSet "$site" "$mode" "$renew" 2>"$log"); then
-    showNotice "Connection configured for $site.\n\n$url\n\nStopped websites remain stopped. Start the website if needed, then open this address."
+  local site="$1" mode="$2" renew="${3:-false}" work url status=0 receipt saved=''
+  work=$(mktemp -d) || return 1
+  chmod 700 "$work" || { rmdir "$work"; return 1; }
+  local OCTOJOOM_TLS_REPORT="$work/report.txt"
+  : > "$OCTOJOOM_TLS_REPORT"
+  chmod 600 "$OCTOJOOM_TLS_REPORT"
+  if url=$(runActionProgress "Connection / SSL | $site" 'Inspecting the website and preparing its connection' joomlaTLSSet "$site" "$mode" "$renew" 2>"$work/diagnostic"); then
+    receipt="$VDM_REPO_PATH/joomla/available/$site/.octojoom-last-connection.txt"
+    if joomlaTLSSaveReport "$OCTOJOOM_TLS_REPORT" "$receipt"; then saved="Summary saved to: $receipt"
+    else saved='The connection was configured, but saving this summary failed.'; fi
+    whiptail --title "Connection configured | $site" --backtitle "$BACK_TITLE" --scrolltext \
+      --msgbox "Connection configured for $site.\n\n$url\n\n$(cat "$OCTOJOOM_TLS_REPORT")\n\n$saved\n\nStopped websites remain stopped. Start the website if needed, then open this address." 0 112
   else
     status=$?
-    showJoomlaTLSError "Could not configure $site.\n\n$(cat "$log")"
+    showJoomlaTLSError "Could not configure $site.\n\n$(cat "$work/diagnostic")\n\nActivity before the failure (check the recovery details above):\n$(cat "$OCTOJOOM_TLS_REPORT")"
   fi
-  rm -f "$log"
+  rm -rf -- "$work"
   return "$status"
 }
 
@@ -7275,14 +7409,26 @@ function joomla__TRuST__ssl() {
 }
 
 function traefik__TRuST__update() {
-  local result
+  local result work receipt saved=''
   if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
     traefikPrepareLocalHTTPS false
   else
-    showInfo 'Preparing Traefik for local HTTPS. Existing settings are retained; a running proxy may briefly restart.' 10
-    if result=$(traefikPrepareLocalHTTPS false 2>&1); then
-      showNotice 'Traefik is ready for local HTTPS.\nChoose Connection / SSL on a website to enable its trusted certificate.\nA stopped proxy will start when local HTTPS is enabled for a website.'
-    else showJoomlaTLSError "$result"; return 1; fi
+    work=$(mktemp -d) || return 1
+    chmod 700 "$work" || { rmdir "$work"; return 1; }
+    local OCTOJOOM_TLS_REPORT="$work/report.txt"
+    : > "$OCTOJOOM_TLS_REPORT"
+    chmod 600 "$OCTOJOOM_TLS_REPORT"
+    if result=$(runActionProgress 'Prepare Traefik' 'Checking the proxy configuration for local HTTPS' traefikPrepareLocalHTTPS false 2>&1); then
+      receipt="$VDM_REPO_PATH/traefik/.octojoom-last-connection.txt"
+      if joomlaTLSSaveReport "$OCTOJOOM_TLS_REPORT" "$receipt"; then saved="Summary saved to: $receipt"
+      else saved='Proxy preparation succeeded, but saving this summary failed.'; fi
+      whiptail --title 'Traefik preparation complete' --backtitle "$BACK_TITLE" --scrolltext \
+        --msgbox "Traefik is ready for local HTTPS.\n\n$(cat "$OCTOJOOM_TLS_REPORT")\n\n$saved\n\nChoose Connection / SSL on a website to enable its trusted certificate.\nA stopped proxy will start when local HTTPS is enabled for a website." 0 112
+    else
+      showJoomlaTLSError "$result\n\n$(cat "$OCTOJOOM_TLS_REPORT")"
+      rm -rf -- "$work"; return 1
+    fi
+    rm -rf -- "$work"
   fi
 }
 
@@ -7381,6 +7527,12 @@ function siteValidateCompose() {
 # Only already-running affected services are recreated; disabled/stopped sites
 # stay stopped. The caller verifies intended semantic changes before this call.
 function sitePublishConfiguration() {
+  local OCTOJOOM_CONFIG_PROGRESS_STAGES=false
+  actionProgressActive || OCTOJOOM_CONFIG_PROGRESS_STAGES=true
+  runActionProgress "Update website | $1" 'Validating the configuration before changing website services.' sitePublishConfigurationAction "$@"
+}
+
+function sitePublishConfigurationAction() {
   (
     local site="$1" staged_compose="$2" staged_env="$3"
     shift 3
@@ -7414,6 +7566,7 @@ function sitePublishConfiguration() {
       [ -d "$lock" ] || exit 1
     fi
     siteValidateCompose "$staged_compose" "$staged_env" "$directory" || exit 1
+    [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 15 'Checking which website services are running.'
     if [ "$#" -gt 0 ] || [ "${#stop_services[@]}" -gt 0 ]; then
       running=$(migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" ps --status running --services) || {
         printf 'Cannot determine running services for %s; configuration unchanged.\n' "$site" >&2; exit 1;
@@ -7434,6 +7587,7 @@ function sitePublishConfiguration() {
       fi
     fi
     recovery=$(mktemp -d "$directory/.octojoom-recovery.XXXXXX") || exit 1
+    [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 30 'Saving the previous configuration for recovery.'
     chmod 700 "$recovery" || exit 1
     for index in "${!targets[@]}"; do
       target="${targets[index]}"
@@ -7453,6 +7607,7 @@ function sitePublishConfiguration() {
     fi
     if ! "$failed"; then
       for index in "${!targets[@]}"; do
+        [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 45 'Publishing the updated website configuration.'
         "$failed" && break
         # Write an adjacent copy so publication remains a rename on one filesystem.
         # Companions retain their explicitly prepared mode (PHP/Nginx read 0644
@@ -7472,15 +7627,18 @@ function sitePublishConfiguration() {
       done
     fi
     if ! "$failed" && [ "${#active[@]}" -gt 0 ]; then
+      [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 65 'Recreating the affected services and waiting for Docker readiness.'
       runtime_changed=true
       # Companion contents can change without changing the Compose model. A
       # renamed bind file also leaves an existing container on the old inode.
       migrationRunCompose "$directory/.env" "$compose_file" --project-directory "$directory" up -d --no-deps --force-recreate --wait --wait-timeout 90 "${active[@]}" >&2 || failed=true
       if ! "$failed" && [ -n "$callback" ]; then
+        [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 85 'Checking that the website accepted the updated configuration.'
         if ! isFunc "$callback" || ! "$callback" "$site"; then failed=true; fi
       fi
     fi
     if "$failed"; then
+      actionProgressStep 95 'Restoring the previous website configuration and running services.'
       for ((index=changed-1; index>=0; index--)); do
         target="${targets[index]}"
         if "${existed[index]}"; then
@@ -7508,6 +7666,12 @@ function sitePublishConfiguration() {
       exit 1
     fi
     printf 'Previous configuration retained in %s.\n' "$recovery" >&2
+    joomlaTLSReport "Previous website configuration: $recovery"
+    if [ "${#active[@]}" -gt 0 ]; then
+      joomlaTLSReport "Website services recreated: ${active[*]}"
+    else
+      joomlaTLSReport 'No website containers restarted; stopped services remain stopped.'
+    fi
   )
 }
 
@@ -8024,6 +8188,12 @@ function joomlaBackupResume() {
 # have all succeeded. Publication uses adjacent files and preserves old backups.
 # shellcheck disable=SC2016
 function joomlaBackupCreate() {
+  runActionProgress "Backup | $1" "Preparing the ${3:-full} backup. Services are returned to their previous state before completion.
+Archive: $2" joomlaBackupCreateAction "$@"
+}
+
+# shellcheck disable=SC2016
+function joomlaBackupCreateAction() {
   (
     set +x
     umask 077
@@ -8079,6 +8249,7 @@ function joomlaBackupCreate() {
       if migrationReadEnvValue "$VDM_SITE_ENV" VDM_PROJECT_PATH project_base; then project_root="$project_base/$project"; fi
       joomlaBackupDependencies "$site" "$package" "$config" "$database" "$project_root" || exit 1
     fi
+    actionProgressStep 15 'Pausing website writes for a consistent backup.'
     running=$(joomlaSiteCompose "$site" ps --status running --services 2>/dev/null) || exit $?
     paused=true
     while IFS= read -r name; do
@@ -8089,6 +8260,7 @@ function joomlaBackupCreate() {
         db_started=true
         joomlaSiteCompose "$site" up -d --no-deps "$database" >/dev/null || exit $?
       fi
+      actionProgressStep 25 'Waiting for the database to accept an export connection.'
       local attempt ready=false
       for ((attempt=0; attempt<30; attempt++)); do
         if joomlaDatabaseContext "$site" 2>/dev/null && joomlaDatabaseVerifyConnection "$site" >/dev/null 2>&1; then ready=true; break; fi
@@ -8096,12 +8268,15 @@ function joomlaBackupCreate() {
       done
       "$ready" || { joomlaBackupError 'The database is not ready for logical export.'; exit 1; }
       engine="$VDM_DB_ENGINE" backup_prefix="$VDM_DB_PREFIX"
+      actionProgressStep 40 'Exporting the website database.'
       joomlaDatabaseExport "$site" "$package/project/database.sql" none false >/dev/null || exit $?
       [ -s "$package/project/database.sql" ] || { joomlaBackupError 'Database export produced no SQL.'; exit 1; }
       # Database discovery may refresh globals; selected context is read again.
       readJoomlaSiteFacts "$site" || exit 1
     fi
+    actionProgressStep 55 'Copying website files and deployment configuration.'
     [ "$scope" = database ] || joomlaBackupCopyWebsite "$package/project/joomla" || exit $?
+    actionProgressStep 65 'Returning source services to their previous state.'
     joomlaBackupResume "$site" "$running" "$database" "$db_started" || exit $?
     paused=false
     relative="${VDM_SITE_DOCROOT#"$VDM_SITE_MOUNT_TARGET"}"; relative="${relative#/}"; relative="${relative:-.}"
@@ -8110,6 +8285,7 @@ function joomlaBackupCreate() {
       formatEnvAssignment "VDM_MIGRATION_${suffix}=\"$value\"" >> "$package/manifest.env" || exit 1
     done
     joomlaBackupManifest "$package/manifest.env" && joomlaBackupFileMetadata "$package" && joomlaBackupChecksums "$package" || exit 1
+    actionProgressStep 75 'Compressing the backup archive.'
     temporary=$(mktemp "$archive.partial.XXXXXX") || exit 1
     if [ "$format" = zip ]; then
       (cd "$package" && ZIPOPT='' runPrivileged zip -q -r - manifest.env compose project) > "$temporary" || exit $?
@@ -8120,6 +8296,7 @@ function joomlaBackupCreate() {
     # The validator chooses format by extension, while the publication file is private.
     local validation="$package/verify.$format"
     ln "$temporary" "$validation" || cp "$temporary" "$validation" || exit 1
+    actionProgressStep 90 'Verifying the completed archive and its checksum.'
     joomlaBackupValidateArchive "$validation" || exit 1
     digest=$(migrationArchiveDigest "$temporary") || exit 1
     printf '%s\n' "$digest" > "$temporary.sha256" || exit 1
@@ -8302,6 +8479,11 @@ function rewriteJoomlaNginxConfiguration() {
 # source labels, networks and companion files survive a narrow identity rewrite.
 # shellcheck disable=SC2016
 function joomlaBackupRestoreNew() {
+  runActionProgress "Restore | $2" 'Verifying the archive and preparing an independent website.' joomlaBackupRestoreNewAction "$@"
+}
+
+# shellcheck disable=SC2016
+function joomlaBackupRestoreNewAction() {
   (
     set +x
     umask 077
@@ -8418,6 +8600,11 @@ function joomlaBackupRollbackFiles() {
 # set; successful restore retains old storage for deliberate later cleanup.
 # shellcheck disable=SC2016
 function joomlaBackupRestoreCurrent() {
+  runActionProgress "Restore | $1" 'Preparing replacement data and checking the restored website. Original storage is retained for recovery.' joomlaBackupRestoreCurrentAction "$@"
+}
+
+# shellcheck disable=SC2016
+function joomlaBackupRestoreCurrentAction() {
   (
     set +x
     umask 077
@@ -8676,6 +8863,12 @@ function joomlaBackupList() {
 
 # shellcheck disable=SC2016
 function joomlaBackupVerify() {
+  runActionProgress 'Verify backup' "Checking archive contents and checksums.
+Archive: $1" joomlaBackupVerifyAction "$@"
+}
+
+# shellcheck disable=SC2016
+function joomlaBackupVerifyAction() {
   (
     local archive="$1" package digest scope version
     package=$(mktemp -d "${TMPDIR:-/tmp}/octojoom-backup-verify.XXXXXX") || exit 1
@@ -8771,7 +8964,7 @@ function joomla__TRuST__backup() {
           joomlaBackupRestoreCurrent "$site" "$archive" >/dev/null || exit $?
           destination="$site"
         else exit 17; fi
-        if [ "${OCTOJOOM_OUTPUT:-text}" = json ]; then joomlaSiteJSON -n --arg archive "$archive" --arg destination_site "$destination" --arg pre_restore_backup "${backup:-}" '{archive:$archive,destination_site:$destination_site,pre_restore_backup:$pre_restore_backup,restored:true}'
+        if [ "${OCTOJOOM_OUTPUT:-text}" = json ] || [ "${OCTOJOOM_BACKUP_RESULT_JSON:-false}" = true ]; then joomlaSiteJSON -n --arg archive "$archive" --arg destination_site "$destination" --arg pre_restore_backup "${backup:-}" '{archive:$archive,destination_site:$destination_site,pre_restore_backup:$pre_restore_backup,restored:true}'
         else printf 'Restored %s from %s\n' "$destination" "$archive"; fi
         exit 0;;
     esac
@@ -8869,7 +9062,9 @@ function showJoomlaBackups() {
       delete) getInputYesNo "Delete this archive?\n$choice" 'Delete Backup' 10 112 defaultno || continue; VDM_CONFIRM=true;;
     esac
     status=0
-    if [ "$action" = restore ]; then output=$(OCTOJOOM_OUTPUT=json joomla__TRuST__backup) || status=$?
+    # Only the final result needs JSON for navigation. Keep the interactive
+    # mode while restore workers display progress and collect destination input.
+    if [ "$action" = restore ]; then output=$(OCTOJOOM_BACKUP_RESULT_JSON=true joomla__TRuST__backup) || status=$?
     else output=$(joomla__TRuST__backup) || status=$?; fi
     if [ "$status" -eq 0 ] && [ "$action" = restore ] && [ "$VDM_TARGET" = new ]; then
       local restored_site
@@ -9293,7 +9488,7 @@ function useSudo() {
 # run a command with sudo where useSudo says so, else directly
 function runPrivileged() {
   if useSudo; then
-    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then sudo -n "$@"; else sudo "$@"; fi
+    cliSudo "$@"
   else
     "$@"
   fi
@@ -9746,7 +9941,7 @@ function joomlaSiteCompose() {
     # Do not hide native failure statuses behind a dialog or a second invocation.
     local -a arguments=(compose)
     [ -z "$VDM_SITE_ENV" ] || arguments+=(--env-file "$VDM_SITE_ENV")
-    docker "${arguments[@]}" --file "$VDM_SITE_COMPOSE" "$@"
+    runComposeProgress "$VDM_SITE_COMPOSE" "${arguments[@]}" --file "$VDM_SITE_COMPOSE" "$@"
   )
 }
 
@@ -11083,42 +11278,170 @@ function showLink() {
     --msgbox "${2:-To open the link click here:} ${1}" 8 112
 }
 
-# show progress bar
+# A session owns only its renderer; the requested command stays in the
+# foreground so terminal signals and credential prompts keep their meaning.
+function actionProgressActive() {
+  [ -n "${OCTOJOOM_PROGRESS_DIR:-}" ] && [ -d "$OCTOJOOM_PROGRESS_DIR" ]
+}
+
+function actionProgressCanRender() {
+  [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] &&
+    [ "${OCTOJOOM_NO_PROGRESS:-false}" != true ] &&
+    [ "${OCTOJOOM_QUIET:-false}" != true ] &&
+    [ "${OCTOJOOM_OUTPUT:-text}" != json ] &&
+    [ -t 0 ] && command -v whiptail >/dev/null 2>&1 &&
+    ( : >/dev/tty ) 2>/dev/null
+}
+
+# Percentages describe completed stages, never elapsed-time estimates.
+# The wrapper reserves 100 for successful completion.
+function actionProgressStep() {
+  local percent="${1:-0}" message="${2:-Working...}"
+  case "$percent" in ''|*[!0-9]*) percent=0 ;; esac
+  percent=$((10#$percent))
+  [ "$percent" -le 99 ] || percent=99
+  message="${message//$'\n'/ }"
+  message="${message//$'\r'/ }"
+  if actionProgressActive; then
+    printf '%s\n%s\n' "$percent" "$message" >"$OCTOJOOM_PROGRESS_DIR/state.next" &&
+      mv -f "$OCTOJOOM_PROGRESS_DIR/state.next" "$OCTOJOOM_PROGRESS_DIR/state"
+  elif [ "${OCTOJOOM_OUTPUT:-text}" != json ] && [ "${OCTOJOOM_QUIET:-false}" != true ] &&
+    [ "${OCTOJOOM_NO_PROGRESS:-false}" != true ]; then
+    printf 'PROGRESS: %s\n' "$message" >&2
+  fi
+}
+
+# This handshake works from action subshells as well: acknowledge the pause
+# only once whiptail has exited and released the terminal.
+function actionProgressPause() {
+  actionProgressActive || return 0
+  local depth=0
+  [ ! -f "$OCTOJOOM_PROGRESS_DIR/pause-depth" ] || IFS= read -r depth <"$OCTOJOOM_PROGRESS_DIR/pause-depth" || true
+  printf '%s\n' "$((depth + 1))" >"$OCTOJOOM_PROGRESS_DIR/pause-depth"
+  : >"$OCTOJOOM_PROGRESS_DIR/pause"
+  while [ -d "$OCTOJOOM_PROGRESS_DIR" ] &&
+    [ ! -f "$OCTOJOOM_PROGRESS_DIR/paused" ] &&
+    [ ! -f "$OCTOJOOM_PROGRESS_DIR/stopped" ]; do
+    sleep 0.05
+  done
+}
+
+function actionProgressResume() {
+  actionProgressActive || return 0
+  local depth=0
+  [ ! -f "$OCTOJOOM_PROGRESS_DIR/pause-depth" ] || IFS= read -r depth <"$OCTOJOOM_PROGRESS_DIR/pause-depth" || true
+  if [ "$depth" -gt 1 ]; then
+    printf '%s\n' "$((depth - 1))" >"$OCTOJOOM_PROGRESS_DIR/pause-depth"
+  else
+    rm -f "$OCTOJOOM_PROGRESS_DIR/pause" "$OCTOJOOM_PROGRESS_DIR/paused" "$OCTOJOOM_PROGRESS_DIR/pause-depth"
+  fi
+}
+
+function actionProgressDialog() {
+  exec whiptail --title "$1" --backtitle "${BACK_TITLE:-}" \
+    --gauge 'Preparing...' 10 112 0 >/dev/tty 2>/dev/tty
+}
+
+function actionProgressRender() {
+  local title="$1" gauge_pid='' sleeper='' percent=0 message='' elapsed=0
+  local started=$SECONDS outcome=''
+  trap '
+    [ -z "$sleeper" ] || { kill "$sleeper" 2>/dev/null || true; wait "$sleeper" 2>/dev/null || true; }
+    exec 9>&-
+    [ -z "$gauge_pid" ] || { kill "$gauge_pid" 2>/dev/null || true; wait "$gauge_pid" 2>/dev/null || true; }
+    [ ! -d "$OCTOJOOM_PROGRESS_DIR" ] || : >"$OCTOJOOM_PROGRESS_DIR/stopped"
+  ' EXIT
+  trap 'exit 0' HUP INT TERM PIPE
+  while [ -d "$OCTOJOOM_PROGRESS_DIR" ]; do
+    if [ -f "$OCTOJOOM_PROGRESS_DIR/done" ]; then
+      IFS= read -r outcome <"$OCTOJOOM_PROGRESS_DIR/done" || true
+      if [ "$outcome" = 0 ] && [ -n "$gauge_pid" ]; then
+        printf 'XXX\n100\nCompleted. Elapsed: %ss\nXXX\n' "$((SECONDS - started))" >&9 || true
+      fi
+      break
+    fi
+    if [ -f "$OCTOJOOM_PROGRESS_DIR/pause" ]; then
+      if [ -n "$gauge_pid" ]; then
+        exec 9>&-
+        wait "$gauge_pid" 2>/dev/null || true
+        gauge_pid=''
+      fi
+      : >"$OCTOJOOM_PROGRESS_DIR/paused"
+    else
+      if [ -z "$gauge_pid" ]; then
+        exec 9> >(actionProgressDialog "$title")
+        gauge_pid=$!
+      fi
+      {
+        IFS= read -r percent || true
+        IFS= read -r message || true
+      } <"$OCTOJOOM_PROGRESS_DIR/state"
+      elapsed=$((SECONDS - started))
+      printf 'XXX\n%s\n%s\n\nElapsed: %ss. Working; please wait.\nProgress reflects completed stages.\nXXX\n' \
+        "$percent" "$message" "$elapsed" >&9 || break
+    fi
+    sleep 0.2 &
+    sleeper=$!
+    wait "$sleeper" 2>/dev/null || true
+    sleeper=''
+  done
+  exec 9>&-
+  [ -z "$gauge_pid" ] || wait "$gauge_pid" 2>/dev/null || true
+  gauge_pid=''
+}
+
+function runActionProgress() {
+  local title="${1:-Working}" message="${2:-Please wait...}"
+  shift 2
+  # Nested operations retain the outer action's stage and diagnostics.
+  if actionProgressActive || ! actionProgressCanRender; then
+    "$@"
+    return $?
+  fi
+  (
+    umask 077
+    local OCTOJOOM_PROGRESS_DIR renderer_pid='' result=0 progress_stdout_fd progress_stderr_fd
+    OCTOJOOM_PROGRESS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/octojoom-progress.XXXXXX") || exit 1
+    exec {progress_stdout_fd}>&1 {progress_stderr_fd}>&2
+    trap '
+      result=$?
+      printf "%s\n" "$result" >"$OCTOJOOM_PROGRESS_DIR/done"
+      [ -z "$renderer_pid" ] || { kill "$renderer_pid" 2>/dev/null || true; wait "$renderer_pid" 2>/dev/null || true; }
+      [ ! -f "$OCTOJOOM_PROGRESS_DIR/stdout" ] || cat "$OCTOJOOM_PROGRESS_DIR/stdout" >&"$progress_stdout_fd"
+      [ ! -f "$OCTOJOOM_PROGRESS_DIR/diagnostics" ] || cat "$OCTOJOOM_PROGRESS_DIR/diagnostics" >&"$progress_stderr_fd"
+      exec {progress_stdout_fd}>&- {progress_stderr_fd}>&-
+      rm -rf "$OCTOJOOM_PROGRESS_DIR"
+    ' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' HUP TERM
+    actionProgressStep 0 "$message"
+    actionProgressRender "$title" &
+    renderer_pid=$!
+    if [ -t 1 ]; then
+      "$@" >"$OCTOJOOM_PROGRESS_DIR/stdout" 2>"$OCTOJOOM_PROGRESS_DIR/diagnostics" || result=$?
+    else
+      "$@" 2>"$OCTOJOOM_PROGRESS_DIR/diagnostics" || result=$?
+    fi
+    printf '%s\n' "$result" >"$OCTOJOOM_PROGRESS_DIR/done"
+    wait "$renderer_pid" 2>/dev/null || true
+    renderer_pid=''
+    # EXIT restores diagnostics even after cancellation and recovery traps.
+    exit "$result"
+  )
+}
+
+# Compatibility for older callers using the shared progress switch. Elapsed
+# time keeps the display alive without inventing progress measurements.
 function showProgress() {
   if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || [ "${OCTOJOOM_NO_PROGRESS:-false}" = true ] || [ "${OCTOJOOM_QUIET:-false}" = true ] || [ "${OCTOJOOM_OUTPUT:-text}" = json ]; then return 0; fi
-  # some locals
-  local title
-  local message
-  local per
-  # get input
-  message="$1"
-  title="${2:-Please wait!}"
-  # our little loop progress
+  local message="$1" title="${2:-Please wait!}" started=$SECONDS
   {
-    per=1
-    while (true); do
-      if ! inProgress; then
-        # we are finished, so we slow down to 100%
-        sleep .2
-        echo 88
-        sleep .2
-        echo 90
-        sleep .$((1 + "$RANDOM" % 6))
-        echo 98
-        sleep .$((1 + "$RANDOM" % 5))
-        echo 100
-        sleep .$((1 + "$RANDOM" % 5))
-        break
-      elif [[ "87" -eq "$per" ]]; then
-        # if it takes longer we loop
-        per="33"
-      fi
-      # sleep a little moment
-      sleep .$((1 + "$RANDOM" % 9))
-      echo $per
-      per=$((per + 1))
+    while inProgress; do
+      printf 'XXX\n0\n%s\n\nElapsed: %ss. Working; please wait.\nXXX\n' "$message" "$((SECONDS - started))"
+      sleep 1
     done
-  } | whiptail --title "${title}" --gauge "${message}" --backtitle "${BACK_TITLE}" 8 112 0
+    printf 'XXX\n100\nOperation finished.\nXXX\n'
+  } | whiptail --title "$title" --gauge "$message" --backtitle "${BACK_TITLE}" 8 112 0
 }
 
 # turn on progress
@@ -12210,7 +12533,10 @@ function setImageSource() {
 # or giving them access to a live website. JSON is transient inspection data.
 function joomlaRuntimeProbeImage() {
   local image="$1"
-  docker run --rm --network none --read-only --entrypoint sh "$image" -c '
+  # Shell/PHP variables in the inspection script belong to the container.
+  # shellcheck disable=SC2016
+  runActionProgress 'Inspect PHP image' "Checking Joomla, PHP and extensions in $image." \
+    docker run --rm --network none --read-only --entrypoint sh "$image" -c '
     if command -v apache2 >/dev/null 2>&1 || command -v httpd >/dev/null 2>&1; then
       OCTOJOOM_FLAVOR=apache
     elif command -v php-fpm >/dev/null 2>&1; then
@@ -12404,7 +12730,7 @@ function joomlaRuntimeSelectImage() {
     [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { printf 'Invalid image tag.\n' >&2; return 2; }
     candidate="$repository:$tag"
   fi
-  docker pull "$candidate" >&2 || return 1
+  runActionProgress 'Download PHP image' "Downloading $candidate." docker pull "$candidate" >&2 || return 1
   probe=$(joomlaRuntimeProbeImage "$candidate") || return 1
   required_database=$(joomlaRuntimeDatabaseExtensions "$old_probe" "$site") || return 1
   jq -e --arg installed "$installed" --arg flavor "$flavor" --argjson database "$required_database" '
@@ -12452,7 +12778,7 @@ function joomlaRuntimeSelectImageForFlavor() {
   fi
   [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || return 2
   candidate="$repository:$tag"
-  docker pull "$candidate" >&2 || return 1
+  runActionProgress 'Download PHP image' "Downloading $candidate." docker pull "$candidate" >&2 || return 1
   candidate_probe=$(joomlaRuntimeProbeImage "$candidate") || return 1
   required_database=$(joomlaRuntimeDatabaseExtensions "$probe") || return 1
   jq -e --arg version "$version" --arg php "$php" --arg flavor "$flavor" --argjson database "$required_database" '
@@ -12494,7 +12820,7 @@ function joomlaSetupPHPChoices() {
   [ -n "$version" ] || { printf 'The image Joomla release could not be inspected. Use manual image tag selection.\n' >&2; return 1; }
   tag=$(joomlaRuntimeChooseTag "$VDM_J_REPO" "$version" "$flavor") || { local choose_status=$?; [ "$choose_status" -eq 3 ] && return 0; return "$choose_status"; }
   candidate="${VDM_J_REPO}:$tag"
-  docker pull "$candidate" >&2 || return 1
+  runActionProgress 'Download PHP image' "Downloading $candidate." docker pull "$candidate" >&2 || return 1
   probe=$(joomlaRuntimeProbeImage "$candidate") || return 1
   jq -e --arg version "$version" --arg flavor "$flavor" '.joomla == $version and .flavor == $flavor' >/dev/null <<< "$probe" || {
     printf 'Choose a published tag with the same Joomla release and webserver.\n' >&2; return 1;
@@ -14959,7 +15285,7 @@ function migrationRunCompose() {
     # Compose resolves an empty --env-file to the working directory and fails
     # with "is a directory". No explicit ENV means omit the option entirely.
     [ -z "$env_file" ] || arguments+=(--env-file "$env_file")
-    docker "${arguments[@]}" --file "$compose_file" "$@"
+    runComposeProgress "$compose_file" "${arguments[@]}" --file "$compose_file" "$@"
   )
 }
 
@@ -15768,7 +16094,22 @@ function joomla__TRuST__import() {
 # command line override the saved global config loaded later.
 # Resolve expert configuration views without losing selected-site ENV precedence.
 function cliSudo() {
-  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then sudo -n "$@"; else sudo "$@"; fi
+  local result=0
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    sudo -n "$@"
+  elif actionProgressActive; then
+    if ! sudo -n -v 2>/dev/null; then
+      actionProgressPause
+      # The calling user owns this terminal; only sudo authentication is privileged.
+      # shellcheck disable=SC2024
+      sudo -v </dev/tty >/dev/tty 2>/dev/tty || result=$?
+      actionProgressResume
+      [ "$result" -eq 0 ] || return "$result"
+    fi
+    sudo -n "$@"
+  else
+    sudo "$@"
+  fi
 }
 
 function cliConfigPath() {

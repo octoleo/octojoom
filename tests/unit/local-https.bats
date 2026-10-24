@@ -246,7 +246,7 @@ tls_transaction_fixture() {
   mkdir -p "$VDM_REPO_PATH/traefik"
   traefikRunCompose() { printf 'traefik\n'; }
   joomlaSiteCompose() { printf 'joomlaalpha\n'; }
-  curl() { printf '%s\n' "$*" >> "$work/verify-arguments"; }
+  curl() { printf '%s\n' "$*" >> "$work/verify-arguments"; printf 200; }
   joomlaTLSVerify "$site"
   assert_file_contains "$work/verify-arguments" '--resolve alpha.example.test:8443:127.0.0.1'
   assert_file_contains "$work/verify-arguments" '--cacert'
