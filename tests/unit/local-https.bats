@@ -162,6 +162,7 @@ PHP
 # Exercise the real transaction and ENV/label transformations; only external
 # certificate/container IO is replaced here. Real IO has its own acceptance job.
 tls_transaction_fixture() {
+  traefikPrepareLocalHTTPS() { :; }
   joomlaTLSDiscover() { resolveJoomlaSite "$1"; VDM_TLS_ROUTES=$'joomlaalpha\tjoomlaalpha\talpha.example.test\nphpmyadminalpha\tphpmyadminalpha\talphadb.example.test\n'; VDM_TLS_MODE=http; }
   joomlaTLSProxy() { VDM_TLS_CONF="$VDM_PROJECT_PATH/traefik/conf/octojoom"; mkdir -p "$VDM_TLS_CONF"; VDM_TLS_PORT=8443; }
   joomlaTLSPrerequisites() { VDM_TLS_CAROOT="$work/ca"; }
@@ -243,7 +244,7 @@ tls_transaction_fixture() {
 @test "TLS runtime verification uses real hostname validation and preserves stopped companions" {
   VDM_TLS_PORT=8443 VDM_TLS_ADDRESS=127.0.0.1 VDM_TLS_CAROOT="$work/ca" VDM_TLS_VERIFY_ROUTES="$routes"
   mkdir -p "$VDM_REPO_PATH/traefik"
-  migrationRunCompose() { printf 'traefik\n'; }
+  traefikRunCompose() { printf 'traefik\n'; }
   joomlaSiteCompose() { printf 'joomlaalpha\n'; }
   curl() { printf '%s\n' "$*" >> "$work/verify-arguments"; }
   joomlaTLSVerify "$site"
@@ -255,7 +256,7 @@ tls_transaction_fixture() {
 
 @test "TLS runtime verification reports a bad served certificate as a failed transaction" {
   VDM_TLS_PORT=8443 VDM_TLS_ADDRESS=127.0.0.1 VDM_TLS_CAROOT="$work/ca" VDM_TLS_VERIFY_ROUTES="$routes"
-  migrationRunCompose() { printf 'traefik\n'; }
+  traefikRunCompose() { printf 'traefik\n'; }
   joomlaSiteCompose() { printf 'joomlaalpha\n'; }
   curl() { return 60; }
   sleep() { :; }
