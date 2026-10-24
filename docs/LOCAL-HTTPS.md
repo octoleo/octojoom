@@ -7,10 +7,55 @@ connection mode. Sites already using local HTTPS are omitted.
 For one site, use **Website Information → select website → Connection / SSL**.
 This shows the current URL and offers local HTTPS, HTTP, public Let's Encrypt,
 Cloudflare, and certificate renewal. Choosing local HTTPS immediately prepares
-the proxy and site; the completion dialog shows the working URL. Other connection
+the proxy and site; the completion dialog shows the configured URL and the result
+of checking its running endpoints. Other connection
 changes show their proposed URL for confirmation.
 After a change, return to that website's details. Menu width remains 112 columns;
 height and visible rows adjust automatically.
+
+## Progress and change summary
+
+Interactive connection changes show the current stage and elapsed time while work
+continues. Local HTTPS covers certificate tools and trust, Traefik preparation,
+Compose validation, certificate generation or reuse, hostname mappings, Joomla URL
+settings, service restarts, and endpoint checks. Percentages reflect stages;
+they are not a prediction of the time remaining. A long Docker operation can
+remain at one percentage while the elapsed time keeps updating. Authorization
+and trust prompts temporarily take control of the terminal.
+
+Traefik can serve a trusted certificate before its route or the application is
+ready. Endpoint checks therefore retry HTTP 404, 502, 503 and 504 responses, with
+up to 15 checks per running URL. The progress message names the hostname being checked.
+If the certificate is valid but an HTTP error persists, the summary says that the
+website is not confirmed ready and identifies its HTTP status. It retains the
+connection settings so an application error does not undo valid HTTPS. Certificate
+or connection verification failures still trigger the existing recovery path.
+Stopped services stay stopped; endpoint checks apply only to running services.
+
+The completion dialog is scrollable and records what happened: installed or reused
+tools and their executable paths, CA trust and its host directory, changed or reused
+Traefik configuration, certificate and leaf-key paths, dynamic YAML, hostname
+mappings, site Compose and ENV files, container restarts, recovery-file locations,
+and endpoint results. It contains descriptions and paths, not passwords or key
+contents. Keep the local CA's private key on this computer.
+
+After a successful interactive change, the same summary is saved to:
+
+```text
+<Docker path>/joomla/available/<site>/.octojoom-last-connection.txt
+```
+
+The independent **Traefik → Prepare local HTTPS** action saves its summary to
+`<Docker path>/traefik/.octojoom-last-connection.txt`. The dialog gives the exact
+path. These files use permissions `600` on Unix; Windows access also depends on
+the account's filesystem ACLs. A failed action shows its diagnostics and completed
+activity without replacing the previous successful summary. If summary storage
+fails after the connection was configured, the dialog explains that separately.
+
+HTTP and public HTTPS changes use the same progress display and summary. For
+Let's Encrypt and Cloudflare, completion means the routing configuration was
+applied; public DNS and certificate issuance by Traefik's resolver are not verified
+by this action. The summary makes this distinction explicit.
 
 ## First use
 
@@ -91,7 +136,9 @@ The equivalent JSON transport is:
 
 Pass this file through `--input-json FILE --non-interactive`. Task, action, mode
 and site completion use the existing CLI discovery. Status reports effective
-mode, URL, certificate expiry, host trust and endpoint verification. Browser
+mode, URL, certificate expiry, host trust and endpoint verification. The additional
+`http_status` field reports the received HTTP code; an HTTP error has an endpoint
+value such as `http-404`, rather than `verified`. Browser
 trust remains `unchecked`; no private key appears in output. Endpoint verification
 uses normal DNS and client trust, without disabling certificate verification.
 An unreachable endpoint does not mean certificate generation failed: check that

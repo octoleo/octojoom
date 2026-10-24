@@ -29,9 +29,17 @@ Per-site `.env` still **replaces**, rather than merges with, shared type `.env`.
 commands and completion do not create missing configuration directories.
 
 Text data is written to stdout; notices, progress and errors go to stderr in
-headless/JSON mode. `--quiet` suppresses notices, never errors. `--no-progress`
-and `--progress no` suppress progress; `--progress yes` requests it where the
-operation supports it. Progress always remains on stderr. `--verbose` is accepted as a shared logging preference;
+headless/JSON mode. `--quiet` suppresses notices and progress, never errors.
+`--no-progress` and `--progress no` suppress progress; `--progress yes` requests it
+where the operation supports it. Interactive long-running actions show a progress
+bar with the current stage and elapsed time. Its percentage reflects completed
+stages, not an estimated duration; operations without finer-grained stages keep
+the percentage steady while elapsed time updates. Native authorization and input
+prompts temporarily take control of the terminal. No progress dialog opens in
+headless mode, without an input terminal, or with `--output json`. Text stage
+messages, where supplied by the operation, go to stderr; JSON, quiet and
+no-progress modes suppress them. Progress never enters stdout or changes native
+command failure statuses. `--verbose` is accepted as a shared logging preference;
 individual operations may provide no additional debug output. Native commands
 retain their failure status. `--output json` requires `jq` and produces one
 object, for example:
