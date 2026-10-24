@@ -152,6 +152,7 @@ Each new feature extends these same handlers and completion discovery.
 | Back up selected/all websites | `joomla backup` | `--action create`, repeated `--container` or `--all`; shared destination/preferences | Same single-site operation; per-site results and nonzero status on partial failure |
 | OpenSSH → Setup | `openssh setup` | domain, username, key, port, `--ssh-keys`, `--mount-base`, `--mount-dirs`; UID/GID default to current numeric IDs | Same setup function; scoped saved key/mount directories |
 | Traefik / Portainer → Setup | `traefik setup`, `portainer setup` | domain; HTTPS requires secure email for Traefik, optional Cloudflare token | Existing templates; explicit `--enable` |
+| Traefik → Prepare local HTTPS | `traefik update` | none | Preserves existing proxy settings, prepares missing local HTTPS support; a stopped proxy stays stopped |
 | Traefik / Portainer lifecycle | respective `enable`, `disable`, `delete` | Type/task | Original singleton service behavior |
 | Expert Compose/ENV edit | existing `edit` task (TTY); automation uses `config` | `--action path|read|replace`, `--config-kind compose|env`, replacement `--file` | Selected effective path; validation and unchanged Compose project name before replacement; original running state preserved; recoverable previous file |
 | Settings → Edit Config | `settings config` | same config actions; global `.env` | Literal ENV validation; no shell execution |

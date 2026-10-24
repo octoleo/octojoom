@@ -47,7 +47,7 @@ cleanup() {
   fi
   if [ -f "$VDM_REPO_PATH/traefik/docker-compose.yml" ]; then
     docker logs "tls-$RUN_ID" --tail 50 >&2
-    docker compose --env-file "$VDM_REPO_PATH/traefik/.env" -f "$VDM_REPO_PATH/traefik/docker-compose.yml" down >/dev/null
+    traefikRunCompose "$VDM_REPO_PATH/traefik/docker-compose.yml" down >/dev/null
   fi
   [ ! -d "${CAROOT:-/nonexistent}" ] || mkcert -uninstall >/dev/null 2>&1
   docker network rm "$NETWORK" >/dev/null 2>&1
@@ -103,25 +103,27 @@ joomla__TRuST__setup
 [ -f "$SITE/.env" ] && ENV_FILE="$SITE/.env"
 OCTOJOOM_CLI_KEYS=()
 OCTOJOOM_CLI_VALUES=()
-mkdir -p "$VDM_PROJECT_PATH/traefik/conf" "$VDM_REPO_PATH/traefik" "$DATA"
+mkdir -p "$VDM_REPO_PATH/traefik" "$DATA"
 chmod 755 "$WORK" "$VDM_HOME_PATH" "$VDM_PROJECT_PATH" "$VDM_PROJECT_PATH/$KEY" "$DATA"
 export CAROOT="$WORK/local-ca"
 mkcert -install
 joomlaTLSTrusted "$CAROOT/rootCA.pem"
-# Use the real generator and file provider, with nondefault host ports and a
-# unique container name so cleanup cannot affect any existing proxy.
+# Exercise a legacy proxy with no dedicated ENV, HTTPS entrypoint or watched
+# certificate mount. Local HTTPS must repair it and keep nondefault host ports.
 VDM_REMOVE_SECURE='#'
 VDM_REMOVE_CLOUDFLARE_SERVICE='#'
 traefikContainer | sed -e "s/container_name: traefik/container_name: tls-$RUN_ID/" \
-  -e 's/"80:80"/"127.0.0.1:18080:80"/' -e 's/"443:443"/"127.0.0.1:18443:443"/' > "$VDM_REPO_PATH/traefik/docker-compose.yml"
-printf 'VDM_PROJECT_PATH="%s"\n' "$VDM_PROJECT_PATH" > "$VDM_REPO_PATH/traefik/.env"
+  -e 's/"80:80"/"127.0.0.1:18080:80"/' -e 's/"443:443"/"127.0.0.1:18443:443"/' \
+  -e '/--entrypoints.websecure.address=/d' -e '/--providers.file./d' -e '\|:/conf:ro|d' > "$VDM_REPO_PATH/traefik/docker-compose.yml"
+writeEnvVariable "$VDM_SRC_PATH/.env" "VDM_PROJECT_PATH=\"$VDM_PROJECT_PATH\"" true
+cp "$VDM_SRC_PATH/.env" "$WORK/global-original.env"
 # Existing non-TLS custom labels must survive the full operation.
 joomlaServiceProperty "$COMPOSE" "$WEB" labels > "$WORK/property"
 printf '      - "custom.application.label=preserved"\n' >> "$WORK/property"
 joomlaSetServiceProperty "$COMPOSE" "$WORK/next.yml" "$WEB" labels "$WORK/property"
 cp "$WORK/next.yml" "$COMPOSE"
 docker network create "$NETWORK" >/dev/null
-migrationRunCompose "$VDM_REPO_PATH/traefik/.env" "$VDM_REPO_PATH/traefik/docker-compose.yml" up -d
+traefikRunCompose "$VDM_REPO_PATH/traefik/docker-compose.yml" up -d
 migrationRunCompose "$ENV_FILE" "$COMPOSE" up -d --wait --wait-timeout 240
 ln -s "$SITE" "$VDM_REPO_PATH/joomla/enabled/$SITE_NAME"
 for attempt in $(seq 1 60); do
@@ -153,7 +155,11 @@ joomla__TRuST__ssl
 verify_https
 cmp "$ENV_FILE" "$WORK/shared-original.env"
 [ "$(docker inspect --format '{{.Id}}' "$DB")" = "$original_db" ]
-[ "$(docker inspect --format '{{.Id}}' "tls-$RUN_ID")" = "$proxy_id" ]
+[ "$(docker inspect --format '{{.Id}}' "tls-$RUN_ID")" != "$proxy_id" ]
+proxy_id=$(docker inspect --format '{{.Id}}' "tls-$RUN_ID")
+cmp "$VDM_SRC_PATH/.env" "$WORK/global-original.env"
+[ ! -e "$VDM_REPO_PATH/traefik/.env" ]
+[ -d "$VDM_PROJECT_PATH/traefik/conf" ]
 [ "$(sha256sum "$DATA/index.php" | cut -d' ' -f1)" = "$original_index" ]
 joomlaSiteCompose "$SITE_NAME" config --format json | jq -e --arg service "$WEB" '.services[$service].labels["custom.application.label"]=="preserved"' >/dev/null
 OCTOJOOM_OUTPUT=json
@@ -165,6 +171,7 @@ VDM_ACTION='set'
 before=$(docker inspect --format '{{.Id}}' "$WEB")
 joomla__TRuST__ssl
 [ "$(docker inspect --format '{{.Id}}' "$WEB")" = "$before" ]
+[ "$(docker inspect --format '{{.Id}}' "tls-$RUN_ID")" = "$proxy_id" ]
 # Renewal is hot-loaded; no application or proxy container is recreated.
 first=$(jq -r '.tls.certificates[0].certFile' "$VDM_PROJECT_PATH/traefik/conf/octojoom-$SITE_NAME.yaml")
 VDM_ACTION=renew
@@ -195,4 +202,4 @@ joomlaSiteCompose "$SITE_NAME" up -d --wait --wait-timeout 180
 verify_https
 # No CA or leaf key is mounted in the Joomla/FPM container.
 docker inspect "$WEB" | jq -e '.[0].Mounts | all(.Destination | startswith("/conf") | not)' >/dev/null
-printf 'Local HTTPS acceptance passed: trusted Joomla HTTPS, renewal, idempotence, Apache/Nginx, HTTP return, stopped site, independent data and proxy.\n'
+printf 'Local HTTPS acceptance passed: legacy proxy preparation, trusted Joomla HTTPS, renewal, idempotence, Apache/Nginx, HTTP return, stopped site, independent data and proxy.\n'

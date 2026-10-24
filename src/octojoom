@@ -1235,8 +1235,11 @@ function joomlaSetupCustomization() {
   fi
   joomlaSetupDatabaseValidate || return $?
   if [ "${VDM_TLS_CHOICE:-default}" != default ]; then
+    if [ "$VDM_TLS_CHOICE" = local ]; then
+      joomlaTLSPrerequisites || return $?
+      traefikPrepareLocalHTTPS false || return $?
+    fi
     joomlaTLSProxy "$VDM_TLS_CHOICE" || return $?
-    if [ "$VDM_TLS_CHOICE" = local ]; then joomlaTLSPrerequisites || return $?; fi
   fi
 }
 
@@ -6495,6 +6498,194 @@ function joomla__TRuST__database() {
 
 ######################################## LOCAL HTTPS
 
+# Match the environment used by Traefik's existing enable action.
+function traefikComposeEnvFile() {
+  if [ -f "$VDM_REPO_PATH/traefik/.env" ]; then printf '%s\n' "$VDM_REPO_PATH/traefik/.env"
+  elif [ -f "$VDM_SRC_PATH/.env" ]; then printf '%s\n' "$VDM_SRC_PATH/.env"
+  fi
+}
+
+function traefikRunCompose() {
+  (
+    local file="$1" env_file
+    shift
+    env_file=$(traefikComposeEnvFile)
+    local -a arguments=(compose)
+    # Traefik accepts normal Compose defaults; migration has a restricted grammar.
+    joomlaUnexportComposeEnvironment "$file" || exit 1
+    [ -z "$env_file" ] || arguments+=(--env-file "$env_file")
+    docker "${arguments[@]}" --project-directory "$VDM_REPO_PATH/traefik" --file "$file" "$@"
+  )
+}
+
+function traefikLocalContext() {
+  local endpoint="${DOCKER_HOST:-}"
+  if [ -z "$endpoint" ]; then
+    endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}') || {
+      printf 'Cannot inspect Docker. Start Docker and check that your user can access it, then retry Local trusted HTTPS.\n' >&2; return 1;
+    }
+  fi
+  case "$endpoint" in unix://*|npipe://*) return 0;; esac
+  printf 'Local HTTPS needs a local Docker context. Select this computer with docker context use before retrying; the current daemon is remote.\n' >&2
+  return 1
+}
+
+function traefikPublishConfiguration() {
+  local source="$1" target="$2" temporary
+  ! migrationPathHasSymlink "$target" || return 1
+  temporary=$(mktemp "${target}.publish.XXXXXX") || return 1
+  if ! cp "$source" "$temporary" || ! chmod 600 "$temporary" || ! mv -f "$temporary" "$target"; then
+    rm -f -- "$temporary"; return 1
+  fi
+}
+
+# Edit only missing capabilities in the raw YAML, preserving custom settings
+# and interpolation. Never serialize the resolved model over user secrets.
+# shellcheck disable=SC2016
+function traefikLocalHTTPSRewrite() {
+  local file="$1" model="$2" work="$3" property item value
+  local -a additions=()
+  printf '%s' "$model" | joomlaSiteJSON -e '.services.traefik != null' >/dev/null || { printf 'The Compose file has no traefik service. Keep that service name when customizing the proxy.\n' >&2; return 1; }
+  for item in '--entrypoints.websecure.address=:443' '--providers.file.directory=/conf' '--providers.file.watch=true'; do
+    property="${item%%=*}"
+    value=$(printf '%s' "$model" | joomlaSiteJSON -r --arg prefix "$property=" '[.services.traefik.command[]? | select(startswith($prefix))] | if length<2 then .[0] // "" else "duplicate" end') || return 1
+    case "$value" in
+      "$item") ;;
+      ''|'--providers.file.watch=false') additions+=("$item");;
+      *) printf 'Traefik has a custom or duplicate command: %s. Review the command section in %s/traefik/docker-compose.yml before retrying; its existing settings were left intact.\n' "$value" "$VDM_REPO_PATH" >&2; return 1;;
+    esac
+  done
+  if printf '%s' "$model" | joomlaSiteJSON -e '[.services.traefik.command[]? | select(startswith("--providers.file.filename="))] | length>0' >/dev/null; then
+    printf 'Traefik reads dynamic configuration from a single file. Move its existing rules into /conf and replace providers.file.filename with providers.file.directory=/conf in %s/traefik/docker-compose.yml before retrying.\n' "$VDM_REPO_PATH" >&2; return 1
+  fi
+  if [ "${#additions[@]}" -gt 0 ]; then
+    joomlaServiceProperty "$file" traefik command > "$work/property" || return 1
+    if [ -s "$work/property" ] && ! grep -qE '^    command:[[:space:]]*(#.*)?$' "$work/property"; then
+      printf 'The Traefik command uses a custom YAML format. Use the standard command list in %s/traefik/docker-compose.yml before retrying.\n' "$VDM_REPO_PATH" >&2; return 1
+    fi
+    [ -s "$work/property" ] || printf '    command:\n' > "$work/property"
+    if printf '%s\n' "${additions[@]}" | grep -qxF -- '--providers.file.watch=true'; then
+      awk '!(/^[[:space:]]*-/ && index($0,"--providers.file.watch=")>0)' "$work/property" > "$work/commands"
+    else cp "$work/property" "$work/commands"; fi
+    for item in "${additions[@]}"; do printf '      - %s\n' "$item" >> "$work/commands"; done
+    joomlaSetServiceProperty "$file" "$work/next.yml" traefik command "$work/commands" && mv "$work/next.yml" "$file" || return 1
+  fi
+  item=443
+  if ! printf '%s' "$model" | joomlaSiteJSON -e --argjson port "$item" '[.services.traefik.ports[]? | select(.target==$port and (.protocol // "tcp")=="tcp")] | length>0' >/dev/null; then
+      joomlaServiceProperty "$file" traefik ports > "$work/property" || return 1
+      if [ -s "$work/property" ] && ! grep -qE '^    ports:[[:space:]]*(#.*)?$' "$work/property"; then printf 'Use a block ports list in the Traefik Compose file before retrying.\n' >&2; return 1; fi
+      [ -s "$work/property" ] || printf '    ports:\n' > "$work/property"
+      printf '      - "%s:%s"\n' "$item" "$item" >> "$work/property"
+      joomlaSetServiceProperty "$file" "$work/next.yml" traefik ports "$work/property" && mv "$work/next.yml" "$file" || return 1
+  fi
+  value=$(printf '%s' "$model" | joomlaSiteJSON -r '[.services.traefik.volumes[]? | select(.target=="/conf")] | length') || return 1
+  if [ "$value" = 0 ]; then
+    joomlaServiceProperty "$file" traefik volumes > "$work/property" || return 1
+    if [ -s "$work/property" ] && ! grep -qE '^    volumes:[[:space:]]*(#.*)?$' "$work/property"; then printf 'Use a block volumes list in the Traefik Compose file before retrying.\n' >&2; return 1; fi
+    [ -s "$work/property" ] || printf '    volumes:\n' > "$work/property"
+    value=$(joomlaSiteJSON -n --arg value "$VDM_PROJECT_PATH/traefik/conf:/conf:ro" '$value | gsub("\\$"; "$$")') || return 1
+    printf '      - %s\n' "$value" >> "$work/property"
+    joomlaSetServiceProperty "$file" "$work/next.yml" traefik volumes "$work/property" && mv "$work/next.yml" "$file" || return 1
+  fi
+}
+
+# Prepare the proxy without rebuilding it or upgrading its image. start=true
+# accompanies a website's local HTTPS action; false keeps a stopped proxy stopped.
+# shellcheck disable=SC2016
+function traefikPrepareLocalHTTPS() {
+  (
+    umask 077
+    local start="${1:-false}" directory="$VDM_REPO_PATH/traefik" file="$VDM_REPO_PATH/traefik/docker-compose.yml"
+    local work='' lock='' original=false published=false success=false runtime=false running=false model value conf network item
+    local changed=false status=0 recovery_failed=false
+    command -v jq >/dev/null || { printf 'Preparing local HTTPS requires jq. Install jq and retry.\n' >&2; exit 2; }
+    traefikLocalContext || exit 1
+    ! migrationPathHasSymlink "$file" || { printf 'Traefik configuration uses a symbolic link: %s. Use a regular configuration file before preparing local HTTPS.\n' "$file" >&2; exit 1; }
+    mkdir -p "$directory" || exit 1
+    lock="$directory/.octojoom-change.lock"
+    mkdir "$lock" 2>/dev/null || { printf 'Another Traefik configuration change is in progress. Wait for it to finish, then retry.\n' >&2; exit 1; }
+    work=$(mktemp -d "$directory/.octojoom-https.XXXXXX") || { rmdir "$lock"; exit 1; }
+    trap 'status=$?
+      if [ "$success" != true ] && { [ "$published" = true ] || [ "$runtime" = true ]; }; then
+        if [ "$original" = true ]; then
+          traefikPublishConfiguration "$work/original.yml" "$file" || recovery_failed=true
+          if [ "$runtime" = true ] && [ "$running" = true ]; then
+            traefikRunCompose "$file" up -d --no-deps --force-recreate --wait --wait-timeout 90 traefik >&2 || recovery_failed=true
+          elif [ "$runtime" = true ]; then
+            traefikRunCompose "$work/candidate.yml" stop traefik >&2 || recovery_failed=true
+          fi
+        else
+          if [ "$runtime" = true ]; then traefikRunCompose "$work/candidate.yml" stop traefik >&2 || recovery_failed=true; fi
+          rm -f -- "$file" || recovery_failed=true
+        fi
+        printf "Traefik preparation failed. Recovery files: %s\n" "$work" >&2
+        if [ "$recovery_failed" = true ]; then printf "Automatic recovery was incomplete. Check Traefik and the retained recovery files before retrying.\n" >&2
+        else printf "The previous Traefik configuration and running state were restored.\n" >&2; fi
+      elif [ "$success" = true ] && [ "$changed" = true ] && [ "$original" = true ]; then
+        printf "Previous Traefik configuration: %s/original.yml\n" "$work" >&2
+      else rm -rf -- "$work"; fi
+      rmdir "$lock" 2>/dev/null || true
+      exit "$status"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    if [ -f "$file" ]; then
+      original=true
+      cp -p "$file" "$work/original.yml" && cp "$file" "$work/candidate.yml" || exit 1
+    else
+      printf 'Creating Traefik configuration for local HTTPS.\n' >&2
+      local VDM_REMOVE_SECURE='#' VDM_REMOVE_CLOUDFLARE_SERVICE='#'
+      traefikContainer > "$work/candidate.yml" || exit 1
+      printf '    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n' > "$work/property"
+      for item in logs errors conf; do
+        value="$VDM_PROJECT_PATH/traefik/$item:/$item"
+        [ "$item" != conf ] || value+=:ro
+        value=$(joomlaSiteJSON -n --arg value "$value" '$value | gsub("\\$"; "$$")') || exit 1
+        printf '      - %s\n' "$value" >> "$work/property"
+      done
+      joomlaSetServiceProperty "$work/candidate.yml" "$work/next.yml" traefik volumes "$work/property" && mv "$work/next.yml" "$work/candidate.yml" || exit 1
+    fi
+    if ! model=$(traefikRunCompose "$work/candidate.yml" config --format json 2> "$work/diagnostic"); then
+      printf 'Cannot read Traefik configuration %s. Docker Compose reported:\n' "$file" >&2
+      cat "$work/diagnostic" >&2; exit 1
+    fi
+    traefikLocalHTTPSRewrite "$work/candidate.yml" "$model" "$work" || exit 1
+    if ! model=$(traefikRunCompose "$work/candidate.yml" config --format json 2> "$work/diagnostic"); then
+      printf 'The proposed Traefik configuration did not validate; the original file is unchanged.\n' >&2
+      cat "$work/diagnostic" >&2; exit 1
+    fi
+    conf=$(printf '%s' "$model" | joomlaSiteJSON -r '[.services.traefik.volumes[]? | select(.target=="/conf" and .type=="bind") | .source] | if length==1 then .[0] else empty end') || exit 1
+    if command -v cygpath >/dev/null 2>&1 && [ -n "$conf" ]; then conf=$(cygpath -u "$conf") || exit 1; fi
+    if [ -z "$conf" ] || migrationPathHasSymlink "$conf"; then printf 'Traefik /conf must use one local bind directory. Check the volumes in %s.\n' "$file" >&2; exit 1; fi
+    if [ ! -d "$conf" ]; then
+      mkdir -p "$conf" 2>/dev/null || cliSudo mkdir -p "$conf" || { printf 'Cannot create the certificate configuration directory: %s\n' "$conf" >&2; exit 1; }
+    fi
+    OCTOJOOM_TRAEFIK_COMPOSE="$work/candidate.yml" joomlaTLSProxy local || exit 1
+    if [ "$original" = true ]; then
+      value=$(traefikRunCompose "$file" ps --status running --services) || { printf 'Cannot determine whether Traefik is running; configuration unchanged.\n' >&2; exit 1; }
+      if printf '%s\n' "$value" | grep -qxF traefik; then running=true; fi
+    fi
+    if [ "$original" != true ] || ! cmp -s "$file" "$work/candidate.yml"; then
+      changed=true
+      traefikPublishConfiguration "$work/candidate.yml" "$file" || { printf 'Cannot save Traefik configuration: %s\n' "$file" >&2; exit 1; }
+      published=true
+      printf 'Updated Traefik for local HTTPS: HTTPS port and watched certificate directory are ready.\n' >&2
+    fi
+    if { [ "$running" = true ] && [ "$changed" = true ]; } || { [ "$running" != true ] && [ "$start" = true ]; }; then
+      while IFS= read -r network; do
+        [ -n "$network" ] || continue
+        docker network inspect "$network" >/dev/null 2>&1 || docker network create "$network" >&2 || exit 1
+      done < <(printf '%s' "$model" | joomlaSiteJSON -r '.networks // {} | to_entries[] | select(.value.external==true) | .value.name // .key')
+      runtime=true
+      printf 'Starting the prepared Traefik service; an existing proxy may briefly restart.\n' >&2
+      traefikRunCompose "$file" up -d --no-deps --force-recreate --wait --wait-timeout 90 traefik >&2 || {
+        printf 'Traefik could not start. Check Docker and any published-port conflict reported above; your site connection has not been changed.\n' >&2; exit 1;
+      }
+    fi
+    success=true
+    printf 'Traefik is prepared for local HTTPS.\n' >&2
+  )
+}
+
 # TLS choices are per website. Never change VDM_SECURE (the host ACME default).
 function joomlaTLSModes() {
   printf '%s\n' http local acme cloudflare
@@ -6537,13 +6728,15 @@ function joomlaTLSDiscover() {
 # A remote Docker daemon cannot consume this host's certificate files.
 # shellcheck disable=SC2016
 function joomlaTLSProxy() {
-  local mode="$1" file="${VDM_REPO_PATH}/traefik/docker-compose.yml" env_file model address resolver target=443 endpoint
-  [ -f "$file" ] || { printf 'Set up the existing Traefik container first.\n' >&2; return 1; }
-  endpoint="${DOCKER_HOST:-}"
-  if [ -z "$endpoint" ]; then endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}') || return 1; fi
-  case "$endpoint" in unix://*|npipe://*) ;; *) printf 'Local HTTPS needs a local Docker context, not a remote daemon.\n' >&2; return 1;; esac
-  env_file=$(getContainerEnvFile traefik '')
-  model=$(migrationRunCompose "$env_file" "$file" config --format json) || return 1
+  local mode="$1" file="${OCTOJOOM_TRAEFIK_COMPOSE:-${VDM_REPO_PATH}/traefik/docker-compose.yml}" model address resolver target=443 diagnostic
+  [ -f "$file" ] || { printf 'Traefik has not been configured yet. Choosing Local trusted HTTPS will create and start it automatically.\n' >&2; return 1; }
+  traefikLocalContext || return 1
+  diagnostic=$(mktemp) || return 1
+  if ! model=$(traefikRunCompose "$file" config --format json 2>"$diagnostic"); then
+    printf 'Cannot read Traefik configuration %s. Docker Compose reported:\n' "$file" >&2
+    cat "$diagnostic" >&2; rm -f "$diagnostic"; return 1
+  fi
+  rm -f "$diagnostic"
   [ "$mode" != http ] || target=80
   address=websecure; [ "$mode" != http ] || address=web
   printf '%s' "$model" | joomlaSiteJSON -e --arg entry "--entrypoints.$address.address=:$target" '
@@ -6551,11 +6744,11 @@ function joomlaTLSProxy() {
     printf 'Traefik must configure the %s entrypoint on port %s.\n' "$address" "$target" >&2; return 1;
   }
   VDM_TLS_PORT=$(printf '%s' "$model" | joomlaSiteJSON -r --argjson port "$target" '
-    [.services.traefik.ports[]? | select(.target==$port) | .published | tostring] | unique |
+    [.services.traefik.ports[]? | select(.target==$port and (.protocol // "tcp")=="tcp") | .published | tostring] | unique |
     if length==1 then .[0] else empty end') || return 1
   [[ "$VDM_TLS_PORT" =~ ^[0-9]+$ ]] || { printf 'Traefik needs one fixed published %s port.\n' "$address" >&2; return 1; }
   VDM_TLS_ADDRESS=$(printf '%s' "$model" | joomlaSiteJSON -r --argjson port "$target" '
-    [.services.traefik.ports[]? | select(.target==$port) | (.host_ip // "127.0.0.1")] | unique |
+    [.services.traefik.ports[]? | select(.target==$port and (.protocol // "tcp")=="tcp") | (.host_ip // "127.0.0.1")] | unique |
     if length==1 then .[0] else empty end') || return 1
   case "$VDM_TLS_ADDRESS" in ''|0.0.0.0) VDM_TLS_ADDRESS=127.0.0.1;; '::') VDM_TLS_ADDRESS='[::1]';; esac
   if [[ "$VDM_TLS_ADDRESS" = *:* && "$VDM_TLS_ADDRESS" != \[*\] ]]; then VDM_TLS_ADDRESS="[$VDM_TLS_ADDRESS]"; fi
@@ -6646,12 +6839,71 @@ function joomlaTLSTrusted() {
   esac
 }
 
-function joomlaTLSPrerequisites() {
-  local root
-  if ! command -v openssl >/dev/null || ! command -v mkcert >/dev/null; then
-    printf 'Local HTTPS requires mkcert and OpenSSL. Install mkcert from https://github.com/FiloSottile/mkcert#installation (Linux: mkcert + libnss3-tools; macOS: brew install mkcert nss; Windows: choco install mkcert).\n' >&2
+# The interactive local HTTPS action includes its host tools. Headless requests
+# remain predictable: they report prerequisites without installing software.
+function joomlaTLSInstallPrerequisites() {
+  local manager='' install_command='' status=0 prefix
+  if command -v mkcert >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then return 0; fi
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    printf 'Local HTTPS requires mkcert and OpenSSL. Install these host tools, run mkcert -install interactively, then retry. Automatic package installation is only available from the interactive local HTTPS action.\n' >&2
     return 2
   fi
+  case "${OS_NUMBER:-0}" in
+    1)
+      if command -v apt-get >/dev/null 2>&1; then
+        manager=apt-get; install_command='sudo apt-get install -y mkcert openssl libnss3-tools ca-certificates'
+      elif command -v dnf >/dev/null 2>&1; then
+        manager=dnf; install_command='sudo dnf install -y mkcert openssl nss-tools ca-certificates'
+      fi;;
+    2)
+      if command -v brew >/dev/null 2>&1; then
+        manager=brew; install_command='brew install mkcert nss openssl@3'
+      fi;;
+    3)
+      if command -v choco >/dev/null 2>&1; then
+        manager=choco; install_command='choco install mkcert openssl.light --yes --no-progress'
+      fi;;
+  esac
+  if [ -z "$manager" ]; then
+    printf 'Local HTTPS needs mkcert and OpenSSL, but no supported package manager was found. Install them with apt/dnf on Linux, Homebrew on macOS, or Chocolatey on Windows, then choose Local trusted HTTPS again. Installation instructions: https://github.com/FiloSottile/mkcert#installation\n' >&2
+    return 2
+  fi
+  printf 'Preparing local HTTPS: installing certificate tools with %s. Administrator authorization may be requested.\n' "$manager" >&2
+  case "$manager" in
+    apt-get)
+      cliSudo apt-get update >&2 && cliSudo apt-get install -y mkcert openssl libnss3-tools ca-certificates >&2 || status=$?;;
+    dnf) cliSudo dnf install -y mkcert openssl nss-tools ca-certificates >&2 || status=$?;;
+    brew) brew install mkcert nss openssl@3 >&2 || status=$?;;
+    choco) choco install mkcert openssl.light --yes --no-progress >&2 || status=$?;;
+  esac
+  if [ "$status" -ne 0 ]; then
+    printf 'The certificate-tool installation failed (exit %s). Resolve the package-manager error shown above, or run: %s\nThen choose Local trusted HTTPS again. On Windows, Chocolatey may require an administrator terminal.\n' "$status" "$install_command" >&2
+    return 1
+  fi
+  hash -r
+  # Homebrew OpenSSL is keg-only. A newly installed Windows OpenSSL may also
+  # have updated the persistent PATH without updating this running Git Bash.
+  if ! command -v openssl >/dev/null 2>&1; then
+    case "$manager" in
+      brew)
+        prefix=$(brew --prefix openssl@3 2>/dev/null) || prefix=''
+        if [ -n "$prefix" ] && [ -x "$prefix/bin/openssl" ]; then PATH="$prefix/bin:$PATH"; export PATH; fi;;
+      choco)
+        for prefix in "${ProgramFiles:-${PROGRAMFILES:-}}/OpenSSL-Win64/bin" "${ProgramFiles:-${PROGRAMFILES:-}}/OpenSSL-Win32/bin"; do
+          if command -v cygpath >/dev/null 2>&1; then prefix=$(cygpath -u "$prefix") || continue; fi
+          if [ -x "$prefix/openssl.exe" ]; then PATH="$prefix:$PATH"; export PATH; break; fi
+        done;;
+    esac
+  fi
+  if ! command -v mkcert >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+    printf 'The package manager finished, but mkcert or OpenSSL is still unavailable in this terminal. Reopen the terminal to load its updated PATH, then choose Local trusted HTTPS again.\n' >&2
+    return 2
+  fi
+}
+
+function joomlaTLSPrerequisites() {
+  local root
+  joomlaTLSInstallPrerequisites || return $?
   root=$(mkcert -CAROOT) || return 1
   root="${root//$'\r'/}"
   if command -v cygpath >/dev/null 2>&1; then root=$(cygpath -u "$root") || return 1; fi
@@ -6661,7 +6913,7 @@ function joomlaTLSPrerequisites() {
       printf 'Host trust is not installed. Run mkcert -install interactively on this host, then retry. No site settings were changed.\n' >&2
       return 2
     fi
-    getInputYesNo 'Install the mkcert local certificate authority in this computer trust store? The operating system may request administrator authorization. Its private key stays on this host.' 'Local HTTPS trust' 12 112 || return 1
+    joomlaTLSConfirmTrust || { printf 'Certificate trust was not approved; the website connection was not changed.\n' >&2; return 1; }
     mkcert -install >&2 || return 1
     joomlaTLSTrusted "$root/rootCA.pem" || { printf 'The operating-system trust check failed after mkcert -install.\n' >&2; return 1; }
   fi
@@ -6732,9 +6984,8 @@ function joomlaTLSCertificateValid() {
 # Explicit CA validation also works with Git Bash curl's separate CA bundle;
 # the OS trust check has already succeeded before any publication.
 function joomlaTLSVerify() {
-  local site="$1" proxy="$VDM_REPO_PATH/traefik/docker-compose.yml" env_file running attempt service router host url
-  env_file=$(getContainerEnvFile traefik '')
-  running=$(migrationRunCompose "$env_file" "$proxy" ps --status running --services) || return 1
+  local site="$1" proxy="$VDM_REPO_PATH/traefik/docker-compose.yml" running attempt service router host url
+  running=$(traefikRunCompose "$proxy" ps --status running --services) || return 1
   if ! printf '%s\n' "$running" | grep -qxF traefik; then
     printf 'Traefik is stopped; HTTPS is configured and will be available when the proxy starts.\n' >&2
     return 0
@@ -6795,11 +7046,14 @@ function joomlaTLSSet() {
     joomlaTLSDiscover "$site" || exit 1
     directory="$VDM_SITE_DIR" compose="$VDM_SITE_COMPOSE" env_file="$VDM_SITE_ENV" routes="$VDM_TLS_ROUTES"
     env_key=$(getJoomlaComposeEnvKey "$compose") || exit 1
+    if [ "$mode" = local ]; then
+      joomlaTLSPrerequisites || exit $?
+      traefikPrepareLocalHTTPS true || exit $?
+    fi
     joomlaTLSProxy "$mode" || exit 1
     url=$(joomlaTLSURL "$mode" "$site" "$VDM_TLS_PORT")
     conf="$VDM_TLS_CONF"
     if [ "$mode" = local ]; then
-      joomlaTLSPrerequisites || exit $?
       command -v curl >/dev/null || { printf 'Local HTTPS verification requires curl.\n' >&2; exit 2; }
       OCTOJOOM_SITE_VALIDATE_FUNCTION=joomlaTLSVerify
       VDM_TLS_VERIFY_ROUTES="$routes"
@@ -6934,27 +7188,54 @@ function joomlaTLSStatus() {
   fi
 }
 
+function joomlaTLSConfirmTrust() {
+  local question='Install the mkcert local certificate authority in this computer trust store? The operating system may request administrator authorization. Its private key stays on this host.'
+  if [ -t 0 ] && [ -e /dev/tty ]; then
+    getInputYesNo "$question" 'Local HTTPS trust' 12 112 >/dev/tty 2>/dev/tty
+  else getInputYesNo "$question" 'Local HTTPS trust' 12 112; fi
+}
+
+function showJoomlaTLSError() {
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then showError "$1"
+  else whiptail --title "Connection / SSL | ${PROGRAM_NAME}" --backtitle "$BACK_TITLE" --scrolltext --msgbox "$1" 0 112; fi
+}
+
+function showJoomlaTLSChange() {
+  local site="$1" mode="$2" renew="${3:-false}" log url status=0
+  log=$(mktemp) || return 1
+  chmod 600 "$log" || { rm -f "$log"; return 1; }
+  showInfo "Preparing $site ...\nLocal HTTPS prepares Traefik and certificate trust automatically.\nThe operating system may request authorization." 10
+  if url=$(joomlaTLSSet "$site" "$mode" "$renew" 2>"$log"); then
+    showNotice "Connection configured for $site.\n\n$url\n\nStopped websites remain stopped. Start the website if needed, then open this address."
+  else
+    status=$?
+    showJoomlaTLSError "Could not configure $site.\n\n$(cat "$log")"
+  fi
+  rm -f "$log"
+  return "$status"
+}
+
 function showJoomlaTLS() {
   local site="$1" choice mode details url
   while true; do
-    details=$(joomlaTLSStatus "$site" 2>&1) || details="${details}\nInspect the proxy and site configuration before applying a change."
+    details=$(joomlaTLSStatus "$site" 2>&1) || details="Website: $site\n${details%%$'\n'*}\nChoose Local trusted HTTPS to prepare the website and Traefik automatically."
     choice=$(whiptail --menu "$details" 0 112 0 --title "Connection / SSL | $site" --backtitle "$BACK_TITLE" \
       back '<-- Return to website details' local 'Local trusted HTTPS' http 'HTTP' acme 'Public HTTPS (Lets Encrypt)' cloudflare 'Public HTTPS (Cloudflare)' renew 'Renew local certificate' 3>&2 2>&1 1>&3) || return 0
     [ "$choice" != back ] || return 0
     mode="$choice"
     if [ "$choice" = renew ]; then mode=local; fi
-    if ! joomlaTLSProxy "$mode"; then showError 'The selected connection needs the Traefik settings reported above.'; continue; fi
-    url=$(joomlaTLSURL "$mode" "$site" "$VDM_TLS_PORT")
-    getInputYesNo "Apply $choice to $site and its configured companion UIs?\nProposed URL: $url" 'Connection / SSL' 10 112 || continue
-    if url=$(joomlaTLSSet "$site" "$mode" "$([ "$choice" = renew ] && echo true || echo false)" 2>&1); then
-      showNotice "$url\nStopped websites remain stopped. Open the HTTPS address to check your browser’s trust store."
-      return 0
-    else showError "$url"; fi
+    if [ "$mode" != local ]; then
+      if ! details=$(joomlaTLSProxy "$mode" 2>&1); then showJoomlaTLSError "$details"; continue; fi
+      joomlaTLSProxy "$mode" || continue
+      url=$(joomlaTLSURL "$mode" "$site" "$VDM_TLS_PORT")
+      getInputYesNo "Apply $choice to $site and its configured companion UIs?\nProposed URL: $url" 'Connection / SSL' 10 112 || continue
+    fi
+    if showJoomlaTLSChange "$site" "$mode" "$([ "$choice" = renew ] && echo true || echo false)"; then return 0; fi
   done
 }
 
 function showJoomlaTLSSelection() {
-  local site selected result mode
+  local site selected mode
   local -a choices=() sites=()
   while IFS= read -r site; do
     mode=$(joomlaTLSDiscover "$site" >/dev/null 2>&1 && printf '%s' "$VDM_TLS_MODE") || continue
@@ -6965,8 +7246,7 @@ function showJoomlaTLSSelection() {
   selected=$(whiptail --checklist 'Select websites to enable local trusted HTTPS.' 0 112 0 --separate-output --title 'Local HTTPS' --backtitle "$BACK_TITLE" "${choices[@]}" 3>&2 2>&1 1>&3) || return 0
   while IFS= read -r site; do [ -z "$site" ] || sites+=("$site"); done <<< "$selected"
   for site in "${sites[@]}"; do
-    if result=$(joomlaTLSSet "$site" local 2>&1); then showNotice "$site\n$result"
-    else showError "$site\n$result"; fi
+    showJoomlaTLSChange "$site" local || true
   done
 }
 
@@ -6992,6 +7272,18 @@ function joomla__TRuST__ssl() {
       *) printf 'Choose --action status, set or renew; set requires --mode.\n' >&2; exit 2;;
     esac
   )
+}
+
+function traefik__TRuST__update() {
+  local result
+  if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    traefikPrepareLocalHTTPS false
+  else
+    showInfo 'Preparing Traefik for local HTTPS. Existing settings are retained; a running proxy may briefly restart.' 10
+    if result=$(traefikPrepareLocalHTTPS false 2>&1); then
+      showNotice 'Traefik is ready for local HTTPS.\nChoose Connection / SSL on a website to enable its trusted certificate.\nA stopped proxy will start when local HTTPS is enabled for a website.'
+    else showJoomlaTLSError "$result"; return 1; fi
+  fi
 }
 
 function joomlaSetupTLSChoice() {
@@ -9638,14 +9930,7 @@ function readJoomlaSiteFacts() {
     config=$(joomlaSiteCompose "$site" config --format json 2>/dev/null) || config=''
     printf '%s' "$config" | joomlaSiteJSON -e '.services | type=="object"' >/dev/null 2>&1 || config=''
     if [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ]; then
-      proxy=$(
-        local proxy_file="${VDM_REPO_PATH}/traefik/docker-compose.yml" proxy_env
-        proxy_env=$(getContainerEnvFile traefik '')
-        joomlaUnexportComposeEnvironment "$proxy_file" || exit 1
-        local -a proxy_args=(compose)
-        [ -z "$proxy_env" ] || proxy_args+=(--env-file "$proxy_env")
-        docker "${proxy_args[@]}" --file "$proxy_file" config --format json 2>/dev/null
-      ) || proxy=''
+      proxy=$(traefikRunCompose "$VDM_REPO_PATH/traefik/docker-compose.yml" config --format json 2>/dev/null) || proxy=''
       printf '%s' "$proxy" | joomlaSiteJSON -e '.services | type=="object"' >/dev/null 2>&1 || proxy=''
     fi
   fi
@@ -10360,6 +10645,7 @@ function showTraefik() {
     menu_options+=("back" "<-- Return to the main menu.") && i=$((i + 1))
     # setup new container
     menu_options+=("setup" "Setup or rebuild Traefik")
+    menu_options+=("update" "Prepare local HTTPS (preserve existing settings)") && i=$((i + 1))
     # enable existing container
     [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ] &&
       menu_options+=("enable" "Enable Traefik") && i=$((i + 1))
@@ -10389,6 +10675,9 @@ function showTraefik() {
     "setup")
       setupContainer 'traefik'
       ;;
+    "update")
+      traefik__TRuST__update
+      ;;
     "edit")
       editContainer 'traefik'
       ;;
@@ -10409,7 +10698,7 @@ function showTraefik() {
 
     # menu loop
     case $CHOICE in
-    "setup" | "edit" | "enable" | "disable" | "delete" | "network")
+    "setup" | "update" | "edit" | "enable" | "disable" | "delete" | "network")
       continue
       ;;
     *) return 0 ;;
@@ -14666,7 +14955,11 @@ function migrationRunCompose() {
     local env_file="$1" compose_file="$2"
     shift 2
     migrationUnexportComposeReferences "$compose_file" || exit 1
-    docker compose --env-file "$env_file" --file "$compose_file" "$@"
+    local -a arguments=(compose)
+    # Compose resolves an empty --env-file to the working directory and fails
+    # with "is a directory". No explicit ENV means omit the option entirely.
+    [ -z "$env_file" ] || arguments+=(--env-file "$env_file")
+    docker "${arguments[@]}" --file "$compose_file" "$@"
   )
 }
 

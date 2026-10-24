@@ -144,11 +144,32 @@ EOF
   export VDM_PROJECT_PATH
   docker() {
     if env | grep -qE '^VDM_(OLD_DB_PASS|PROJECT_PATH)='; then return 88; fi
+    [ "$1" = compose ] && [ "$2" = --env-file ] && [ "$3" = "$PACKAGE/compose/.env" ] || return 89
     return 0
   }
   run migrationRunCompose "$PACKAGE/compose/.env" "$PACKAGE/compose/docker-compose.yml" config -q
   assert_success
   assert_equal "$VDM_OLD_DB_PASS" wrong-inherited-secret
+}
+
+@test "migration Compose omits the ENV option when no file was selected" {
+  docker() {
+    [ "$#" -eq 5 ] && [ "$1" = compose ] && [ "$2" = --file ] &&
+      [ "$3" = "$PACKAGE/compose/docker-compose.yml" ] && [ "$4" = config ] && [ "$5" = -q ]
+  }
+  run migrationRunCompose '' "$PACKAGE/compose/docker-compose.yml" config -q
+  assert_success
+}
+
+@test "migration Compose accepts no ENV with the real config parser" {
+  [ -n "${REAL_DOCKER:-}" ] || skip "Docker Compose is not installed"
+  local compose_file="$SANDBOX/no-env/compose.yml"
+  mkdir -p "${compose_file%/*}"
+  printf 'services:\n  check:\n    image: busybox:latest\n' > "$compose_file"
+  # An empty --env-file would resolve to this directory and fail before parsing.
+  cd "${compose_file%/*}"
+  run migrationRunCompose '' "$compose_file" config -q
+  assert_success
 }
 
 @test "migration prepare rolls back both reserved paths after Compose publication fails" {
