@@ -10849,14 +10849,19 @@ function joomlaPersistenceVolumeDeclaration() {
 # Compare physical host paths, including Docker Desktop/MSYS spelling and
 # missing final directories. Existing symlink aliases must still reveal overlap.
 function joomlaPersistenceCanonicalPath() {
-  local path suffix=''
+  local path physical suffix=''
   path=$(joomlaBackupFilesystemPath "$1") || return 1
   [[ "$path" = /* ]] || return 1
   while [ ! -d "$path" ]; do
     [ "$path" != / ] || return 1
     suffix="/${path##*/}$suffix"; path="${path%/*}"; [ -n "$path" ] || path=/
   done
-  path=$(cd "$path" && pwd -P) || return 1
+  if ! physical=$(cd "$path" 2>/dev/null && pwd -P); then
+    # PostgreSQL data folders commonly allow only their container owner inside.
+    # shellcheck disable=SC2016
+    physical=$(runPrivileged bash -c 'cd -- "$1" && pwd -P' -- "$path") || return 1
+  fi
+  path="$physical"
   if [ "$path" = / ] && [ -z "$suffix" ]; then printf '/\n'; else printf '%s%s\n' "${path%/}" "$suffix"; fi
 }
 
