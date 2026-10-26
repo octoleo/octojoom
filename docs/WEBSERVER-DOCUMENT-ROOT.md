@@ -101,11 +101,10 @@ files are retained and reported if restoration is incomplete. Automatic moves
 inside named volumes are not provided: move the files deliberately with the
 appropriate container tools, then select the resulting directory.
 
-The original clone and cold-archive migration operations explicitly refuse
-nested roots and Nginx layouts that their existing package readers cannot yet
-handle. Other site operations remain available. These restrictions avoid
-silently cloning or migrating the wrong directory; the later portability
-features extend those operations.
+Clone and cold-archive migration support generated Apache and Nginx/FPM layouts,
+including nested document roots. Both data stores must use the supported
+canonical project-folder layout; named-volume local-test sites remain outside
+those operations. Their database-image and custom-layout checks still apply.
 
 ## Verification
 

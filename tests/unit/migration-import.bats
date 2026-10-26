@@ -63,6 +63,27 @@ EOF
   refute_file_exists "${VDM_REPO_PATH}/joomla/.env"
 }
 
+@test "migration realignment preserves nested roots and repoints copied Nginx configuration" {
+  local work="$SANDBOX/nginx"
+  mkdir -p "$work" "$PACKAGE/project/joomla/site"
+  mv "$PACKAGE/project/joomla/configuration.php" "$PACKAGE/project/joomla/site/configuration.php"
+  writeEnvVariable "$PACKAGE/compose/.env" 'VDM_OLD_DOCROOT=site' true
+  writeEnvVariable "$PACKAGE/compose/.env" 'VDM_OLD_WEBSERVER=nginx' true
+  joomlaRewriteWebserverCompose "$PACKAGE/compose/docker-compose.yml" "$work/docker-compose.yml" joomlaold nginxold nginx joomla:verified-fpm nginx:stable-alpine "$work"
+  cp "$work/docker-compose.yml" "$PACKAGE/compose/docker-compose.yml"
+  joomlaNginxConfiguration joomlaold /var/www/html/site > "$PACKAGE/compose/nginx.conf"
+  run realignJoomlaMigration "$PACKAGE" new NEW new.destination.test false '' '' ''
+  assert_success
+  assert_file_contains "$PACKAGE/project/joomla/site/configuration.php" "public \$host = 'mariadbnew:3306';"
+  assert_file_contains "$PACKAGE/compose/nginx.conf" 'fastcgi_pass joomlanew:9000;'
+  assert_file_contains "$PACKAGE/compose/nginx.conf" 'root /var/www/html/site;'
+  assert_file_contains "$PACKAGE/compose/docker-compose.yml" '/new/db:/var/lib/mysql'
+  assert_file_contains "$PACKAGE/compose/docker-compose.yml" '/new/joomla:/var/www/html'
+  local root
+  migrationReadEnvValue "$PACKAGE/compose/.env" VDM_NEW_DOCROOT root
+  assert_equal "$root" site
+}
+
 @test "migration can retain source key and switch to the destination HTTPS resolver" {
   run realignJoomlaMigration "$PACKAGE" old OLD old.destination.test true cfresolver '' ''
   assert_success

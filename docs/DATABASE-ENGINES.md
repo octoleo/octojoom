@@ -37,7 +37,9 @@ These image tags illustrate explicit choices, not an unconditional compatibility
 
 ## Storage, downtime and recovery
 
-A change always selects a fresh, uniquely named Docker volume. The target engine never opens the previous engine's raw data directory. This applies to version changes within one engine too. The original bind directory or named volume remains untouched by the target and is retained after success.
+A change prepares fresh storage of the site's existing type. For a project-folder database, the candidate is verified separately, then published back at the same bind path. A standard site continues using `${VDM_PROJECT_PATH}/<key>/db`, and its Compose mount retains that project-path reference. The previous database directory remains under `${VDM_PROJECT_PATH}/.octojoom-db-stage.*/original`, outside the active project, for recovery. Custom bind paths use a sibling staging directory on the same filesystem. An explicitly selected named-volume database instead receives a fresh named volume and stays a local-test deployment.
+
+The target engine never opens the previous engine's raw data directory, including during version changes within one engine. SQL export/import performs the data transition. Directory publication happens only while the relevant containers are stopped; failed publication restores the original directories before restarting the previous deployment.
 
 The workflow locks the selected site's configuration, validates staged Compose and offers an optional complete backup. It stops that project's running writers before the final logical export, then stops the original database. It updates the database image, initialization environment, data mount and health check together with Joomla's host and driver in both Compose and `configuration.php`. Unrelated service fields, extra mounts and custom settings are preserved. Shared ENV files are never rewritten wholesale; a complete site-scoped ENV is prepared instead.
 
@@ -45,7 +47,7 @@ After the fresh server accepts the existing site credentials, preserved SQL is i
 
 An export, import, startup or verification failure restores the original Compose, site ENV, installed configuration and previously running services. Recovery files and any candidate storage remain available for inspection. The reported `.database-change.*` directory contains the original configuration and the consistent SQL export when one was completed. Original storage is never automatically pruned. If automatic restart itself fails, inspect the reported recovery location and service status before retrying.
 
-Independent clones use the full logical backup/restore path. Their website files and database storage are separate. Destination key/hostname collisions are refused; a failed later engine change leaves a recoverable destination and the source intact.
+Independent database-change clones use the full logical backup/restore path. Their website files and database storage are separate, with project-folder deployments keeping the destination's `joomla/` and `db/` directories. Destination key/hostname collisions are refused; a failed later engine change leaves a recoverable destination and the source intact. This logical operation does not make named-volume sites eligible for complete-project migration or cold cloning.
 
 ## Compatibility boundaries
 

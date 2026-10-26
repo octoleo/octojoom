@@ -50,10 +50,12 @@ stage_doubles() {
   joomlaDatabaseInstalledCapability() { return 0; }
   migrationRunCompose() {
     if [[ "$*" == *'config --format json' ]]; then
-      cat <<'JSON'
-{"services":{"mariadbalpha":{"volumes":[{"type":"bind","source":"/source/db","target":"/var/lib/mysql"},{"type":"bind","source":"/custom/tls","target":"/tls","read_only":true}]},"joomlaalpha":{}}}
-JSON
+      jq -n --arg source "${test_db_source:-$VDM_PROJECT_PATH/alpha/db}" --arg type "${test_db_type:-bind}" \
+        '{services:{mariadbalpha:{volumes:[{type:$type,source:$source,target:"/var/lib/mysql"},{type:"bind",source:"/custom/tls",target:"/tls",read_only:true}]},joomlaalpha:{}}}'
     fi
+  }
+  joomlaSiteCompose() {
+    [ "$2" != config ] || migrationRunCompose '' '' config --format json
   }
   siteValidateCompose() { [ -s "$1" ] && [ -s "$2" ]; }
 }
@@ -70,6 +72,7 @@ transaction_doubles() {
     shift 2
     printf '%s %s\n' "$action" "$*" >> "$work/events"
     case "$action" in
+      config) migrationRunCompose '' '' config --format json;;
       ps) cat "$work/running";;
       stop)
         if [ "$#" -eq 0 ]; then : > "$work/running"; fi
@@ -78,6 +81,7 @@ transaction_doubles() {
           mv "$work/running.next" "$work/running"
         done;;
       up)
+        [[ " $* " != *' --no-start '* ]] || return 0
         for service in "$@"; do
           case "$service" in mariadbalpha|joomlaalpha|phpmyadminalpha)
             grep -qxF "$service" "$work/running" || printf '%s\n' "$service" >> "$work/running";;
@@ -95,6 +99,7 @@ transaction_doubles() {
     if [ "$1" = import ]; then
       printf 'import\n' >> "$work/events"
       [ ! -f "$work/import-fails" ] || return 1
+      if [ "$VDM_DATABASE_STAGE_STORAGE_TYPE" = bind ]; then printf imported > "$VDM_DATABASE_STAGE_STORAGE/imported-data"; fi
     else cat >/dev/null; fi
   }
   joomlaDatabaseTablesResolved() { printf 'alpha_extensions\nkept\n'; }
@@ -131,8 +136,14 @@ transaction_doubles() {
   joomlaDatabaseStageStorage alpha.vdm.dev mysql mysql:8.4 "$work/stage"
   assert_file_contains "$VDM_DATABASE_STAGE_COMPOSE" 'custom.database=keep'
   assert_file_contains "$VDM_DATABASE_STAGE_COMPOSE" '"source":"/custom/tls","target":"/tls","read_only":true'
-  refute_file_contains "$VDM_DATABASE_STAGE_COMPOSE" '"source":"/source/db"'
-  assert_file_contains "$VDM_DATABASE_STAGE_COMPOSE" "name: $VDM_DATABASE_STAGE_STORAGE"
+  refute_file_contains "$VDM_DATABASE_STAGE_COMPOSE" "\"source\":\"$VDM_PROJECT_PATH/alpha/db\""
+  assert_equal "$VDM_DATABASE_STAGE_STORAGE_TYPE" bind
+  assert_equal "$VDM_DATABASE_STAGE_STORAGE_ORIGINAL" "$VDM_PROJECT_PATH/alpha/db"
+  assert_file_contains "$work/stage/final-volumes" '${VDM_PROJECT_PATH}/alpha/db:/var/lib/mysql'
+  [[ "$VDM_DATABASE_STAGE_STORAGE" == "$VDM_PROJECT_PATH/"* ]]
+  [[ "$VDM_DATABASE_STAGE_STORAGE" != "$VDM_PROJECT_PATH/alpha/"* ]]
+  [ -d "$VDM_DATABASE_STAGE_STORAGE" ]
+  refute_file_contains "$VDM_DATABASE_STAGE_COMPOSE" 'type":"volume'
   assert_file_contains "$VDM_DATABASE_STAGE_COMPOSE" 'MYSQL_PASSWORD=${VDM_ALPHA_DB_PASS}'
   assert_file_contains "$VDM_DATABASE_STAGE_ENV" 'VDM_ALPHA_DB_ENGINE=mysql'
   assert_equal "$(joomlaServiceBlock "$db_test_compose" phpmyadminalpha)" "$(joomlaServiceBlock "$VDM_DATABASE_STAGE_COMPOSE" phpmyadminalpha)"
@@ -198,7 +209,13 @@ transaction_doubles() {
   assert_file_contains "$db_test_dir/.env" 'VDM_ALPHA_DB_ENGINE=mysql'
   assert_file_contains "$work/events" import
   assert_file_contains "$work/events" verify
-  assert_equal "$(cat "$VDM_PROJECT_PATH/alpha/db/sentinel")" retained
+  assert_equal "$(cat "$VDM_PROJECT_PATH/alpha/db/imported-data")" imported
+  [ ! -e "$VDM_PROJECT_PATH/alpha/db/sentinel" ]
+  recovery=$(find "$VDM_PROJECT_PATH" -path '*/original/sentinel' -print)
+  [ -n "$recovery" ]
+  assert_equal "$(cat "$recovery")" retained
+  assert_file_contains "$db_test_compose" '${VDM_PROJECT_PATH}/alpha/db:/var/lib/mysql'
+  refute_file_contains "$db_test_compose" 'type":"volume'
   assert_file_contains "$work/running" joomlaalpha
   assert_file_contains "$work/running" phpmyadminalpha
 }
@@ -272,7 +289,9 @@ transaction_doubles() {
   VDM_PRE_BACKUP=true
   run joomlaDatabaseChange alpha.vdm.dev mysql mysql:8.4 preserve
   assert_success
-  assert_equal "$(head -2 "$work/events" | tail -1)" backup
+  backup_line=$(grep -n '^backup$' "$work/events" | cut -d: -f1)
+  stop_line=$(grep -n '^stop ' "$work/events" | head -n1 | cut -d: -f1)
+  [ "$backup_line" -lt "$stop_line" ]
 }
 
 @test "independent clone passes explicit identity to logical restore and changes only clone" {
@@ -314,4 +333,137 @@ transaction_doubles() {
   assert_failure
   assert_output_contains 'shares configuration.php with beta.vdm.dev'
   cmp "$work/configuration.php" "$work/original.php"
+}
+
+@test "explicit named database storage stays named without moving project folders" {
+  stage_doubles
+  test_db_type=volume test_db_source=alpha_db
+  printf original > "$VDM_PROJECT_PATH/alpha/db/sentinel"
+  joomlaDatabaseStageStorage alpha.vdm.dev mysql mysql:target "$work/stage"
+  assert_equal "$VDM_DATABASE_STAGE_STORAGE_TYPE" volume
+  assert_file_contains "$VDM_DATABASE_STAGE_COMPOSE" '"type":"volume"'
+  assert_file_contains "$VDM_DATABASE_STAGE_COMPOSE" "name: $VDM_DATABASE_STAGE_STORAGE"
+  cp "$VDM_DATABASE_STAGE_COMPOSE" "$work/named.yml"
+  joomlaDatabasePublishStorage "$work/stage" "$work/named.yml"
+  joomlaDatabaseRollbackStorage "$work/stage"
+  assert_equal "$(cat "$VDM_PROJECT_PATH/alpha/db/sentinel")" original
+  cmp "$VDM_DATABASE_STAGE_COMPOSE" "$work/named.yml"
+}
+
+@test "post-publication verification failure restores original directory and retains candidate data" {
+  transaction_doubles
+  printf original > "$VDM_PROJECT_PATH/alpha/db/sentinel"
+  joomlaDatabaseVerifyConnection() {
+    # Before publication the candidate path exists; after the directory swap
+    # this failure exercises rollback of real filesystem state, not just YAML.
+    [ -d "$VDM_DATABASE_STAGE_STORAGE" ]
+  }
+  run joomlaDatabaseChange alpha.vdm.dev mysql mysql:target preserve
+  assert_failure
+  assert_equal "$(cat "$VDM_PROJECT_PATH/alpha/db/sentinel")" original
+  [ ! -e "$VDM_PROJECT_PATH/alpha/db/imported-data" ]
+  retained=$(find "$VDM_PROJECT_PATH" -path '*/candidate/imported-data' -print)
+  [ -n "$retained" ]
+  assert_equal "$(cat "$retained")" imported
+  cmp "$db_test_compose" "$work/original.yml"
+  cmp "$work/configuration.php" "$work/original.php"
+  assert_file_contains "$work/running" joomlaalpha
+}
+
+@test "interruption between directory moves is recoverable without deleting either dataset" {
+  stage_doubles
+  printf original > "$VDM_PROJECT_PATH/alpha/db/sentinel"
+  joomlaDatabaseStageStorage alpha.vdm.dev mysql mysql:target "$work/stage"
+  printf candidate > "$VDM_DATABASE_STAGE_STORAGE/sentinel"
+  # This is the actual state after the first publication rename, before the
+  # second. Recovery must not depend on a later marker having been written.
+  mv "$VDM_DATABASE_STAGE_STORAGE_ORIGINAL" "$VDM_DATABASE_STAGE_STORAGE_RECOVERY"
+  joomlaDatabaseRollbackStorage "$work/stage"
+  assert_equal "$(cat "$VDM_PROJECT_PATH/alpha/db/sentinel")" original
+  assert_equal "$(cat "$VDM_DATABASE_STAGE_STORAGE/sentinel")" candidate
+  [ ! -e "$VDM_DATABASE_STAGE_STORAGE_RECOVERY" ]
+}
+
+@test "live database mounts prevent publication before any directory moves" {
+  stage_doubles
+  printf original > "$VDM_PROJECT_PATH/alpha/db/sentinel"
+  joomlaDatabaseStageStorage alpha.vdm.dev mysql mysql:target "$work/stage"
+  printf candidate > "$VDM_DATABASE_STAGE_STORAGE/sentinel"
+  docker() {
+    case "$1" in
+      ps) printf 'running-database\n';;
+      inspect) jq -n --arg source "$VDM_DATABASE_STAGE_STORAGE" '[{Mounts:[{Type:"bind",Source:$source}]}]';;
+      *) return 1;;
+    esac
+  }
+  run joomlaDatabasePublishStorage "$work/stage" "$db_test_compose"
+  assert_failure
+  assert_output_contains 'still mounted by a running container'
+  assert_equal "$(cat "$VDM_PROJECT_PATH/alpha/db/sentinel")" original
+  assert_equal "$(cat "$VDM_DATABASE_STAGE_STORAGE/sentinel")" candidate
+  [ ! -e "$VDM_DATABASE_STAGE_STORAGE_RECOVERY" ]
+}
+
+@test "failed storage rollback does not restart an uncertain deployment" {
+  transaction_doubles
+  printf original > "$VDM_PROJECT_PATH/alpha/db/sentinel"
+  joomlaDatabaseVerifyConnection() { [ -d "$VDM_DATABASE_STAGE_STORAGE" ]; }
+  joomlaDatabaseRollbackStorage() { return 1; }
+  run joomlaDatabaseChange alpha.vdm.dev mysql mysql:target preserve
+  assert_failure
+  assert_output_contains 'Automatic recovery is incomplete'
+  [ ! -s "$work/running" ]
+  retained=$(find "$VDM_PROJECT_PATH" -path '*/original/sentinel' -print)
+  [ -n "$retained" ]
+  assert_equal "$(cat "$retained")" original
+}
+
+@test "a stopped configured website sharing the database folder prevents staging" {
+  stage_doubles
+  make_joomla_container beta BETA beta
+  printf original > "$VDM_PROJECT_PATH/alpha/db/sentinel"
+  joomlaSiteCompose() {
+    [ "$2" = config ] || return 1
+    jq -n --arg source "$VDM_PROJECT_PATH/alpha/db" \
+      '{services:{db:{volumes:[{type:"bind",source:$source,target:"/var/lib/mysql"}]}}}'
+  }
+  run joomlaDatabaseStageStorage alpha.vdm.dev mysql mysql:target "$work/stage"
+  assert_failure
+  assert_output_contains 'shared or overlaps'
+  [ ! -e "$work/stage" ]
+  assert_equal "$(cat "$VDM_PROJECT_PATH/alpha/db/sentinel")" original
+  cmp "$db_test_compose" "$work/original.yml"
+}
+
+@test "a stopped configured parent mount prevents database directory replacement" {
+  stage_doubles
+  make_joomla_container beta BETA beta
+  joomlaSiteCompose() {
+    [ "$2" = config ] || return 1
+    local source="$VDM_PROJECT_PATH/alpha/db"
+    [ "$1" != beta.vdm.dev ] || source="$VDM_PROJECT_PATH/alpha"
+    jq -n --arg source "$source" \
+      '{services:{db:{volumes:[{type:"bind",source:$source,target:"/var/lib/mysql"}]}}}'
+  }
+  run joomlaDatabaseStageStorage alpha.vdm.dev mysql mysql:target "$work/stage"
+  assert_failure
+  assert_output_contains 'shared or overlaps'
+  [ ! -e "$work/stage" ]
+}
+
+@test "a stopped configured symlink alias prevents database directory replacement" {
+  stage_doubles
+  make_joomla_container beta BETA beta
+  ln -s "$VDM_PROJECT_PATH/alpha" "$work/alias"
+  joomlaSiteCompose() {
+    [ "$2" = config ] || return 1
+    local source="$VDM_PROJECT_PATH/alpha/db"
+    [ "$1" != beta.vdm.dev ] || source="$work/alias/db"
+    jq -n --arg source "$source" \
+      '{services:{db:{volumes:[{type:"bind",source:$source,target:"/var/lib/mysql"}]}}}'
+  }
+  run joomlaDatabaseStageStorage alpha.vdm.dev mysql mysql:target "$work/stage"
+  assert_failure
+  assert_output_contains 'shared or overlaps'
+  [ ! -e "$work/stage" ]
 }

@@ -221,6 +221,12 @@ fail_php_publication() {
   refute_file_exists "$(compose_yml site3.vdm.dev)"
   assert_file_contains "$(shared_env)" '_DB="bulk_db1"'
   assert_file_contains "$(shared_env)" '_DB="bulk_db2"'
+  local compose
+  for compose in "$(compose_yml site1.vdm.dev)" "$(compose_yml site2.vdm.dev)"; do
+    getJoomlaComposeIdentity "$compose"
+    assert_file_contains "$compose" '${VDM_PROJECT_PATH}/'"${VDM_SRC_KEY}"'/joomla:/var/www/html'
+    assert_file_contains "$compose" '${VDM_PROJECT_PATH}/'"${VDM_SRC_KEY}"'/db:/var/lib/mysql'
+  done
   refute_command '^docker compose .* (up|start|restart)'
 }
 
@@ -277,6 +283,17 @@ fail_php_publication() {
   assert_file_exists "$(compose_yml site2.vdm.dev)"
   refute_file_exists "${VDM_PROJECT_PATH}/bulk/php.ini"
   refute_file_exists "${VDM_PROJECT_PATH}/bulk/entrypoint.sh"
+}
+
+@test "joomla bulk: cancelling persistence leaves deployment and project data untouched" {
+  octojoom_config 'VDM_EXPERT_MODE=true'
+  expert_bulk_answers no no '<esc>'
+  run joomla__TRuST__bulk
+  assert_status 255
+  assert_answers_used
+  refute_file_exists "${VDM_REPO_PATH}/joomla/available"
+  refute_file_exists "${VDM_REPO_PATH}/joomla/.env"
+  refute_command '^docker compose .* (up|start|restart)'
 }
 
 ###############################################################################

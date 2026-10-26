@@ -119,6 +119,20 @@ docker() {
   info)
     return 0
     ;;
+  inspect)
+    if [[ "$*" == *'.Mounts'* ]]; then
+      if [ -f "$WORK/source-mounts" ]; then
+        cat "$WORK/source-mounts"
+      elif [ "${*: -1}" = mariadbjcb ]; then
+        printf 'bind\t%s/jcb/db\t/var/lib/mysql\n' "$VDM_PROJECT_PATH"
+      elif [ "${*: -1}" = joomlajcb ]; then
+        printf 'bind\t%s/jcb/joomla\t/var/www/html\n' "$VDM_PROJECT_PATH"
+      else
+        return 1
+      fi
+    fi
+    return 0
+    ;;
   compose)
     local action="${*: -1}"
     echo "$*" >>"${COMPOSE_LOG}"
@@ -235,7 +249,7 @@ PHP
   cp "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/docker-compose.yml" "${WORK}/compose.orig"
   # the source is running
   printf '%s\n' traefik mariadbjcb joomlajcb phpmyadminjcb mailcatcherjcb >"${RUNNING}"
-  rm -f "${DIALOGS}" "${DIALOGS}.full" "${COMPOSE_LOG}" "${WORK}/fail_stop" "${WORK}/fail_start"
+  rm -f "${DIALOGS}" "${DIALOGS}.full" "${COMPOSE_LOG}" "${WORK}/fail_stop" "${WORK}/fail_start" "$WORK/source-mounts"
 }
 
 # the source must never change
@@ -374,6 +388,73 @@ cloneJoomlaContainer
   fail "disabled source: compose was run" "$(cat "${COMPOSE_LOG}")"
 
 ###############################################################################
+echo "# source containers must match the project's persistent folders"
+
+setup_home false
+printf 'volume\toriginal_database\t/var/lib/mysql\n' > "$WORK/source-mounts"
+printf '%s\n' jcb.vdm.dev jcb test TEST test yes yes > "$ANSWERS"
+if cloneJoomlaContainer; then fail 'named runtime storage: clone accepted'; else pass 'named runtime storage: clone refused'; fi
+[ ! -e "$VDM_PROJECT_PATH/test" ] && [ ! -e "$VDM_REPO_PATH/joomla/available/test.vdm.dev" ] &&
+  pass 'named runtime storage: no destination created' || fail 'named runtime storage: destination was created'
+[ ! -s "$COMPOSE_LOG" ] && pass 'named runtime storage: source not stopped' || fail 'named runtime storage: Compose was run'
+check_source_untouched 'named runtime storage'
+
+if [[ "${OSTYPE}" != msys && "${OSTYPE}" != cygwin ]]; then
+  echo "# linked database storage cannot survive into a clone"
+  setup_home false
+  mv "$VDM_PROJECT_PATH/jcb/db" "$WORK/external-db"
+  ln -s "$WORK/external-db" "$VDM_PROJECT_PATH/jcb/db"
+  printf '%s\n' jcb.vdm.dev jcb test TEST test yes yes > "$ANSWERS"
+  if cloneJoomlaContainer; then fail 'linked database: clone accepted'; else pass 'linked database: clone refused'; fi
+  [ ! -e "$VDM_PROJECT_PATH/test" ] && [ ! -e "$VDM_REPO_PATH/joomla/available/test.vdm.dev" ] &&
+    pass 'linked database: no destination created' || fail 'linked database: destination was created'
+  [ ! -s "$COMPOSE_LOG" ] && pass 'linked database: source not stopped' || fail 'linked database: Compose was run'
+  check_source_untouched 'linked database'
+fi
+
+echo "# external database and live disabled sources cannot bypass independent storage"
+setup_home false
+sed -i.bak 's/mariadbjcb:3306/shared-database.example/' "$VDM_PROJECT_PATH/jcb/joomla/configuration.php"
+rm -f "$VDM_PROJECT_PATH/jcb/joomla/configuration.php.bak"
+rm -f "$WORK/configuration.orig"
+cp "$VDM_PROJECT_PATH/jcb/joomla/configuration.php" "$WORK/configuration.orig"
+printf '%s\n' jcb.vdm.dev jcb yes test TEST test yes yes > "$ANSWERS"
+if cloneJoomlaContainer; then fail 'external database: clone accepted'; else pass 'external database: clone refused'; fi
+[ ! -e "$VDM_PROJECT_PATH/test" ] && [ ! -e "$VDM_REPO_PATH/joomla/available/test.vdm.dev" ] &&
+  pass 'external database: no destination created' || fail 'external database: destination was created'
+[ ! -s "$COMPOSE_LOG" ] && pass 'external database: source not stopped' || fail 'external database: Compose was run'
+check_source_untouched 'external database'
+
+setup_home false
+rm -rf "$VDM_REPO_PATH/joomla/enabled/jcb.vdm.dev"
+printf '%s\n' jcb.vdm.dev jcb test TEST test yes yes yes > "$ANSWERS"
+if cloneJoomlaContainer; then fail 'live disabled source: clone accepted'; else pass 'live disabled source: clone refused'; fi
+[ ! -e "$VDM_PROJECT_PATH/test" ] && [ ! -e "$VDM_REPO_PATH/joomla/available/test.vdm.dev" ] &&
+  pass 'live disabled source: no destination created' || fail 'live disabled source: destination was created'
+[ ! -s "$COMPOSE_LOG" ] && pass 'live disabled source: source not stopped' || fail 'live disabled source: Compose was run'
+check_source_untouched 'live disabled source'
+
+echo "# cloned nested Joomla files and Nginx configuration are independent"
+setup_home false
+source_dir="$VDM_REPO_PATH/joomla/available/jcb.vdm.dev"
+work="$WORK/web"
+mkdir -p "$work" "$VDM_PROJECT_PATH/jcb/joomla/site"
+mv "$VDM_PROJECT_PATH/jcb/joomla/configuration.php" "$VDM_PROJECT_PATH/jcb/joomla/site/configuration.php"
+writeEnvVariable "$VDM_REPO_PATH/joomla/.env" 'VDM_JCB_DOCROOT=site' true
+writeEnvVariable "$VDM_REPO_PATH/joomla/.env" 'VDM_JCB_WEBSERVER=nginx' true
+joomlaRewriteWebserverCompose "$source_dir/docker-compose.yml" "$work/compose.yml" joomlajcb nginxjcb nginx joomla:verified-fpm nginx:stable-alpine "$work"
+cp "$work/compose.yml" "$source_dir/docker-compose.yml"
+joomlaNginxConfiguration joomlajcb /var/www/html/site > "$source_dir/nginx.conf"
+printf '%s\n' jcb.vdm.dev jcb test TEST test yes yes > "$ANSWERS"
+if cloneJoomlaContainer; then pass 'nested Nginx: clone completed'; else fail 'nested Nginx: clone failed'; fi
+clone_dir="$VDM_REPO_PATH/joomla/available/test.vdm.dev"
+grep -q 'fastcgi_pass joomlatest:9000;' "$clone_dir/nginx.conf" && pass 'nested Nginx: PHP service renamed' || fail 'nested Nginx: PHP service still shared'
+grep -q 'fastcgi_pass joomlajcb:9000;' "$source_dir/nginx.conf" && pass 'nested Nginx: source configuration retained' || fail 'nested Nginx: source configuration changed'
+[ "$(getJoomlaConfigValue "$VDM_PROJECT_PATH/test/joomla/site/configuration.php" host)" = mariadbtest:3306 ] &&
+  pass 'nested Nginx: cloned application uses its own database' || fail 'nested Nginx: cloned database host incorrect'
+printf 'clone database bytes\n' > "$VDM_PROJECT_PATH/test/db/ibdata1"
+grep -qx ibdata "$VDM_PROJECT_PATH/jcb/db/ibdata1" && pass 'nested Nginx: database copies independent' || fail 'nested Nginx: source database changed'
+
 echo
 echo "passed: ${PASSED}  failed: ${FAILED}"
 [ "${FAILED}" -eq 0 ]

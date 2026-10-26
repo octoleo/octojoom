@@ -53,7 +53,7 @@ On Linux, installed Docker Compose also validates generated configuration.
 | Expert configuration | Effective per-site ENV, validated replacement, stable Compose project identity, original running-state discovery, stopped-site preservation, and rollback |
 | Website information | Enabled versus running state, unavailable Docker, site facts and routes, secret exclusion, selected-site actions, and bind/named-volume paths |
 | Configuration and dialogs | Secret persistence, literal input, permissions, validation, random values, and prompt cancellation |
-| Joomla setup | Single and bulk deployment, generated Compose, environment values, persistence, and feature options |
+| Joomla setup | Single and bulk project-folder defaults, explicit named-volume opt-out, cancellation, generated Compose, environment values, and feature options |
 | Guided setup and defaults | One customization fork, saved-default precedence, manual versus automatic installation, headless preflight, and staged publication failures |
 | Configuration alignment | Effective Compose equivalence, complete scoped ENV, custom-field preservation, idempotence, per-site batch failure reporting, and recoverable publication |
 | PHP runtime | Published-tag compatibility, measured runtime checks, selective INI changes, custom-directive preservation, stopped-site handling, and rollback |
@@ -167,7 +167,11 @@ the actual SQL console through a PTY. ZIP/tar restores run with the source
 services stopped and preserve uploaded-file contents, numeric ownership and
 mode. Destination writes must remain independent. It also checks current-site
 restore with a pre-restore backup, batch operations, independent database-change
-clones, and database-version changes that retain the old storage. Fresh mode
+clones, and database-version changes that retain the old storage and restore
+the original project-folder bind paths. MariaDB/MySQL checks then cold-clone
+and package/prepare a raw migration from that site, confirming independent
+files and SQL with the source stopped. These exercise local archive workers;
+they do not establish actual SSH transport. Fresh mode
 must leave an empty database with the website stopped. The MySQL row changes
 successfully to MariaDB; the MariaDB row requires an incompatible MySQL import
 to reach the actual importer and then restore the original deployment. It also
@@ -201,11 +205,11 @@ require noninteractive sudo on the remote host. A failed publication retains
 the previous destination or reports the retained recovery backup.
 Joomla clone supports the generated bind-mount layout and refuses
 layouts it cannot rewrite safely, including Docker named-volume clones,
-site-specific alternate project bases, and Compose-relative companion mounts.
-Complete migration can carry its supported companion files and destination
-project paths. Both clone and complete migration currently refuse Nginx/FPM
-sites and configured nested document roots before changing source files or
-services. The newer runtime/root controls do not extend those data-copy formats.
+site-specific alternate project bases, and unsupported external dependencies.
+Clone and complete migration carry supported Compose-relative companion files
+and retain generated Apache or Nginx/FPM layouts, including configured nested
+document roots. Both require canonical project-folder storage; complete
+migration also retains its raw database image and architecture requirements.
 Clones and complete migrations share a lock per Joomla repository. An
 interrupted process can leave `joomla/.clone.lock`; remove that empty directory
 only after verifying that no clone or migration is running. Other interactive operations share progress files;

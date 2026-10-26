@@ -28,9 +28,18 @@ For a single website, the environment key defaults to the uppercase project key;
 the subdomain defaults to its lowercase form. A key and domain are required (the
 domain may come from the host's saved configuration). For bulk setup, the provided
 subdomain is a prefix; site numbers and independently generated project keys are
-added. The existing bulk default uses Docker named volumes; single-site setup
-uses bind directories. Explicit `--persistence true|false` and
-`--db-persistence true|false` select bind directories or named volumes.
+added. Single and bulk setup both keep website files in
+`${VDM_PROJECT_PATH}/<key>/joomla` and database files in
+`${VDM_PROJECT_PATH}/<key>/db` by default. The existing expert yes/no persistence
+questions keep this project-folder layout when accepted. Automation uses
+`--persistence true` and `--db-persistence true` by default as well.
+
+Explicitly answering No, or supplying the corresponding flag as `false`, keeps
+the Docker named-volume option for local testing. A site using a named volume
+for either website or database storage is not eligible for complete-project
+migration or cold cloning. This choice is never silently changed by a database
+change or backup restore. SQL exports and backups remain available within their
+documented supported layouts.
 
 `--image-source`, `--image-tag`, `--db-name`, `--db-user`, `--auto-install`,
 `--enable`, `--mailcatcher`, `--phpmyadmin`, `--uid`, and `--gid` supply the
@@ -53,6 +62,43 @@ are rejected before first-run directory creation in noninteractive mode. A
 shared environment key can be reused with the same database credentials. Use a
 new environment key for independent credentials; setup will not overwrite
 another website's shared credentials.
+
+## Change an existing site's persistence
+
+Use **Website Information → select a website → Change data persistence** to
+change website files and database storage independently. The same yes/no choices
+select project-folder persistence or Docker named volumes for local testing.
+
+```bash
+# Inspect both current storage choices.
+octojoom --type joomla --task persistence --container demo.example.test \
+  --action status --non-interactive
+
+# Move both data stores into the site's canonical project folders.
+octojoom --type joomla --task persistence --container demo.example.test \
+  --persistence true --db-persistence true --non-interactive
+
+# Move only the database into a Docker named volume for local testing.
+octojoom --type joomla --task persistence --container demo.example.test \
+  --db-persistence false --non-interactive
+```
+
+Supplying either storage flag implies `--action set`; no flags defaults to
+status. An omitted flag leaves that data store unchanged. The operation stops
+writers before copying, preserves numeric ownership and file modes, updates the
+selected Compose mounts, verifies the result, and resumes only services that
+were previously running. Prior data is retained for recovery. It does not change
+the database engine, import SQL or activate a deliberately stopped site.
+
+An existing canonical directory displaced when switching back to project folders
+is retained under `${VDM_PROJECT_PATH}/.octojoom-persistence.*/original`, outside
+the active project. Original Compose configuration and recovery details remain
+in the selected site's `.persistence.*` directory. Shared or ambiguous custom
+mounts are rejected before copying.
+
+Returning both stores to project folders restores the storage requirement for
+complete-project migration and cold cloning. Their other requirements still
+apply, including the supported root layout and raw database compatibility.
 
 ## Future defaults and per-site choices
 
@@ -109,10 +155,11 @@ uses `POSTGRES_DB`, `POSTGRES_USER` and `POSTGRES_PASSWORD`, port 5432, and the
 Joomla `pgsql` driver. PostgreSQL asks no root-password question and does not
 create phpMyAdmin. A PostgreSQL data mount follows the selected image's actual
 `PGDATA`: older image layouts use `/var/lib/postgresql/data`, while the versioned
-layout uses `/var/lib/postgresql`. Existing raw clone/migration operations keep
-the same engine and data layout; changing database families is a separate
-database-change operation. Their existing restrictions on Nginx/FPM and nested
-document roots still apply.
+layout uses `/var/lib/postgresql`. Raw clone/migration operations retain their
+database-image and layout requirements; changing database families is a separate
+database-change operation. Supported generated Apache and Nginx/FPM layouts,
+including nested document roots, can use these operations when both data stores
+use canonical project folders.
 
 Some published Joomla images concatenate PostgreSQL credentials into a libpq
 connection string in `/makedb.php`. When this exact initializer is detected,
