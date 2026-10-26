@@ -575,7 +575,8 @@ joomlaSiteCompose "$SOURCE" exec -T "$VDM_SITE_SERVICE" php -r \
 unused_volume="retired$RUN_ID"
 joomlaPersistenceVolumeDeclaration "$VDM_SITE_COMPOSE" "$WORK/unused-volume.compose" "$unused_volume" add
 mv "$WORK/unused-volume.compose" "$VDM_SITE_COMPOSE"
-joomlaSiteCompose "$SOURCE" config --format json | jq -e --arg name "$unused_volume" '.volumes[$name].name==$name' >/dev/null
+# Compose's resolved model omits unused volumes; verify their source text too.
+grep -qF "  $unused_volume:" "$VDM_SITE_COMPOSE"
 request persistence --container "$SOURCE" --action set --persistence true --confirm true
 joomlaSiteCompose "$SOURCE" config --format json | jq -e --arg name "$unused_volume" '.volumes[$name]==null' >/dev/null
 if grep -qF "  $unused_volume:" "$VDM_SITE_COMPOSE"; then
