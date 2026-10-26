@@ -479,7 +479,7 @@ readJoomlaSiteFacts "$VOLUME_SITE"
 joomlaSiteCompose "$VOLUME_SITE" exec -T "$VDM_SITE_SERVICE" php -r \
   'exit(file_put_contents($argv[1]."/images/octojoom-upload.txt","before named-volume restoration\n")===false?1:0);' "$VDM_SITE_DOCROOT"
 request backup --container "$VOLUME_SITE" --action restore --target current --file "$ARCHIVES/named-volume.tar.gz" \
-  --pre-backup false --confirm true
+  --destination "$ARCHIVES" --pre-backup true --confirm true
 assert_application "$VOLUME_SITE"
 assert_state "$VOLUME_SITE"
 restored_web_storage=$(runtime_storage "$VOLUME_SITE" web)

@@ -281,7 +281,23 @@ YAML
 @test "physical alias comparison resolves another site's symlinked bind parent" {
   mkdir "$SANDBOX/physical"
   ln -s "$SANDBOX/physical" "$SANDBOX/alias" || skip 'symlink unsupported'
-  assert_equal "$(joomlaPersistenceCanonicalPath "$SANDBOX/alias/missing-child")" "$SANDBOX/physical/missing-child"
+  local physical
+  physical=$(cd "$SANDBOX/physical" && pwd -P)
+  assert_equal "$(joomlaPersistenceCanonicalPath "$SANDBOX/alias/missing-child")" "$physical/missing-child"
+}
+
+@test "physical alias comparison uses privileged resolution when directory traversal is denied" {
+  mkdir "$SANDBOX/protected directory"
+  ln -s "$SANDBOX/protected directory" "$SANDBOX/alias" || skip 'symlink unsupported'
+  local physical
+  physical=$(cd "$SANDBOX/protected directory" && pwd -P)
+  runPrivileged() { printf '<%s>\n' "$@" > "$SANDBOX/privileged-argv"; "$@"; }
+  cd() { return 77; }
+  run joomlaPersistenceCanonicalPath "$SANDBOX/alias/missing-child"
+  unset -f cd
+  assert_success
+  assert_equal "$output" "$physical/missing-child"
+  assert_file_contains "$SANDBOX/privileged-argv" "<$SANDBOX/alias>"
 }
 
 @test "single JSON data mount returns to original short bind form" {
