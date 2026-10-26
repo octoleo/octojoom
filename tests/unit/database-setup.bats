@@ -86,7 +86,7 @@ database_capabilities() {
   database_capabilities
   database_headless
   TEST_POSTGRES_TARGET=/var/lib/postgresql/data
-  parseCLI --db-engine postgres --db-image postgres:older-family --non-interactive
+  parseCLI --db-engine postgres --db-image postgres:older-family --persistence false --db-persistence false --non-interactive
   VDM_TASK=bulk VDM_SUBDOMAIN=website VDM_NUMBER_CONTAINERS=2 VDM_AUTO_INSTALL=true
   VDM_J_EMAIL=admin@example.test VDM_J_PASSWORD=administrator-long-password
   run joomla__TRuST__bulk

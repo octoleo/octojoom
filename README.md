@@ -226,6 +226,17 @@ The original menu and `--type`/`--task` commands share their operations. Octojoo
 remains one Bash executable using the existing Compose files, environment
 settings, and persistent project directories.
 
+Single and bulk setup keep website files in
+`${VDM_PROJECT_PATH}/<key>/joomla` and database files in
+`${VDM_PROJECT_PATH}/<key>/db` by default. The original expert yes/no persistence
+questions remain available. Explicitly opting out selects Docker named volumes
+for local testing; these sites cannot be cold-cloned or migrated as complete
+projects. **Website Information → Change data persistence** can move either
+store back to its project folder or into a named volume while preserving its
+data. Database changes and restores preserve the selected storage approach.
+Logical SQL exports/backups remain supported, while complete-project migration
+retains its single cold archive of the project files and raw database data.
+
 | Guide | What it covers |
 | --- | --- |
 | [1. Commands and completion](docs/COMMANDS.md) | Noninteractive commands, optional JSON requests/results, Bash completion, and menu-to-command coverage |
@@ -240,9 +251,10 @@ settings, and persistent project directories.
 | [12. Local HTTPS](docs/LOCAL-HTTPS.md) | Select existing websites for trusted local HTTPS, renew certificates, or change their connection mode |
 
 See [test coverage and validation limits](tests/README.md) for the portable suite
-and real Docker acceptance checks. Clone and complete project migration
-currently require the original Apache document-root layout; they refuse nested
-roots and Nginx/FPM sites before changing source data or services.
+and real Docker acceptance checks. Clone and complete project migration support
+generated Apache and Nginx/FPM layouts, including nested document roots, with
+both data stores in the canonical project folders. Their database-image and
+custom-layout checks still apply.
 
 ### Complete Joomla project migration
 
@@ -333,8 +345,8 @@ the imported containers, reporting if that stop also fails.
 #### Supported layouts and operational limits
 
 Complete migration supports Octojoom's generated Joomla bind-mount layout
-with an installed `configuration.php` and its local MariaDB container. The
-source database container must exist, its actual database mount must match
+with an installed `configuration.php` and its local MySQL-family database
+container. The source database container must exist, its actual database mount must match
 the selected project, and its image must have an immutable repository digest.
 The destination architecture must match the source architecture. Moves between
 architectures and database upgrades need a separate logical database

@@ -141,6 +141,7 @@ Each new feature extends these same handlers and completion discovery.
 | Selected website browser/folder actions | `joomla open` | `--container --action website|admin|viewer|mail|directory` | Explicitly requested native opener |
 | Selected website container terminal | `joomla shell`, `exec` | `--container`; shell needs TTY, exec takes literal argv after `--` | Native terminal/child output and status |
 | Selected website permission repair | `joomla permissions` | `--container`; optional numeric `--uid` and `--gid` together | Actual root; original file/directory permission helpers |
+| Selected website → Change data persistence | `joomla persistence` | `--container`; `--action status|set`, independent `--persistence true|false` and `--db-persistence true|false` | Inspect storage or copy between project folders and Docker named volumes; preserve data and prior running state |
 | Clone container / project folder | `joomla clone`, `clonefiles` | Clone source container and destination identity; folder clone source `--project` and destination `--target-project` | Existing clone path and collision checks |
 | Delete container definition | `joomla delete`, `openssh delete` | `--container` | Original definition removal; headless never implicitly deletes project data |
 | Reset project storage | `joomla reset` | `--project`, explicit `--volume web|database|both` | Existing stopped-project safety checks |
@@ -176,6 +177,18 @@ Setup credentials/settings include `--db-name`, `--db-user`, `--db-password`,
 `--db-root-password`, `--db-prefix`, `--site-name`, `--admin-user`, `--admin-username`,
 `--admin-email`, `--admin-password`, `--extensions`, `--commands`, `--mailcatcher`,
 `--phpmyadmin`, `--persistence`, `--db-persistence`, and `--save-defaults`.
+Single and bulk setup default both persistence flags to `true`, keeping website
+and database files under the site's project folder. An explicit `false` selects
+a local-test Docker named volume for that storage; such a site cannot use
+complete-project migration or cold cloning.
+
+For existing sites, `--task persistence` shows current storage when no storage
+flags are supplied. Either flag implies `--action set`; omitted flags leave
+that store unchanged. `true` selects the site's canonical project folder and
+`false` selects a Docker named volume. The menu's **Change data persistence**
+action uses the same stopped-copy and verification operation. See
+[setup and persistence](SETUP-DEFAULTS.md#change-an-existing-sites-persistence).
+
 Database setup accepts `--engine` (alias `--db-engine`) with `mariadb`, `mysql`,
 or `postgres` (`postgresql` is an accepted spelling), and `--database-image`
 (alias `--db-image`) with an explicit published image reference. Engine choices
@@ -188,7 +201,7 @@ controls the existing host-entry preference. Server choices additionally accept
 `--nginx-image` and an explicit `--nginx-config` for custom routing equivalents.
 
 Existing operation-specific restrictions still apply: for example, the original
-cold clone/migration paths can reject unsupported named volumes or custom
+cold clone/migration paths reject named-volume local-test sites and unsupported custom
 storage layouts. A visible site is not a promise that every operation can safely
 rewrite its configuration. Each operation reports its own limitation.
 

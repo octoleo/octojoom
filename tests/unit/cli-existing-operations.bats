@@ -59,12 +59,11 @@ setup() {
   assert_file_exists "$VDM_PROJECT_PATH/source/joomla"
 }
 
-@test "cold data operations reject a nested root without touching the source" {
+@test "cold data operations retain a valid nested root inside persistent project storage" {
   make_joomla_container source SOURCE source
   printf 'VDM_SOURCE_DOCROOT="site"\n' >> "$VDM_REPO_PATH/joomla/.env"
   run requireOriginalJoomlaDataLayout source.vdm.dev Clone
-  assert_failure
-  assert_output_contains 'nested document root'
+  assert_success
   assert_file_exists "$VDM_REPO_PATH/joomla/available/source.vdm.dev/docker-compose.yml"
 }
 

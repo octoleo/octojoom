@@ -209,6 +209,32 @@ HOOK
   [ "$(grep -c 'Make your selection' "$STUB_DIR/dialogs.full")" -eq 2 ]
 }
 
+@test "persistence menu changes only the selected store and keeps the selected website" {
+  make_joomla_container alpha ALPHA first
+  VDM_PERSISTENCE=true VDM_DB_PERSISTENCE=true
+  joomlaPersistenceStatus() { printf 'Storage for %s\n' "$1"; }
+  joomla__TRuST__persistence() {
+    printf '%s|%s|%s|%s\n' "$VDM_CONTAINER" "$VDM_ACTION" "${VDM_PERSISTENCE-unset}" "${VDM_DB_PERSISTENCE-unset}" > "$SANDBOX/persistence-action"
+  }
+  answers first.vdm.dev persistence database false back back
+  run showJoomlaWebsiteInformation
+  assert_success
+  assert_answers_used
+  assert_equal "$(cat "$SANDBOX/persistence-action")" 'first.vdm.dev|set|unset|false'
+  assert_equal "$VDM_PERSISTENCE" true
+  assert_equal "$VDM_DB_PERSISTENCE" true
+}
+
+@test "cancelling persistence destination leaves storage unchanged" {
+  joomlaPersistenceStatus() { printf 'Current storage\n'; }
+  joomla__TRuST__persistence() { touch "$SANDBOX/persistence-action"; }
+  answers both '<cancel>'
+  run showJoomlaPersistence first.vdm.dev
+  assert_success
+  assert_answers_used
+  [ ! -e "$SANDBOX/persistence-action" ]
+}
+
 @test "restoration can open destination details directly and Back returns to its caller" {
   make_joomla_container alpha ALPHA first
   make_joomla_container beta BETA restored

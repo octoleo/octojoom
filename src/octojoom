@@ -977,9 +977,8 @@ function joomlaSetupDatabaseChoices() {
 # Resolve future-site defaults without changing saved settings or prompting.
 # Explicit request presence is retained by the CLI until setup has finished.
 function joomlaSetupDefaults() {
-  local persistence_default=true setting variable
+  local setting variable
   [ "${VDM_TLS_CHOICE+x}" = x ] || VDM_TLS_CHOICE="${VDM_DEFAULT_JOOMLA_TLS_CHOICE:-default}"
-  [ "${VDM_TASK:-}" != bulk ] || persistence_default=false
   if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || ! isExpert; then
     [ -n "${VDM_J_REPO:-}" ] || VDM_J_REPO="${VDM_DEFAULT_JOOMLA_IMAGE_SOURCE:-}"
   fi
@@ -1011,7 +1010,7 @@ function joomlaSetupDefaults() {
     : "${VDM_ENV_KEY:=${VDM_KEY^^}}" "${VDM_SUBDOMAIN:=${VDM_KEY,,}}"
     : "${VDM_AUTO_INSTALL:=${VDM_DEFAULT_JOOMLA_AUTO_INSTALL:-false}}" "${VDM_ENABLE:=false}"
     : "${VDM_CUSTOMIZE:=false}" "${VDM_SECURE:=false}" "${VDM_SECURE_CLOUDFLARE:=false}"
-    : "${VDM_MAILCATCHER:=false}" "${VDM_PERSISTENCE:=$persistence_default}" "${VDM_DB_PERSISTENCE:=$persistence_default}"
+    : "${VDM_MAILCATCHER:=false}" "${VDM_PERSISTENCE:=true}" "${VDM_DB_PERSISTENCE:=true}"
     : "${VDM_MULTI_DOMAIN:=false}" "${VDM_UPDATE_HOST:=false}"
     # A provided domain must not open the multiple-domain selector.
     VDM_ARG_DOMAIN=true
@@ -2929,16 +2928,20 @@ function joomla__TRuST__bulk() {
       [ "$customization_status" -eq 1 ] || return "$customization_status"
     fi
   fi
-  # set persistence
+  # Keep the same project-folder default and expert questions as single setup.
   persistence_volume=false
   persistence_db=false
-  # only if in expert mode
-  if { isExpert || [ "${VDM_PERSISTENCE+x}" = x ]; } && joomlaSetupPersistence VDM_PERSISTENCE 'Joomla website files and folders'; then
+  if joomlaSetupPersistence VDM_PERSISTENCE 'Joomla website files and folders'; then
     persistence_volume=true
+  else
+    customization_status=$?
+    [ "$customization_status" -eq 1 ] || return "$customization_status"
   fi
-  # only if in expert mode
-  if { isExpert || [ "${VDM_DB_PERSISTENCE+x}" = x ]; } && joomlaSetupPersistence VDM_DB_PERSISTENCE 'Joomla database'; then
+  if joomlaSetupPersistence VDM_DB_PERSISTENCE 'Joomla database'; then
     persistence_db=true
+  else
+    customization_status=$?
+    [ "$customization_status" -eq 1 ] || return "$customization_status"
   fi
   # ask if we should add mailcatcher
   enable_mailcatcher=false
@@ -4134,35 +4137,75 @@ function joomla__TRuST__clone() {
   return "${clone_status}"
 }
 
-# Existing cold clone/export readers assume Joomla directly in the web mount.
-# Keep their supported path intact and reject only a configured nested root.
+# Cold copies require both data directories in the selected project folder.
+# Nonpersistent test containers are never a source for clone or migration.
 function requireOriginalJoomlaDataLayout() {
-  local site="$1" operation="$2" compose_file env_file root env_key server project_base
+  local site="$1" operation="$2" compose_file env_file project_base
   compose_file="${VDM_REPO_PATH}/joomla/available/$site/docker-compose.yml"
   env_file=$(getContainerEnvFile joomla "$site" available)
   if [ "$operation" = Clone ] && migrationReadEnvValue "$env_file" VDM_PROJECT_PATH project_base && [ "$project_base" != "$VDM_PROJECT_PATH" ]; then
     printf '%s\n' 'Clone cannot yet copy a source using a different site-specific project base. Use complete project migration for that layout; source data is unchanged.' >&2
     return 1
   fi
-  if getJoomlaComposeIdentity "$compose_file"; then
-    env_key="$VDM_SRC_ENV_KEY"
-    if migrationReadEnvValue "$env_file" "VDM_${env_key}_WEBSERVER" server && [ "$server" = nginx ]; then
-      printf '%s does not yet support the Nginx/FPM layout. Source files and services are unchanged.\n' "$operation" >&2
-      return 1
-    fi
-    if migrationReadEnvValue "$env_file" "VDM_${env_key}_DOCROOT" root; then
-      case "$root" in ''|.|/var/www/html) ;;
-        *) printf '%s does not yet support a nested document root; use the original site data operation after restoring its root, or transfer it manually.\n' "$operation" >&2; return 1;;
-      esac
-    fi
-  fi
-  # Clone's original copier copies only the project directory. Migration already
-  # archives supported Compose-relative companion files itself.
-  if [ "$operation" = Clone ] && grep -qE "^[[:space:]]*-[[:space:]]*[\"']?[.]/" "$compose_file"; then
-    printf '%s\n' 'Clone cannot yet copy Compose-relative companion mounts. The source is unchanged; use complete project migration for supported companion files.' >&2
+  if ! getJoomlaComposeIdentity "$compose_file" || "$VDM_SRC_NAMED_VOLUMES" ||
+    ! migrationComposeLocalFiles "$compose_file" "$VDM_SRC_PROJECT_FOLDER" >/dev/null; then
+    printf '%s requires persistent Joomla and database folders in the project. Named/anonymous volumes and external data mounts cannot be copied. Source unchanged.\n' "$operation" >&2
     return 1
   fi
-  return 0
+  joomlaProjectRelativeRoot "$env_file" "$VDM_SRC_ENV_KEY" >/dev/null
+}
+
+# A saved document root only selects a directory inside the persistent web bind.
+function joomlaProjectRelativeRoot() {
+  local env_file="$1" env_key="$2" root=.
+  migrationReadEnvValue "$env_file" "VDM_${env_key}_DOCROOT" root || root=.
+  case "$root" in ''|.|/var/www/html) printf 'joomla\n';;
+    *) joomlaValidateDocumentRoot "$root" && printf 'joomla/%s\n' "$root";;
+  esac
+}
+
+# Verify the containers really use the folders about to be copied. Checking the
+# Compose text alone can miss a container started with different ENV values.
+function joomlaVerifyProjectBindings() {
+  local key="$1" project_root="$2" project="$3" role mounts roots expected actual
+  for role in mariadb joomla; do
+    mounts=$(docker inspect --type container --format '{{range .Mounts}}{{printf "%s\t%s\t%s\n" .Type .Source .Destination}}{{end}}' "${role}${key}" 2>/dev/null) || {
+      printf 'Start the source project once so its persistent data mounts can be verified.\n' >&2; return 1;
+    }
+    if [ "$role" = mariadb ]; then
+      roots=$(printf '%s\n' "$mounts" | awk -F '\t' '$3 ~ /^\/var\/lib\/(mysql|postgresql(\/data)?)$/ {print $1 "\t" $2}')
+      expected="$project_root/$project/db"
+    else
+      roots=$(printf '%s\n' "$mounts" | awk -F '\t' '$3 == "/var/www/html" {print $1 "\t" $2}')
+      expected="$project_root/$project/joomla"
+    fi
+    actual=''
+    if [[ "$roots" == bind$'\t'* && "$roots" != *$'\n'* ]]; then
+      actual=$(joomlaBackupFilesystemPath "${roots#*$'\t'}") || return 1
+    fi
+    expected=$(joomlaBackupFilesystemPath "$expected") || return 1
+    [ "$actual" = "$expected" ] || {
+      printf 'The %s container does not use its expected persistent project folder: %s. Source unchanged.\n' "$role" "$expected" >&2; return 1;
+    }
+  done
+}
+
+# The generated Nginx companion names its PHP service. Keep the rest of this
+# ordinary mounted configuration unchanged when a copied project gets a key.
+function joomlaRealignCompanionFiles() {
+  local directory="$1" old_key="$2" new_key="$3" file temporary
+  [[ "$old_key" =~ ^[A-Za-z]+$ && "$new_key" =~ ^[A-Za-z]+$ ]] || return 1
+  file="$directory/nginx.conf"
+  [ -f "$file" ] && [ "$old_key" != "$new_key" ] || return 0
+  [ ! -L "$file" ] || return 1
+  temporary=$(mktemp "$directory/.nginx-clone.XXXXXX") || return 1
+  if ! sed -E 's/(fastcgi_pass[[:space:]]+)joomla'"$old_key"':9000;/\1joomla'"$new_key"':9000;/' "$file" > "$temporary" ||
+    grep -qE 'joomla'"$old_key"'([^A-Za-z]|$)' "$temporary" ||
+    ! runPrivileged tee "$file" < "$temporary" >/dev/null; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  rm -f -- "$temporary"
 }
 
 # clone a complete Joomla container: docker-compose.yml, env values and project folder
@@ -4201,7 +4244,6 @@ function cloneJoomlaContainerUnlocked() {
   local project
   local config
   local host
-  local patch_host=true
   local current_site_name
   local site_name=''
   local source_running=false
@@ -4228,6 +4270,7 @@ function cloneJoomlaContainerUnlocked() {
   local shared_note=''
   local source_state=0
   local restart_status=0
+  local relative_root companion companions
   ##########################
   ### 1. select the source container
   container=$(getSelectedDirectory "Select the container you would like to clone." \
@@ -4285,6 +4328,10 @@ The clone needs the env values of the source container."
     showError "The (${project}) folder is not a Joomla project folder, it must have a joomla and a db sub-folder."
     return 1
   fi
+  if [ -L "$VDM_PROJECT_PATH/$project/db" ] || [ -L "$VDM_PROJECT_PATH/$project/joomla" ]; then
+    showError 'The Joomla and database folders must be ordinary project directories, not symbolic links. Nothing was changed.'
+    return 1
+  fi
   if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] && [ "$project" != "$VDM_SRC_PROJECT_FOLDER" ]; then
     showError 'The selected project does not match the source Compose mount.'
     return 17
@@ -4294,9 +4341,19 @@ The clone needs the env values of the source container."
 The clone will be a copy of (${project}). Would you like to continue?" "Different Project Folder" 12 112 "defaultno"; then
     return 0
   fi
-  config="${VDM_PROJECT_PATH}/${project}/joomla/configuration.php"
+  joomlaVerifyProjectBindings "$old_key" "$VDM_PROJECT_PATH" "$project" || return 1
+  relative_root=$(joomlaProjectRelativeRoot "$src_env_file" "$old_env") || return 1
+  companions=$(migrationComposeLocalFiles "$src_yml" "$project") || return 1
+  while IFS= read -r companion; do
+    [ -n "$companion" ] || continue
+    if migrationPathHasSymlink "$src_dir/$companion" || [ ! -e "$src_dir/$companion" ]; then
+      showError 'A mounted configuration file is missing or linked outside the source. Nothing was changed.'
+      return 1
+    fi
+  done <<< "$companions"
+  config="${VDM_PROJECT_PATH}/${project}/${relative_root}/configuration.php"
   if [ ! -f "${config}" ]; then
-    showError "The (${project}) project has no joomla/configuration.php file, so Joomla is not installed yet.\n\n\
+    showError "The (${project}) project has no ${relative_root}/configuration.php file, so Joomla is not installed yet.\n\n\
 Setup a new container instead of cloning this one."
     return 1
   fi
@@ -4304,16 +4361,8 @@ Setup a new container instead of cloning this one."
   ### 4. make sure the site uses the database of the container being cloned
   host=$(getJoomlaConfigValue "${config}" 'host')
   if ! [[ "${host}" =~ ^mariadb${old_key}(:[0-9]+)?$ ]]; then
-    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
-      showError 'The source uses an external database; automatic cold cloning cannot copy it safely.'
-      return 17
-    fi
-    if ! getInputYesNo "The configuration.php of (${project}) connects to the database host (${host}) and not to (mariadb${old_key}).\n\n\
-The clone would keep using that same database, which is only safe when it is not the database of another container.\n\n\
-Would you like to continue without changing the database host?" "Database Host Mismatch" 14 112 "defaultno"; then
-      return 0
-    fi
-    patch_host=false
+    showError 'The source uses an external database. A project-folder clone cannot copy that database independently; nothing was changed.'
+    return 17
   fi
   ##########################
   ### 5. get the new key (container names and project folder)
@@ -4376,7 +4425,7 @@ Would you like to continue without changing the database host?" "Database Host M
   ### 8. only in expert mode ask for a new site name
   if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
     site_name="${VDM_J_SITE_NAME:-}"
-  elif isExpert && ${patch_host}; then
+  elif isExpert; then
     current_site_name=$(getJoomlaConfigValue "${config}" 'sitename')
     site_name=$(getInput "Enter the site name of the clone.\n[Keep the current name (${current_site_name}) to leave it unchanged]" \
       "${current_site_name} (clone)" 'Enter Site Name')
@@ -4393,17 +4442,9 @@ Would you like to continue without changing the database host?" "Database Host M
     if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ]; then
       source_running=true
       stop_line="The (${container}) containers will be stopped during the copy and started again afterwards.\n"
-    elif [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
+    else
       showError 'Stop the source database or enable its existing Compose project before cloning.'
       return 17
-    elif getInputYesNo "The database container (mariadb${old_key}) is running, but (${container}) is not enabled,\n\
-so it was started outside ${PROGRAM_NAME} and cannot be stopped for the copy.\n\n\
-Copying a running database can produce an inconsistent copy. Stop it first, or continue at your own risk.\n\n\
-Would you like to continue anyway?" "Database Is Running" 14 112 "defaultno"; then
-      warnings+="  - The database of (${container}) was copied while it was running, check the clone's data.\n"
-    else
-      showNotice "The clone was cancelled, nothing was changed." 8
-      return 0
     fi
   fi
   ##########################
@@ -4414,11 +4455,7 @@ Would you like to continue anyway?" "Database Is Running" 14 112 "defaultno"; th
   message+=$(printf '  %-18s %-28s %s' 'Env key:' "VDM_${old_env}_*" "VDM_${new_env}_*")"\n"
   message+=$(printf '  %-18s %-28s %s' 'Site:' "${container}" "${new_container}")"\n"
   message+=$(printf '  %-18s %-28s %s' 'Project folder:' "${project}" "${VDM_KEY}")"\n"
-  if ${patch_host}; then
-    message+=$(printf '  %-18s %-28s %s' 'Database host:' "mariadb${old_key}" "mariadb${VDM_KEY} (patched in configuration.php)")"\n"
-  else
-    message+=$(printf '  %-18s %-28s %s' 'Database host:' "${host}" "${host} (NOT changed)")"\n"
-  fi
+  message+=$(printf '  %-18s %-28s %s' 'Database host:' "mariadb${old_key}" "mariadb${VDM_KEY} (patched in configuration.php)")"\n"
   [ -n "${site_name}" ] && message+=$(printf '  %-18s %-28s %s' 'Site name:' "${current_site_name}" "${site_name}")"\n"
   if ! ${per_container_env} && [ "${old_env}" = "${new_env}" ]; then
     shared_note=" (shared with ${container})"
@@ -4493,6 +4530,20 @@ octojoom-clone-error-2 with a copy of the docker-compose.yml." 14
     showError "The permissions of the cloned Compose file could not be secured."
     return 1
   fi
+  while IFS= read -r companion; do
+    [ -n "$companion" ] || continue
+    if ! mkdir -p -- "$new_dir/$(dirname "$companion")" ||
+      ! runPrivileged cp -a -- "$src_dir/$companion" "$new_dir/$companion"; then
+      cloneJoomlaRollback "$new_dir" '' false "$shared_env" "$env_added"
+      showError 'A mounted configuration file could not be copied. The clone was rolled back.'
+      return 1
+    fi
+  done <<< "$companions"
+  if ! joomlaRealignCompanionFiles "$new_dir" "$old_key" "$VDM_KEY"; then
+    cloneJoomlaRollback "$new_dir" '' false "$shared_env" "$env_added"
+    showError 'The cloned webserver configuration could not be aligned.'
+    return 1
+  fi
   ##########################
   ### 15. let docker compose validate the new file (with the env file the clone will use)
   env_file=$(getContainerEnvFile "${VDM_CONTAINER_TYPE}" "${new_container}" 'available')
@@ -4565,12 +4616,10 @@ Use (Enable existing container) or (Pull up all enabled containers) to start (${
   rm -f "${VDM_SRC_PATH}/.clone_error"
   ##########################
   ### 19. point the cloned configuration.php at the clone's own database (and mailcatcher)
-  if ${patch_host}; then
-    if ! cloneJoomlaConfiguration "${new_project}/joomla/configuration.php" "${old_key}" "${VDM_KEY}" "${site_name}"; then
-      showError "The configuration.php of the clone could not be updated, so the clone was rolled back."
-      cloneJoomlaRollback "${new_dir}" "${new_project}" "${project_created}" "${shared_env}" "${env_added}"
-      return 1
-    fi
+  if ! cloneJoomlaConfiguration "${new_project}/${relative_root}/configuration.php" "${old_key}" "${VDM_KEY}" "${site_name}"; then
+    showError "The configuration.php of the clone could not be updated, so the clone was rolled back."
+    cloneJoomlaRollback "${new_dir}" "${new_project}" "${project_created}" "${shared_env}" "${env_added}"
+    return 1
   fi
   ##########################
   ### 20. set host file if needed
@@ -4581,16 +4630,13 @@ Use (Enable existing container) or (Pull up all enabled containers) to start (${
   ${VDM_SRC_MAILCATCHER} && updateHostFile "${VDM_SUBDOMAIN}mail"
   ##########################
   ### 21. things we do not change, but the user should know about
-  if ! ${patch_host}; then
-    warnings+="  - The database host (${host}) was NOT changed, the clone shares that database.\n"
-  fi
-  if [ -n "$(getJoomlaConfigValue "${new_project}/joomla/configuration.php" 'live_site')" ]; then
+  if [ -n "$(getJoomlaConfigValue "${new_project}/${relative_root}/configuration.php" 'live_site')" ]; then
     warnings+="  - configuration.php sets \$live_site, check that it fits ${new_container}.\n"
   fi
-  if [ -n "$(getJoomlaConfigValue "${new_project}/joomla/configuration.php" 'cookie_domain')" ]; then
+  if [ -n "$(getJoomlaConfigValue "${new_project}/${relative_root}/configuration.php" 'cookie_domain')" ]; then
     warnings+="  - configuration.php sets \$cookie_domain, check that it fits ${new_container}.\n"
   fi
-  if runPrivileged grep -qs "${container}" "${new_project}/joomla/.htaccess" "${new_project}/joomla/robots.txt" "${new_project}/joomla/web.config"; then
+  if runPrivileged grep -qs "${container}" "${new_project}/${relative_root}/.htaccess" "${new_project}/${relative_root}/robots.txt" "${new_project}/${relative_root}/web.config"; then
     warnings+="  - ${container} is mentioned in .htaccess, robots.txt or web.config of the clone, check them.\n"
   fi
   ##########################
@@ -4601,7 +4647,7 @@ Use (Enable existing container) or (Pull up all enabled containers) to start (${
   --------------------------------------------------------------------
     URL:              ${scheme}${new_container}
     PHPMYADMIN:       ${scheme}${VDM_SUBDOMAIN}db.${VDM_DOMAIN}
-    DATABASE_HOST:    $(getJoomlaConfigValue "${new_project}/joomla/configuration.php" host)
+    DATABASE_HOST:    $(getJoomlaConfigValue "${new_project}/${relative_root}/configuration.php" host)
   --------------------------------------------------------------------
     DOCKER COMPOSE:   ${new_yml}
     PROJECT FOLDER:   ${new_project}
@@ -4829,6 +4875,7 @@ function joomla__TRuST__reset() {
 #####################################################################################################################VDM
 ######################################## Migrate Joomla
 function joomla__TRuST__migratefiles() {
+  printf '%s\n' 'This command copies deployment configuration only; it does not migrate Joomla or database data. Use the migrate task for a complete persistent project.' >&2
   if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
     migrateSelectedFolder 'joomla'
     return $?
@@ -4842,7 +4889,7 @@ function joomla__TRuST__migratefiles() {
     local vdm_migrate_me
     local container
     # list containers... and allow selection to edit
-    container=$(getSelectedDirectory "Select the container you would like to migrate.\n[Only continue if you know what your doing!] (We will only move docker-composer.yml file)" \
+    container=$(getSelectedDirectory "Select the container configuration to copy.\nThis copies deployment files only, without Joomla or database data." \
       "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/" '' "Migrate ${VDM_CONTAINER_TYPE^} Container")
     # check that we have something, else return to main menu
     if [ ${#container} -ge 1 ]; then
@@ -5931,12 +5978,12 @@ function joomlaDatabaseInstalledCapability() {
     }
 }
 
-# Stage a fresh named data volume without touching source storage or runtime.
+# Stage fresh database storage without changing the site's persistence choice.
 # Existing custom service fields, other mounts and unrelated services survive.
 # shellcheck disable=SC2016,SC2034
 function joomlaDatabaseStageStorage() {
   local site="$1" engine="$2" image="$3" stage="$4" model service target old_target volumes current property driver
-  local version env_key key directory compose env_file old_engine profiles
+  local version env_key key directory compose env_file old_engine profiles mount storage_type original storage_work storage_parent storage_mount project_base field value
   joomlaDatabaseContext "$site" && readJoomlaSiteFacts "$site" || return 1
   service="$VDM_DB_SERVICE" old_engine="$VDM_DB_ENGINE" env_key="$VDM_SITE_ENV_KEY" key="$VDM_SITE_KEY"
   directory="$VDM_SITE_DIR" compose="$VDM_SITE_COMPOSE" env_file="$VDM_SITE_ENV"
@@ -5947,9 +5994,13 @@ function joomlaDatabaseStageStorage() {
   joomlaDatabaseInstalledCapability "$site" "$engine" "$version" || return 1
   (local VDM_DB_ENGINE="$engine"; joomlaSetupDatabaseCredentials "$VDM_DB_NAME" "$VDM_DB_USER" "$VDM_DB_PASSWORD") || return 1
   model=$(migrationRunCompose "$env_file" "$compose" --project-directory "$directory" config --format json) || return 1
-  old_target=$(printf '%s' "$model" | joomlaSiteJSON -er --arg service "$service" '
+  mount=$(printf '%s' "$model" | joomlaSiteJSON -ec --arg service "$service" '
     [.services[$service].volumes[]? | select(.target=="/var/lib/mysql" or .target=="/var/lib/postgresql/data" or .target=="/var/lib/postgresql")] |
-    if length==1 then .[0].target else error("ambiguous database data mount") end') || return 1
+    if length==1 and (.[0].read_only//false)==false then .[0] else error("ambiguous or read-only database data mount") end') || return 1
+  old_target=$(printf '%s' "$mount" | joomlaSiteJSON -er .target) || return 1
+  storage_type=$(printf '%s' "$mount" | joomlaSiteJSON -er .type) || return 1
+  original=$(printf '%s' "$mount" | joomlaSiteJSON -er .source) || return 1
+  case "$storage_type" in bind|volume) ;; *) printf 'Unsupported database storage type.\n' >&2; return 1;; esac
   # Engine-specific commands/entrypoints/config files cannot be safely translated.
   if [ "$old_engine" != "$engine" ]; then
     for property in command entrypoint; do
@@ -5961,19 +6012,67 @@ function joomlaDatabaseStageStorage() {
       printf 'Database configuration/initialization mounts require manual engine adaptation.\n' >&2; return 1
     fi
   fi
+  if [ "$storage_type" = bind ]; then
+    joomlaPersistenceCheckShared "$site" bind "$original" "$old_target" || return 1
+  fi
   mkdir -p "$stage" && chmod 700 "$stage" || return 1
-  VDM_DATABASE_STAGE_STORAGE="octojoom_${key,,}_db_$(date +%s)_${RANDOM}"
+  VDM_DATABASE_STAGE_STORAGE_TYPE="$storage_type"
+  VDM_DATABASE_STAGE_STORAGE_ORIGINAL="$original" VDM_DATABASE_STAGE_STORAGE_RECOVERY=''
+  if [ "$storage_type" = bind ]; then
+    original=$(joomlaBackupFilesystemPath "$original") || return 1
+    if ! { [[ "$original" == /* && "$original" != / ]] && ! migrationPathHasSymlink "$original" && runPrivileged test -d "$original"; }; then
+      printf 'The existing database directory must be available without symlinks before changing it.\n' >&2; return 1;
+    fi
+    # Retain the original short-form source, including its project-path reference.
+    # Other mounts and their comments remain exactly as the user wrote them.
+    joomlaServiceProperty "$compose" "$service" volumes > "$stage/original-volumes" || return 1
+    awk -v old="$old_target" -v target="$target" '
+      /^[[:space:]]*#/ {print; next}
+      index($0,":"old) {
+        at=index($0,":"old); suffix=substr($0,at+length(old)+1)
+        if($0 !~ /^      - / || suffix !~ /^(:[A-Za-z,]+)?["\047]?[[:space:]]*$/) exit 1
+        print substr($0,1,at) target suffix; count++; next
+      }
+      {print}
+      END {if(count!=1) exit 1}
+    ' "$stage/original-volumes" > "$stage/final-volumes" || {
+      printf 'Database changes require an ordinary short-form bind mount; source storage is unchanged.\n' >&2; return 1;
+    }
+    storage_parent="${original%/*}"
+    if migrationReadEnvValue "$env_file" VDM_PROJECT_PATH project_base; then
+      project_base=$(joomlaBackupFilesystemPath "$project_base") || return 1
+      if [ "${original%/*/*}" = "$project_base" ] && [ "${original##*/}" = db ]; then storage_parent="$project_base"; fi
+    fi
+    storage_work=$(mktemp -d "$storage_parent/.octojoom-db-stage.XXXXXX") && chmod 700 "$storage_work" || return 1
+    # Keep retained data outside the active project archive, on the same device
+    # so publication is a directory rename rather than a cross-device copy.
+    if ! (set -o pipefail; df -P "$original" "$storage_work" | awk 'NR>1 {if(!device) device=$1; else if(device!=$1) exit 1} END {if(NR<3) exit 1}'); then
+      rmdir "$storage_work"; printf 'Database staging and source storage must use the same filesystem.\n' >&2; return 1
+    fi
+    mkdir "$storage_work/candidate" || return 1
+    VDM_DATABASE_STAGE_STORAGE="$storage_work/candidate"
+    VDM_DATABASE_STAGE_STORAGE_ORIGINAL="$original" VDM_DATABASE_STAGE_STORAGE_RECOVERY="$storage_work/original"
+  else
+    VDM_DATABASE_STAGE_STORAGE="octojoom_${key,,}_db_$(date +%s)_${RANDOM}"
+  fi
   VDM_DATABASE_STAGE_COMPOSE="$stage/docker-compose.yml" VDM_DATABASE_STAGE_ENV="$stage/.env"
   VDM_DATABASE_STAGE_SERVICE="$service" VDM_DATABASE_STAGE_DRIVER="$driver" VDM_DATABASE_STAGE_MOUNT_TARGET="$target"
+  : > "$stage/storage.env" && chmod 600 "$stage/storage.env" || return 1
+  for field in TYPE ORIGINAL CANDIDATE RECOVERY SERVICE; do
+    case "$field" in TYPE) value="$storage_type";; ORIGINAL) value="$VDM_DATABASE_STAGE_STORAGE_ORIGINAL";; CANDIDATE) value="$VDM_DATABASE_STAGE_STORAGE";; RECOVERY) value="$VDM_DATABASE_STAGE_STORAGE_RECOVERY";; SERVICE) value="$service";; esac
+    writeEnvVariable "$stage/storage.env" "VDM_DATABASE_STORAGE_$field=$value" true || return 1
+  done
   siteWriteScopedEnv "$compose" "$env_file" "$env_key" "$VDM_DATABASE_STAGE_ENV" || return 1
   writeEnvVariable "$VDM_DATABASE_STAGE_ENV" "VDM_${env_key}_DB_ENGINE=$engine" true &&
     writeEnvVariable "$VDM_DATABASE_STAGE_ENV" "VDM_${env_key}_DB_IMAGE=$image" true || return 1
   cp -- "$compose" "$stage/current.yml" || return 1
   current="$stage/current.yml"
   siteReplaceServiceScalar "$current" "$stage/next.yml" "$service" image "\${VDM_${env_key}_DB_IMAGE}" && mv "$stage/next.yml" "$current" || return 1
+  storage_mount="$VDM_DATABASE_STAGE_STORAGE"
+  [ "$storage_type" != bind ] || storage_mount=$(joomlaWebHostPath "$storage_mount") || return 1
   volumes=$(printf '%s' "$model" | joomlaSiteJSON -c --arg service "$service" --arg old "$old_target" \
-    --arg target "$target" --arg volume "$VDM_DATABASE_STAGE_STORAGE" '
-    .services[$service].volumes | map(if .target==$old then {type:"volume",source:$volume,target:$target} else . end)') || return 1
+    --arg target "$target" --arg storage "$storage_mount" --arg type "$storage_type" '
+    .services[$service].volumes | map(if .target==$old then .type=$type | .source=$storage | .target=$target else . end)') || return 1
   printf '    volumes: %s\n' "$volumes" > "$stage/property"
   joomlaSetServiceProperty "$current" "$stage/next.yml" "$service" volumes "$stage/property" && mv "$stage/next.yml" "$current" || return 1
   joomlaDatabaseEnvironment "$current" "$service" "$stage/property" database "$engine" "$env_key" "$service" "$driver" &&
@@ -5999,13 +6098,80 @@ function joomlaDatabaseStageStorage() {
     [ "$profiles" = '[]' ] || printf '    profiles: %s\n' "$profiles" > "$stage/property"
     joomlaSetServiceProperty "$current" "$stage/next.yml" "phpmyadmin$key" profiles "$stage/property" && mv "$stage/next.yml" "$current" || return 1
   fi
-  awk -v volume="$VDM_DATABASE_STAGE_STORAGE" '
+  if [ "$storage_type" = bind ]; then cp "$current" "$VDM_DATABASE_STAGE_COMPOSE" || return 1
+  else awk -v volume="$VDM_DATABASE_STAGE_STORAGE" '
     /^volumes:[[:space:]]*$/ {found++; print; print "  " volume ":\n    name: " volume; next}
     /^volumes:/ {bad=1}
     {print}
     END {if(!found) print "\nvolumes:\n  " volume ":\n    name: " volume; if(found>1 || bad) exit 1}
   ' "$current" > "$VDM_DATABASE_STAGE_COMPOSE" || return 1
+  fi
   chmod 600 "$VDM_DATABASE_STAGE_COMPOSE" && siteValidateCompose "$VDM_DATABASE_STAGE_COMPOSE" "$VDM_DATABASE_STAGE_ENV" "$directory"
+}
+
+# A stopped project is required before moving database directories. Inspect all
+# running containers too, so another deployment cannot keep either directory live.
+function joomlaDatabaseStorageStopped() {
+  local ids mounts source path
+  local -a containers=()
+  ids=$(docker ps --quiet) || return 1
+  while IFS= read -r source; do [ -z "$source" ] || containers+=("$source"); done <<< "$ids"
+  [ "${#containers[@]}" -gt 0 ] || return 0
+  mounts=$(docker inspect "${containers[@]}") || return 1
+  mounts=$(printf '%s' "$mounts" | joomlaSiteJSON -r '.[] | .Mounts[]? | select(.Type=="bind") | .Source') || return 1
+  while IFS= read -r source; do
+    [ -n "$source" ] || continue
+    source=$(joomlaBackupFilesystemPath "$source") || return 1
+    for path in "$@"; do
+      if [[ "$source" = "$path" || "$source" = "$path/"* || "$path" = "$source/"* ]] || [ "$source" -ef "$path" ]; then
+        printf 'Database storage is still mounted by a running container; directory publication was refused.\n' >&2
+        return 1
+      fi
+    done
+  done <<< "$mounts"
+}
+
+# Publish a verified, stopped bind candidate at its original project location.
+# Fixed sibling paths let rollback recover even between the two directory moves.
+function joomlaDatabasePublishStorage() {
+  local stage="$1" compose="$2" type original candidate recovery service temporary
+  migrationReadEnvValue "$stage/storage.env" VDM_DATABASE_STORAGE_TYPE type || return 1
+  [ "$type" = bind ] || return 0
+  migrationReadEnvValue "$stage/storage.env" VDM_DATABASE_STORAGE_ORIGINAL original &&
+    migrationReadEnvValue "$stage/storage.env" VDM_DATABASE_STORAGE_CANDIDATE candidate &&
+    migrationReadEnvValue "$stage/storage.env" VDM_DATABASE_STORAGE_RECOVERY recovery &&
+    migrationReadEnvValue "$stage/storage.env" VDM_DATABASE_STORAGE_SERVICE service || return 1
+  ! migrationPathHasSymlink "$original" && ! migrationPathHasSymlink "$candidate" &&
+    ! migrationPathHasSymlink "$recovery" && runPrivileged test -d "$original" && runPrivileged test -d "$candidate" &&
+    ! runPrivileged test -e "$recovery" || return 1
+  joomlaDatabaseStorageStopped "$original" "$candidate" "$recovery" || return 1
+  temporary=$(mktemp "${compose%/*}/.database-canonical.XXXXXX") || return 1
+  if ! joomlaSetServiceProperty "$compose" "$temporary" "$service" volumes "$stage/final-volumes" ||
+    ! chmod 600 "$temporary" || ! siteValidateCompose "$temporary" "$stage/.env" "${compose%/*}"; then rm -f "$temporary"; return 1; fi
+  if ! runPrivileged mv -- "$original" "$recovery" || ! runPrivileged mv -- "$candidate" "$original"; then
+    rm -f "$temporary"; return 1
+  fi
+  mv -f -- "$temporary" "$compose" || { rm -f "$temporary"; return 1; }
+  printf 'Original database directory retained at %s\n' "$recovery" >&2
+}
+
+# Call before restoring original Compose/configuration and restarting services.
+# Failed candidates remain available; no directory is deleted by recovery.
+function joomlaDatabaseRollbackStorage() {
+  local stage="$1" type original candidate recovery
+  [ -f "$stage/storage.env" ] || return 0
+  migrationReadEnvValue "$stage/storage.env" VDM_DATABASE_STORAGE_TYPE type || return 1
+  [ "$type" = bind ] || return 0
+  migrationReadEnvValue "$stage/storage.env" VDM_DATABASE_STORAGE_ORIGINAL original &&
+    migrationReadEnvValue "$stage/storage.env" VDM_DATABASE_STORAGE_CANDIDATE candidate &&
+    migrationReadEnvValue "$stage/storage.env" VDM_DATABASE_STORAGE_RECOVERY recovery || return 1
+  runPrivileged test -e "$recovery" || return 0
+  ! migrationPathHasSymlink "$original" && ! migrationPathHasSymlink "$candidate" && ! migrationPathHasSymlink "$recovery" || return 1
+  joomlaDatabaseStorageStopped "$original" "$candidate" "$recovery" || return 1
+  if runPrivileged test -e "$original"; then
+    ! runPrivileged test -e "$candidate" && runPrivileged mv -- "$original" "$candidate" || return 1
+  fi
+  runPrivileged mv -- "$recovery" "$original"
 }
 
 # Repointing a shared configuration.php would silently change another website.
@@ -6094,7 +6260,9 @@ function joomlaDatabaseChange() {
       trap - EXIT INT TERM HUP
       if ! "$success" && "$runtime_changed"; then
         printf "Database change failed; restoring original storage and configuration.\n" >&2
-        joomlaSiteCompose "$site" stop >&2 || recovery_failed=true
+        if joomlaSiteCompose "$site" stop >&2; then
+          joomlaDatabaseRollbackStorage "$stage/candidate" || { status=1; recovery_failed=true; }
+        else status=1; recovery_failed=true; fi
         if "$published"; then
           cp -p -- "$stage/docker-compose.original.yml" "$compose" || { status=1; recovery_failed=true; }
           [ -z "$mirror" ] || cp -p -- "$stage/docker-compose.original.yml" "$mirror/docker-compose.yml" || { status=1; recovery_failed=true; }
@@ -6107,7 +6275,10 @@ function joomlaDatabaseChange() {
           fi
         fi
         if "$changed_config"; then joomlaDatabaseWriteConfiguration "$site" "$stage/configuration.original.php" || { status=1; recovery_failed=true; }; fi
-        if [ "${#active[@]}" -gt 0 ]; then joomlaSiteCompose "$site" up -d --no-deps --force-recreate --wait --wait-timeout 120 "${active[@]}" >&2 || { status=1; recovery_failed=true; }; fi
+        if ! "$recovery_failed" && "$published"; then
+          joomlaSiteCompose "$site" up --no-start --no-deps --force-recreate "$service" >&2 || { status=1; recovery_failed=true; }
+        fi
+        if ! "$recovery_failed" && [ "${#active[@]}" -gt 0 ]; then joomlaSiteCompose "$site" up -d --no-deps --force-recreate --wait --wait-timeout 120 "${active[@]}" >&2 || { status=1; recovery_failed=true; }; fi
         printf "Recovery files retained in %s; original data storage remains intact.\n" "$stage" >&2
         if "$recovery_failed"; then printf "Automatic recovery is incomplete. Inspect the retained configuration and service status before restarting.\n" >&2; fi
       fi
@@ -6155,6 +6326,21 @@ function joomlaDatabaseChange() {
       fi
     fi
     joomlaDatabaseVerifyConnection "$site" || exit 1
+    if [ "$VDM_DATABASE_STAGE_STORAGE_TYPE" = bind ]; then
+      # The candidate has passed its import and application-connection checks.
+      # Stop it before swapping directories, then verify the canonical mount too.
+      joomlaSiteCompose "$site" stop >&2 || exit 1
+      joomlaDatabasePublishStorage "$stage/candidate" "$compose" || exit 1
+      [ -z "$mirror" ] || cp -p -- "$compose" "$mirror/docker-compose.yml" || exit 1
+      joomlaSiteCompose "$site" up -d --no-deps --force-recreate --wait --wait-timeout 150 "$service" >&2 || exit 1
+      joomlaDatabaseContext "$site" && joomlaDatabaseVerifyConnection "$site" || exit 1
+      if [ "$mode" = preserve ]; then
+        if ! { joomlaDatabaseTablesResolved > "$stage/published-tables" && cmp -s "$stage/source-tables" "$stage/published-tables" &&
+          joomlaDatabaseRowCountsResolved > "$stage/published-counts" && cmp -s "$stage/source-counts" "$stage/published-counts"; }; then
+          printf 'The published database differs from the verified candidate; rolling back.\n' >&2; exit 1;
+        fi
+      fi
+    fi
     if [ "$mode" = preserve ]; then
       for item in "${active[@]}"; do
         [ "$engine" != postgres ] || [ "$item" != "phpmyadmin$key" ] || continue
@@ -8367,8 +8553,8 @@ function joomlaBackupVerifyApplication() {
 # shellcheck disable=SC2016
 function joomlaBackupPortableCompose() {
   local package="$1" key="$2" folder="$3" compose="$1/compose/docker-compose.yml" env="$1/compose/.env"
-  local model project_base service type source target read_only relative replacement mode property compose_root project_root='' volume_definitions
-  local -a retained_volumes=()
+  local model project_base service type source target read_only relative replacement mode property compose_root project_root='' volume_definitions='{}'
+  local web_volume_source='' db_volume_source=''
   compose_root=$(joomlaBackupFilesystemPath "$package/compose") || return 1
   # Named-only deployments do not reference VDM_PROJECT_PATH, so their scoped
   # environment correctly omits it. Only project-local dependency binds need it.
@@ -8386,10 +8572,14 @@ function joomlaBackupPortableCompose() {
       [[ "$target" == /* && "$target" != *[\"\$\\]* && "$target" != *[![:print:]]* ]] || return 1
       case "$target" in
         /var/www/html)
-          if [ "$type" = volume ] && [ "$source" = "${key,,}_web" ]; then replacement="$source"; retained_volumes+=("$source")
+          if [ "$type" = volume ]; then
+            [ -z "$web_volume_source" ] || [ "$web_volume_source" = "$source" ] || return 1
+            web_volume_source="$source"; replacement="${key,,}_web"
           else replacement='${VDM_PROJECT_PATH}/'"$key/joomla"; fi;;
         /var/lib/mysql|/var/lib/postgresql|/var/lib/postgresql/data)
-          if [ "$type" = volume ] && [ "$source" = "${key,,}_db" ]; then replacement="$source"; retained_volumes+=("$source")
+          if [ "$type" = volume ]; then
+            [ -z "$db_volume_source" ] || [ "$db_volume_source" = "$source" ] || return 1
+            db_volume_source="$source"; replacement="${key,,}_db"
           else replacement='${VDM_PROJECT_PATH}/'"$key/db"; fi;;
         *)
           [ "$type" = bind ] || { joomlaBackupError 'An additional named volume has no portable payload.'; return 1; }
@@ -8401,6 +8591,13 @@ function joomlaBackupPortableCompose() {
               else joomlaBackupError "An archived mount cannot be mapped into destination storage: $target"; return 1; fi;;
           esac;;
       esac
+      if [ "$type" = volume ]; then
+        volume_definitions=$(printf '%s' "$model" | joomlaSiteJSON -c --arg source "$source" --arg replacement "$replacement" --argjson definitions "$volume_definitions" '
+          (.volumes[$source]//{}) as $volume |
+          if ($volume.external//false) or (($volume.driver//"local")!="local") or (($volume.driver_opts//{})|length>0)
+          then error("Independent restore cannot realign external or custom-driver volume storage")
+          else $definitions + {($replacement):($volume|del(.name,.external))} end') || return 1
+      fi
       [[ "$replacement" != *[\"\\]* && "$replacement" != *[![:print:]]* ]] || return 1
       mode=''; [ "$read_only" != true ] || mode=:ro
       printf '      - "%s:%s%s"\n' "$replacement" "$target" "$mode" >> "$property" || return 1
@@ -8410,12 +8607,6 @@ function joomlaBackupPortableCompose() {
   # A later compose down -v also removes declared but unused volumes. Drop old
   # managed storage declarations from this private destination copy, and let
   # retained canonical volumes acquire the destination project's own names.
-  volume_definitions=$(joomlaSiteJSON -cn '$ARGS.positional|unique' --args "${retained_volumes[@]}") || return 1
-  volume_definitions=$(printf '%s' "$model" | joomlaSiteJSON -c --argjson retained "$volume_definitions" '
-    (.volumes//{}) | with_entries(select(.key as $key | $retained | index($key))) |
-    if any(.[]; (.external//false) or ((.driver//"local")!="local") or ((.driver_opts//{})|length>0))
-    then error("Independent restore cannot realign external or custom-driver volume storage")
-    else with_entries(.value |= ((.//{}) | del(.name,.external))) end') || return 1
   awk '
     /^volumes:/ {section=1; count++; next}
     /^[^[:space:]#]/ {section=0}
@@ -8487,7 +8678,7 @@ function joomlaBackupRestoreNewAction() {
   (
     set +x
     umask 077
-    local archive="$1" site="$2" key="$3" package='' published=false result=0 version scope old_site old_key old_env old_folder env_key="${3^^}" root relative config target volume image database engine original_engine path needed free
+    local archive="$1" site="$2" key="$3" package='' published=false result=0 version scope old_site old_key old_env old_folder env_key="${3^^}" root relative config target volume image database engine original_engine path needed free storage_type
     local destination="${VDM_REPO_PATH}/joomla/available/$2" project="${VDM_PROJECT_PATH}/$3"
     migrationDestinationAvailable "$key" "$site" || { joomlaBackupError 'Destination identity or storage is already in use.'; exit 17; }
     mkdir -p "$VDM_PROJECT_PATH" "${VDM_REPO_PATH}/joomla/available" || exit 1
@@ -8553,6 +8744,15 @@ function joomlaBackupRestoreNewAction() {
     esac
     database=$(printf '%s' "$config" | joomlaSiteJSON -r '[.services|to_entries[]|select((.value.image//"")|test("(^|/)(mysql|mariadb|postgres)(:|@|$)"))|.key]|if length==1 then .[0] else empty end') || exit 1
     [ -n "$database" ] || exit 1
+    IFS=$'\t' read -r storage_type path < <(printf '%s' "$config" | joomlaSiteJSON -r --arg service "$database" '.services[$service].volumes[]?|select(.target=="/var/lib/mysql" or .target=="/var/lib/postgresql" or .target=="/var/lib/postgresql/data")|[.type,.source]|@tsv')
+    if [ "$storage_type" = bind ]; then
+      path=$(joomlaBackupFilesystemPath "$path") || exit 1
+      target=$(joomlaBackupFilesystemPath "$project/db") || exit 1
+      [ "$path" = "$target" ] || { joomlaBackupError 'Destination database bind escaped its reserved project.'; exit 1; }
+      mkdir "$project/db" || exit 1
+    elif [ "$storage_type" != volume ]; then
+      joomlaBackupError 'The archive database storage could not be resolved; no storage type was changed.'; exit 1
+    fi
     joomlaSiteCompose "$site" config -q >/dev/null 2>&1 || exit 1
     joomlaSiteCompose "$site" up -d --no-deps "$database" >/dev/null || exit $?
     joomlaBackupWaitDatabase "$site" || exit 1
@@ -8595,6 +8795,53 @@ function joomlaBackupRollbackFiles() {
   done < "$work/files.journal"
   return "$result"
 }
+
+# Keep the selected site's original data mount while restoring other settings.
+# The existing restore editor supports ordinary short-syntax mounts only.
+function joomlaBackupRestoreMount() {
+  local original="$1" compose="$2" service="$3" target="$4" saved="$5" temporary="$5.next"
+  joomlaServiceProperty "$original" "$service" volumes | awk -v target="$target" '
+    /^      - / && index($0,":"target) {print; count++}
+    END {if(count!=1) exit 1}
+  ' > "$saved" || return 1
+  awk -v service="$service" -v target="$target" -v saved="$saved" '
+    /^services:/ {services=1}
+    /^[^[:space:]#]/ && !/^services:/ {services=0}
+    services && /^  [^[:space:]#]/ {selected=($0=="  "service":"); volumes=0}
+    selected && /^    volumes:[[:space:]]*$/ {volumes=1}
+    selected && /^    [^[:space:]#]/ && !/^    volumes:/ {volumes=0}
+    selected && volumes && /^      - / && index($0,":"target) {
+      if((getline line < saved)!=1) exit 1
+      close(saved); print line; count++; next
+    }
+    {print}
+    END {if(count!=1) exit 1}
+  ' "$compose" > "$temporary" && cp "$temporary" "$compose" || return 1
+  rm -f "$saved" "$temporary"
+}
+
+# The candidate is on the original filesystem, outside the active project.
+# Record recovery paths
+# before moving either tree so interruption between the renames is recoverable.
+function joomlaBackupPublishWebsite() {
+  local work="$1" original="$2" candidate="$3" recovery="${3%/*}/original"
+  [ -d "$original" ] && [ -d "$candidate" ] && ! migrationPathHasSymlink "$original" && ! migrationPathHasSymlink "$candidate" || return 1
+  [ "${candidate##*/}" = candidate ] && [ ! -e "$recovery" ] && [ ! -L "$recovery" ] || return 1
+  printf '%s\t%s\t%s\n' "$original" "$candidate" "$recovery" > "$work/website-storage" || return 1
+  runPrivileged mv -- "$original" "$recovery" && runPrivileged mv -- "$candidate" "$original"
+}
+
+function joomlaBackupRollbackWebsite() {
+  local work="$1" original candidate recovery
+  [ -f "$work/website-storage" ] || return 0
+  IFS=$'\t' read -r original candidate recovery < "$work/website-storage" || return 1
+  [ -d "$recovery" ] || return 0
+  if [ -e "$original" ]; then
+    [ ! -e "$candidate" ] || return 1
+    runPrivileged mv -- "$original" "$candidate" || return 1
+  fi
+  runPrivileged mv -- "$recovery" "$original"
+}
 # Keep original database storage and website files untouched while a fresh
 # candidate is imported. On failure restore the previous deployment and running
 # set; successful restore retains old storage for deliberate later cleanup.
@@ -8610,8 +8857,21 @@ function joomlaBackupRestoreCurrentAction() {
     umask 077
     local site="$1" archive="$2" package='' work='' result=0 published=false paused=false running='' database='' db_started=false
     local lock='' locked=false current_project_base current_project current_key current_env archived_key archived_env archived_project needed free
-    local scope version source_site engine old_engine dbimage config service image source target relative config_file prefix host driver dbname dbuser dbpass original_dir original_env original_compose fresh_web state archived_root
+    local scope version source_site engine old_engine dbimage config service image source target relative config_file prefix host driver dbname dbuser dbpass original_dir original_env original_compose fresh_web='' state archived_root
+    local original_web='' original_model original_target recovery_failed=false recovery_path web_stage original_device stage_device
+    local website_type original_volume='' website_volume='' website_storage='' volume_settings
     readJoomlaSiteFacts "$site" || exit 1
+    website_type="$VDM_SITE_MOUNT_TYPE"
+    case "$website_type" in
+      bind)
+        original_web=$(joomlaBackupFilesystemPath "$VDM_SITE_MOUNT_SOURCE") || exit 1
+        [ -d "$original_web" ] && ! migrationPathHasSymlink "$original_web" || exit 1;;
+      volume)
+        original_volume="$VDM_SITE_VOLUME_NAME" website_volume="$VDM_SITE_MOUNT_SOURCE"
+        [ -n "$original_volume" ] && docker volume inspect "$original_volume" >/dev/null 2>&1 || exit 1;;
+      *) joomlaBackupError 'The website storage could not be resolved; its storage choice was not changed.'; exit 17;;
+    esac
+    original_target="$VDM_SITE_MOUNT_TARGET"
     current_key="$VDM_SITE_KEY" current_env="$VDM_SITE_ENV_KEY"
     getJoomlaComposeIdentity "$VDM_SITE_COMPOSE" || exit 1
     current_project="${VDM_SRC_PROJECT_FOLDER:-$current_key}"
@@ -8633,19 +8893,28 @@ function joomlaBackupRestoreCurrentAction() {
       result=$?
       if [ "$result" -ne 0 ] && "$published"; then
         if joomlaSiteCompose "$site" stop >/dev/null 2>&1 &&
+          joomlaDatabaseRollbackStorage "$work/database-stage" &&
+          joomlaBackupRollbackWebsite "$work" &&
           cp "$work/original.yml" "$original_compose" &&
           cp "$work/original.env" "$original_dir/.env"; then
           [ -f "$work/had-private-env" ] || rm -f "$original_dir/.env"
-          joomlaBackupRollbackFiles "$work" || result=1
-          joomlaSiteCompose "$site" up --no-start >/dev/null 2>&1 || result=1
-          joomlaBackupResume "$site" "$running" "$database" false || result=1
-          joomlaBackupError "Restore failed; original deployment/storage were restored. Candidate data is retained at $work."
+          joomlaBackupRollbackFiles "$work" || recovery_failed=true
+          if ! "$recovery_failed"; then
+            # Renamed bind directories need fresh mounts even if their final
+            # Compose path is identical to the restored original setting.
+            joomlaSiteCompose "$site" up --no-start --force-recreate >/dev/null 2>&1 &&
+              joomlaBackupResume "$site" "$running" "$database" false || recovery_failed=true
+          fi
+          if ! "$recovery_failed"; then
+            joomlaBackupError "Restore failed; original deployment/storage were restored. Recovery files: $work. Candidate website: ${website_storage:-$fresh_web}."
+          else
+            joomlaBackupError "Restore failed and automatic recovery did not complete. Inspect $work before restarting."
+          fi
         else
           joomlaBackupError "Restore failed and automatic recovery did not complete. Original configuration is retained at $work; inspect the site before restarting."
         fi
       elif "$paused"; then joomlaBackupResume "$site" "$running" "$database" "$db_started" || result=1; fi
       [ -z "$package" ] || runPrivileged rm -rf -- "$package"
-      if [ "$result" -eq 0 ]; then runPrivileged rm -rf -- "$work" || result=1; fi
       [ "$locked" != true ] || rmdir "$lock" || result=1
       exit "$result"
     ' EXIT
@@ -8663,9 +8932,20 @@ function joomlaBackupRestoreCurrentAction() {
       joomlaBackupError 'The archived project identity differs; restore it as a new site.'; exit 17
     fi
     needed=$(runPrivileged du -sk "$package/project" | awk '{print $1}') || exit 1
-    free=$(df -Pk "$original_dir" | awk 'END {print $4}') || exit 1
+    if [ "$website_type" = bind ]; then
+      original_device=$(df -Pk "$original_web" | awk 'END {print $1}') || exit 1
+      stage_device=$(df -Pk "$current_project_base" | awk 'END {print $1}') || exit 1
+      [ "$original_device" = "$stage_device" ] || { joomlaBackupError 'Restore staging and the website bind must be on the same filesystem; the existing storage was not changed.'; exit 17; }
+    fi
+    free=$(df -Pk "$current_project_base" | awk 'END {print $4}') || exit 1
     if [[ ! "$needed" =~ ^[0-9]+$ || ! "$free" =~ ^[0-9]+$ ]] || [ "$free" -le "$needed" ]; then joomlaBackupError 'Insufficient space for restored files.'; exit 1; fi
     config=$(joomlaSiteCompose "$site" config --format json 2>/dev/null) || exit 1
+    original_model="$config"
+    if [ "$website_type" = volume ]; then
+      volume_settings=$(printf '%s' "$config" | joomlaSiteJSON -ce --arg key "$website_volume" '.volumes[$key] | select(.!=null and (.external//false)==false and (.driver//"local")=="local" and ((.driver_opts//{})|length)==0)') || {
+        joomlaBackupError 'Restore requires an ordinary local website volume; external or custom-driver storage was not changed.'; exit 17;
+      }
+    fi
     database=$(printf '%s' "$config" | joomlaSiteJSON -r '[.services|to_entries[]|select((.value.image//"")|test("(^|/)(mysql|mariadb|postgres)(:|@|$)"))|.key]|if length==1 then .[0] else empty end') || exit 1
     [ -n "$database" ] || exit 1
     running=$(joomlaSiteCompose "$site" ps --status running --services) || exit $?
@@ -8689,6 +8969,12 @@ function joomlaBackupRestoreCurrentAction() {
       writeEnvVariable "$work/candidate.env" "VDM_PROJECT_PATH=$current_project_base" true || exit 1
       config=$(migrationRunCompose "$work/candidate.env" "$work/candidate.yml" --project-directory "$package/compose" config --format json) || exit 1
       joomlaBackupValidateDestination "$config" "$current_project_base/$current_project" "$package/compose" false "$original_dir" || exit 1
+      # A full restore may restore service settings, but does not change the
+      # user's selected application/database storage type or location.
+      while IFS=$'\t' read -r service target; do
+        [ -n "$service" ] || continue
+        joomlaBackupRestoreMount "$work/original.yml" "$work/candidate.yml" "$service" "$target" "$work/mount.line" || exit 1
+      done < <(printf '%s' "$original_model" | joomlaSiteJSON -r '.services|to_entries[]|.key as $s|.value.volumes[]?|select(.target=="/var/www/html" or .target=="/var/lib/mysql" or .target=="/var/lib/postgresql" or .target=="/var/lib/postgresql/data")|[$s,.target]|@tsv')
     fi
     siteValidateCompose "$work/candidate.yml" "$work/candidate.env" "$original_dir" || exit 1
     published=true
@@ -8709,7 +8995,9 @@ function joomlaBackupRestoreCurrentAction() {
     chmod 600 "$original_compose" "$original_dir/.env" || exit 1
     readJoomlaSiteFacts "$site" || exit 1
     image="$VDM_SITE_IMAGE" relative="${VDM_SITE_DOCROOT#"$VDM_SITE_MOUNT_TARGET"}" target="$VDM_SITE_MOUNT_TARGET"
-    fresh_web="$original_dir/restore-data-$(date -u +%Y%m%dT%H%M%S)-$$"
+    [ "$target" = "$original_target" ] || { joomlaBackupError 'The restored website mount target differs; no storage conversion was applied.'; exit 17; }
+    web_stage=$(mktemp -d "$current_project_base/.octojoom-web-stage.XXXXXX") || exit 1
+    fresh_web="$web_stage/candidate"
     mkdir "$fresh_web" || exit 1
     if [ "$scope" = database ]; then
       joomlaBackupCopyWebsite "$fresh_web" || exit 1
@@ -8739,11 +9027,33 @@ function joomlaBackupRestoreCurrentAction() {
     joomlaDatabasePatchConfiguration "$config_file" "$work/patched.php" "$host" "$driver" "$dbname" "$dbuser" "$dbpass" "$prefix" || exit 1
     runPrivileged tee "$config_file" < "$work/patched.php" >/dev/null || exit 1
     config=$(joomlaSiteCompose "$site" config --format json) || exit 1
+    cp "$original_compose" "$work/website-original.yml" || exit 1
     source="$VDM_SITE_MOUNT_SOURCE"
-    while IFS=$'\t' read -r service state; do
-      [ -n "$service" ] || continue
-      joomlaBackupReplaceMount "$original_compose" "$work/next.yml" "$service" "$target" "$fresh_web" "$state" && cp "$work/next.yml" "$original_compose" || exit 1
-    done < <(printf '%s' "$config" | joomlaSiteJSON -r --arg source "$source" --arg target "$target" '.services|to_entries[]|.key as $s|.value.volumes[]?|select(.source==$source and .target==$target)|[$s,(.read_only//false)]|@tsv')
+    if [ "$website_type" = bind ]; then
+      while IFS=$'\t' read -r service state; do
+        [ -n "$service" ] || continue
+        joomlaBackupReplaceMount "$original_compose" "$work/next.yml" "$service" "$target" "$fresh_web" "$state" && cp "$work/next.yml" "$original_compose" || exit 1
+      done < <(printf '%s' "$config" | joomlaSiteJSON -r --arg source "$source" --arg target "$target" '.services|to_entries[]|.key as $s|.value.volumes[]?|select(.source==$source and .target==$target)|[$s,(.read_only//false)]|@tsv')
+    else
+      # Keep the original Compose volume key and storage type. Only its Docker
+      # volume name changes; the previous volume is never modified or removed.
+      website_storage="octojoom_${current_key,,}_web_$(date +%s)_${RANDOM}"
+      if docker volume inspect "$website_storage" >/dev/null 2>&1; then joomlaBackupError 'The candidate website volume already exists.'; exit 1; fi
+      joomlaBackupRestoreWebsiteVolume "$fresh_web" "$website_storage" "$image" || exit 1
+      volume_settings=$(printf '%s' "$volume_settings" | joomlaSiteJSON -c --arg name "$website_storage" '.name=$name') || exit 1
+      printf '%s\n' "$volume_settings" > "$work/website-volume.json" || exit 1
+      awk -v key="$website_volume" -v settings_file="$work/website-volume.json" '
+        BEGIN {if((getline settings < settings_file)!=1) exit 1; close(settings_file)}
+        /^volumes:[[:space:]]*$/ {volumes=1; selected=0; print; next}
+        /^[^[:space:]#]/ {volumes=0; selected=0}
+        volumes && /^  [^[:space:]#][^:]*:/ {
+          selected=(index($0,"  "key":")==1)
+          if(selected) {print "  "key": "settings; count++; next}
+        }
+        !selected {print}
+        END {if(count!=1) exit 1}
+      ' "$original_compose" > "$work/next.yml" && cp "$work/next.yml" "$original_compose" || exit 1
+    fi
     if [ "$scope" != files ]; then
       dbimage=$(printf '%s' "$config" | joomlaSiteJSON -r --arg s "$database" '.services[$s].image') || exit 1
       mkdir "$work/database-stage" || exit 1
@@ -8757,7 +9067,26 @@ function joomlaBackupRestoreCurrentAction() {
     joomlaSiteCompose "$site" up -d >/dev/null || exit $?
     joomlaBackupVerifyApplication "$site" || exit 1
     joomlaSiteCompose "$site" stop >/dev/null || exit $?
+    if [ "$website_type" = bind ]; then joomlaBackupPublishWebsite "$work" "$original_web" "$fresh_web" || exit 1; fi
+    if [ "$scope" != files ]; then joomlaDatabasePublishStorage "$work/database-stage" "$original_compose" || exit 1; fi
+    if [ "$website_type" = bind ]; then
+      while IFS=$'\t' read -r service state; do
+        [ -n "$service" ] || continue
+        joomlaBackupRestoreMount "$work/website-original.yml" "$original_compose" "$service" "$target" "$work/mount.line" || exit 1
+      done < <(printf '%s' "$config" | joomlaSiteJSON -r --arg source "$source" --arg target "$target" '.services|to_entries[]|.key as $s|.value.volumes[]?|select(.source==$source and .target==$target)|[$s,(.read_only//false)]|@tsv')
+    fi
+    joomlaSiteCompose "$site" up -d >/dev/null || exit $?
+    joomlaBackupVerifyApplication "$site" || exit 1
+    joomlaSiteCompose "$site" stop >/dev/null || exit $?
     joomlaBackupResume "$site" "$running" "$database" false || exit $?
+    if [ "$website_type" = bind ]; then
+      IFS=$'\t' read -r source target recovery_path < "$work/website-storage" || exit 1
+      printf 'Previous website files retained: %s\n' "$recovery_path" >&2
+    else
+      printf 'Previous website volume retained: %s\n' "$original_volume" >&2
+      runPrivileged rm -rf -- "$web_stage" || exit 1
+    fi
+    printf 'Previous configuration and recovery details retained: %s\n' "$work" >&2
     paused=false published=false
     printf '%s\n' "$site"
   )
@@ -9146,7 +9475,9 @@ function getJoomlaComposeIdentity() {
   fi
   # optional features
   grep -qE "^[[:space:]]*container_name:[[:space:]]*mailcatcher${VDM_SRC_KEY}[[:space:]]*$" "${yml}" && VDM_SRC_MAILCATCHER=true
-  grep -qE "^[[:space:]]*-[[:space:]]*${VDM_SRC_KEY,,}_(web|db):/var/" "${yml}" && VDM_SRC_NAMED_VOLUMES=true
+  if grep -qE "^volumes:|^[[:space:]]*-[[:space:]]*${VDM_SRC_KEY,,}_(web|db):/var/|[\"']?type[\"']?[[:space:]]*:[[:space:]]*[\"']?volume" "${yml}"; then
+    VDM_SRC_NAMED_VOLUMES=true
+  fi
   grep -qE 'entrypoints=websecure|tls\.certresolver=' "${yml}" && VDM_SRC_SECURE=true
   # the project folder (persistent volume) named in the active bind mounts (comment lines are ignored)
   VDM_SRC_PROJECT_FOLDER=$(sed -nE '/^[[:space:]]*#/!s#^.*PROJECT_PATH[}]/([^/]+)/db:/var/lib/(mysql|postgresql(/data)?).*#\1#p' "${yml}" | head -n 1)
@@ -9213,6 +9544,11 @@ function rewriteJoomlaComposeIdentity() {
     "${old_sub}" =~ ^[A-Za-z]+$ && "${new_sub}" =~ ^[A-Za-z]+$ &&
     "${old_domain}" =~ ^[A-Za-z0-9.-]+$ && "${new_domain}" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
   [ -n "${src_folder}" ] || src_folder="${old_key}"
+  # Only the generated short mount syntax is rewritten here. Inline JSON and
+  # long YAML mounts must not bypass the source-storage checks below.
+  if grep -qE "^[[:space:]]+volumes:[[:space:]]*[^[:space:]#]|[\"']?target[\"']?[[:space:]]*:" "$src"; then
+    return 2
+  fi
   suffixes=$(getJoomlaEnvSuffixes)
   old_domain_re=$(getEscapedRegex "${old_domain}")
   # lines with a Traefik Host() rule: only the router name and the hosts change
@@ -10409,6 +10745,361 @@ function joomla__TRuST__open() {
   )
 }
 
+# Read actual Compose mounts; setup defaults never override an existing site.
+# shellcheck disable=SC2016
+function joomlaPersistenceInspect() {
+  local site="$1"
+  readJoomlaSiteFacts "$site" || return 1
+  VDM_PERSISTENCE_MODEL=$(joomlaSiteCompose "$site" config --format json) || return 1
+  VDM_PERSISTENCE_STORES=$(printf '%s' "$VDM_PERSISTENCE_MODEL" | joomlaSiteJSON -ce --arg web "$VDM_SITE_SERVICE" --arg target "$VDM_SITE_MOUNT_TARGET" '
+    . as $model |
+    def store($service; $targets):
+      [.services[$service].volumes[]? | select(.target as $t | $targets | index($t))] |
+      if length!=1 then error("Ambiguous data mount") else .[0] end |
+      if (.type!="bind" and .type!="volume") or ((.source//"")=="") then error("Unsupported data mount") else . end |
+      . + {service:$service,image:$model.services[$service].image,
+        storage:(if .type=="volume" then $model.volumes[.source].name else .source end)} |
+      if (.storage//"")=="" then error("Unresolved volume") else . end;
+    [.services|to_entries[]|select((.value.image//"")|test("(^|/)(mysql|mariadb|postgres)(:|@|$)"))|.key] as $databases |
+    if ($databases|length)!=1 then error("Select a site with one database service") else
+      {web:store($web;[$target]),database:store($databases[0];["/var/lib/mysql","/var/lib/postgresql","/var/lib/postgresql/data"])} end') || {
+    printf 'Persistence changes require one identifiable website and database data mount.\n' >&2; return 1;
+  }
+}
+
+# shellcheck disable=SC2016
+function joomlaPersistenceStatus() {
+  joomlaPersistenceInspect "$1" || return 1
+  if [ "${OCTOJOOM_OUTPUT:-text}" = json ]; then
+    printf '%s' "$VDM_PERSISTENCE_STORES" | joomlaSiteJSON --arg site "$1" '{site:$site} + with_entries(.value |= {persistent:(.type=="bind"),type:.type,source:.storage,target:.target})'
+  else
+    printf '%s' "$VDM_PERSISTENCE_STORES" | joomlaSiteJSON -r 'to_entries[] | "\(.key): \(if .value.type=="bind" then "persistent project folder" else "local Docker volume" end) - \(.value.storage)"'
+  fi
+}
+
+# Replace one ordinary short/long mount; retain other entries verbatim. This
+# bounded editor also accepts JSON volume lists written by database changes.
+# shellcheck disable=SC2016
+function joomlaPersistenceRewriteMount() {
+  local source="$1" destination="$2" service="$3" target="$4" replacement="$5" read_only="$6" work="$7" block value
+  [[ "$target" =~ ^/[A-Za-z0-9_./-]+$ && "$replacement" != *[\"\\]* && "$replacement" != *[![:print:]]* ]] || return 1
+  block=$(joomlaServiceProperty "$source" "$service" volumes) || return 1
+  value="      - \"$replacement:$target"
+  [ "$read_only" != true ] || value+=':ro'
+  value+='"'
+  if [[ "$block" == '    volumes: ['* ]]; then
+    printf '%s' "${block#'    volumes: '}" | joomlaSiteJSON -ce --arg target "$target" --arg source "$replacement" --argjson ro "$read_only" '
+      if ([.[]|select(type=="object" and .target==$target)]|length)!=1 then error("Ambiguous mount") else
+        map(if .target==$target then {type:(if ($source|startswith("/") or startswith("${")) then "bind" else "volume" end),source:$source,target:$target,read_only:$ro} else . end) end' > "$work/mount-json" || return 1
+    if [ "$(joomlaSiteJSON 'length' < "$work/mount-json")" -eq 1 ]; then
+      printf '    volumes:\n%s\n' "$value" > "$work/mount-property"
+    else
+      printf '    volumes: %s\n' "$(cat "$work/mount-json")" > "$work/mount-property"
+    fi
+  else
+    printf '%s\n' "$block" | awk -v target="$target" -v replacement="$value" '
+      function flush() {
+        if(buffer=="") return
+        if(match_target) {print replacement; changed++} else printf "%s",buffer
+        buffer=""; match_target=0
+      }
+      NR==1 {if($0!~/^    volumes:[[:space:]]*$/) exit 1; print; next}
+      /^      - / {flush()}
+      {
+        buffer=buffer $0 "\n"; line=$0
+        if(line ~ /^      - / && index(line,":"target)) {
+          suffix=substr(line,index(line,":"target)+length(target)+1)
+          if(suffix ~ /^(:[a-zA-Z,]+)?["\047]?[[:space:]]*$/) match_target=1
+        }
+        if(line ~ /^[[:space:]-]+target:/) {
+          sub(/^[[:space:]-]+target:[[:space:]]*/,"",line)
+          gsub(/^["\047]|["\047][[:space:]]*$/,"",line)
+          if(line==target) match_target=1
+        }
+      }
+      END {flush(); if(changed!=1) exit 1}
+    ' > "$work/mount-property" || { printf 'Persistence changes require an ordinary short/long data mount. Compose unchanged.\n' >&2; return 1; }
+  fi
+  joomlaSetServiceProperty "$source" "$destination" "$service" volumes "$work/mount-property"
+}
+
+# Removing a retired declaration never deletes the source Docker volume.
+function joomlaPersistenceVolumeDeclaration() {
+  local source="$1" destination="$2" name="$3" action="$4"
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || return 1
+  awk -v name="$name" -v action="$action" '
+    function flush() {
+      if(!section) return
+      if(action=="add") content="  "name":\n    name: "name"\n" content
+      if(content ~ /[^[:space:]]/) printf "volumes:\n%s",content
+      content=""; section=0; skip=0
+    }
+    /^volumes:/ {if($0!~/^volumes:[[:space:]]*$/ || seen++) {bad=1; exit}; section=1; next}
+    section && /^[^[:space:]#]/ {flush()}
+    section {
+      if($0~/^  [^[:space:]#]/) {key=$0; sub(/^  /,"",key); sub(/:.*/,"",key); skip=(key==name); if(skip && action=="add") {bad=1; exit}}
+      if(!skip) content=content $0 "\n"
+      next
+    }
+    {print}
+    END {if(bad) exit 1; flush(); if(!seen && action=="add") print "\nvolumes:\n  "name":\n    name: "name}
+  ' "$source" > "$destination"
+}
+
+# Compare physical host paths, including Docker Desktop/MSYS spelling and
+# missing final directories. Existing symlink aliases must still reveal overlap.
+function joomlaPersistenceCanonicalPath() {
+  local path suffix=''
+  path=$(joomlaBackupFilesystemPath "$1") || return 1
+  [[ "$path" = /* ]] || return 1
+  while [ ! -d "$path" ]; do
+    [ "$path" != / ] || return 1
+    suffix="/${path##*/}$suffix"; path="${path%/*}"; [ -n "$path" ] || path=/
+  done
+  path=$(cd "$path" && pwd -P) || return 1
+  if [ "$path" = / ] && [ -z "$suffix" ]; then printf '/\n'; else printf '%s%s\n' "${path%/}" "$suffix"; fi
+}
+
+# Check configured and live storage independently. Exact same-site consumers
+# such as Nginx are moved together; overlapping or foreign users are refused.
+# shellcheck disable=SC2016
+function joomlaPersistenceCheckShared() {
+  local site="$1" kind="$2" storage="$3" target="$4" other model type path mount ids containers own rows container owned id
+  [ "$kind" != bind ] || storage=$(joomlaPersistenceCanonicalPath "$storage") || return 1
+  for other in "$VDM_REPO_PATH/joomla/available/"*/docker-compose.yml; do
+    [ -f "$other" ] || continue
+    other="${other%/*}"; other="${other##*/}"
+    model=$(joomlaSiteCompose "$other" config --format json) || return 1
+    rows=$(printf '%s' "$model" | joomlaSiteJSON -er '. as $m|[.services[].volumes[]?|[.type,(if .type=="volume" then $m.volumes[.source].name else .source end),.target]|@tsv]|join("\n")') || return 1
+    while IFS=$'\t' read -r type path mount; do
+      [ -n "$type" ] || continue
+      [ "$type" != bind ] || path=$(joomlaPersistenceCanonicalPath "$path") || return 1
+      if [ "$other" = "$site" ] && [ "$type" = "$kind" ] && [ "$path" = "$storage" ] && [ "$mount" = "$target" ]; then continue; fi
+      if [ "$type" = "$kind" ] && { [ "$path" = "$storage" ] || { [ "$kind" = bind ] && [[ "$path/" = "$storage/"* || "$storage/" = "$path/"* ]]; }; }; then
+        printf 'Storage is shared or overlaps another mount (%s); separate it before changing persistence.\n' "$other" >&2; return 1
+      fi
+    done <<< "$rows"
+  done
+  ids=$(docker ps -aq) || return 1
+  [ -n "$ids" ] || return 0
+  own=$(joomlaSiteCompose "$site" ps -aq) || return 1
+  local -a all=()
+  while IFS= read -r path; do [ -z "$path" ] || all+=("$path"); done <<< "$ids"
+  containers=$(docker inspect "${all[@]}") || return 1
+  rows=$(printf '%s' "$containers" | joomlaSiteJSON -er '[.[]|.Id as $id|.Mounts[]?|[$id,.Type,(if .Type=="volume" then .Name else .Source end),.Destination]|@tsv]|join("\n")') || return 1
+  while IFS=$'\t' read -r container type path mount; do
+    [ "$type" = "$kind" ] || continue
+    [ "$type" != bind ] || path=$(joomlaPersistenceCanonicalPath "$path") || return 1
+    if [ "$path" = "$storage" ] || { [ "$kind" = bind ] && [[ "$path/" = "$storage/"* || "$storage/" = "$path/"* ]]; }; then
+      owned=false
+      while IFS= read -r id; do [[ -z "$id" || "$container" != "$id"* ]] || owned=true; done <<< "$own"
+      if ! "$owned" || [ "$mount" != "$target" ]; then
+        printf 'Another container shares this storage. Separate that deployment before changing persistence.\n' >&2; return 1
+      fi
+    fi
+  done <<< "$rows"
+}
+
+# The current service image supplies tar, with its installer bypassed. Root tar
+# extraction into a fresh destination preserves owners, modes and hidden files.
+function joomlaPersistenceCopy() {
+  local image="$1" source_type="$2" source="$3" target_type="$4" target="$5"
+  [ "$source_type" != bind ] || source=$(joomlaWebHostPath "$source") || return 1
+  [ "$target_type" != bind ] || target=$(joomlaWebHostPath "$target") || return 1
+  [[ "$source$target" != *,* && "$source$target" != *$'\n'* ]] || return 1
+  (set -o pipefail
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker run --rm --network none --read-only --user 0:0 --entrypoint tar --env TAR_OPTIONS= \
+      --mount "type=$source_type,source=$source,target=/octojoom-source,readonly" "$image" -cpf - -C /octojoom-source . |
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker run --rm -i --network none --read-only --user 0:0 --entrypoint tar --env TAR_OPTIONS= \
+      --mount "type=$target_type,source=$target,target=/octojoom-target" "$image" -xpf - -C /octojoom-target)
+}
+
+# Stop writers before copying either store; retain original data for recovery.
+# shellcheck disable=SC2016,SC2034
+function joomla__TRuST__persistence() {
+  (
+    set +x
+    umask 077
+    local site="${VDM_CONTAINER:-}" action="${VDM_ACTION:-}" work='' lock='' result=0 paused=false published=false success=false recovery_failed=false
+    local role choice store kind source alias target image destination replacement canonical project base service mount_readonly id original_compose storage_work previous_running mirror='' ids actual actual_type actual_source consumers
+    local candidate_env='' publish_env=false had_private_env=false original_env_path
+    local -a persistence_running=() affected=() roles=() kinds=() persistence_sources=() destinations=() canonicals=() saved=()
+    [ -n "$site" ] || { printf 'Persistence requires --container.\n' >&2; exit 17; }
+    if [ -z "$action" ]; then action=status; [ "${VDM_PERSISTENCE+x}${VDM_DB_PERSISTENCE+x}" = '' ] || action='set'; fi
+    case "$action" in status) joomlaPersistenceStatus "$site"; exit $?;; set) ;; *) printf 'Persistence action must be status or set.\n' >&2; exit 17;; esac
+    for choice in "${VDM_PERSISTENCE-}" "${VDM_DB_PERSISTENCE-}"; do case "$choice" in ''|true|false) ;; *) printf 'Persistence choices must be true or false.\n' >&2; exit 17;; esac; done
+    joomlaPersistenceInspect "$site" || exit 1
+    candidate_env="$VDM_SITE_ENV" original_env_path="$VDM_SITE_ENV"
+    project="$VDM_SITE_KEY" base="$VDM_PROJECT_PATH" original_compose="$VDM_SITE_COMPOSE"
+    if getJoomlaComposeIdentity "$original_compose"; then project="${VDM_SRC_PROJECT_FOLDER:-$project}"; fi
+    migrationReadEnvValue "$VDM_SITE_ENV" VDM_PROJECT_PATH base || base="$VDM_PROJECT_PATH"
+    base=$(joomlaBackupFilesystemPath "$base") || exit 1
+    isSafeProjectName "$project" && [[ "$base" = /* ]] && ! migrationPathHasSymlink "$base/$project" || exit 1
+    if [ -d "$VDM_REPO_PATH/joomla/enabled/$site" ] && [ ! -L "$VDM_REPO_PATH/joomla/enabled/$site" ]; then
+      [ "$(getJoomlaSiteEnabledState "$site")" = enabled ] || { printf 'The enabled copy differs from the available configuration; reconcile it before changing storage.\n' >&2; exit 1; }
+      mirror="$VDM_REPO_PATH/joomla/enabled/$site"
+    fi
+    work=$(mktemp -d "$VDM_SITE_DIR/.persistence.XXXXXX") || exit 1
+    lock="$VDM_SITE_DIR/.octojoom-change.lock"
+    mkdir "$lock" 2>/dev/null || { printf 'Another operation is changing this website.\n' >&2; rmdir "$work"; exit 1; }
+    trap 'result=$?; trap - EXIT INT TERM HUP
+      if ! "$success" && "$paused"; then
+        if "$published"; then joomlaSiteCompose "$site" stop >/dev/null 2>&1 || recovery_failed=true; fi
+        if ! "$recovery_failed"; then
+          for ((id=${#roles[@]}-1; id>=0; id--)); do
+            [ "${kinds[id]}" = bind ] || continue
+            if { [ -f "$work/published-$id" ] || [ -f "$work/publishing-$id" ]; } && [ ! -e "${destinations[id]}" ]; then
+              runPrivileged mv -- "${canonicals[id]}" "${destinations[id]}" || recovery_failed=true
+            fi
+            if [ -n "${saved[id]}" ] && [ -d "${saved[id]}" ]; then runPrivileged mv -- "${saved[id]}" "${canonicals[id]}" || recovery_failed=true; fi
+          done
+          if "$published"; then
+            cp -p "$work/original.yml" "$original_compose" || recovery_failed=true
+            [ -z "$mirror" ] || cp -p "$work/original.yml" "$mirror/docker-compose.yml" || recovery_failed=true
+            if "$publish_env"; then
+              if "$had_private_env"; then
+                cp -p "$work/original.env" "$VDM_SITE_DIR/.env" || recovery_failed=true
+                [ -z "$mirror" ] || cp -p "$work/original.env" "$mirror/.env" || recovery_failed=true
+              else
+                rm -f "$VDM_SITE_DIR/.env" || recovery_failed=true
+                [ -z "$mirror" ] || rm -f "$mirror/.env" || recovery_failed=true
+              fi
+            fi
+          fi
+          if ! "$recovery_failed" && "$published"; then joomlaSiteCompose "$site" up --no-start --no-deps --force-recreate "${affected[@]}" >/dev/null 2>&1 || recovery_failed=true; fi
+          if ! "$recovery_failed" && [ "${#persistence_running[@]}" -gt 0 ]; then joomlaSiteCompose "$site" up -d --no-deps --wait --wait-timeout 120 "${persistence_running[@]}" >/dev/null 2>&1 || recovery_failed=true; fi
+        fi
+        if "$recovery_failed"; then printf "Persistence recovery is incomplete. Inspect %s before restarting.\n" "$work" >&2
+        else printf "Persistence change failed; previous configuration and running state restored. Recovery: %s\n" "$work" >&2; fi
+      fi
+      rmdir "$lock" 2>/dev/null || true
+      [ "$result" -ne 0 ] || ! "$recovery_failed" || result=1
+      exit "$result"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    cp -p "$original_compose" "$work/original.yml" && cp -p "$original_compose" "$work/candidate.yml" || exit 1
+    if [ -f "$VDM_SITE_DIR/.env" ]; then had_private_env=true; cp -p "$VDM_SITE_DIR/.env" "$work/original.env" || exit 1; fi
+    for role in web database; do
+      choice="${VDM_PERSISTENCE-}"; [ "$role" != database ] || choice="${VDM_DB_PERSISTENCE-}"
+      [ -n "$choice" ] || continue
+      store=$(printf '%s' "$VDM_PERSISTENCE_STORES" | joomlaSiteJSON -c --arg role "$role" '.[$role]') || exit 1
+      kind=$(printf '%s' "$store" | joomlaSiteJSON -r .type); source=$(printf '%s' "$store" | joomlaSiteJSON -r .storage)
+      alias=$(printf '%s' "$store" | joomlaSiteJSON -r .source); target=$(printf '%s' "$store" | joomlaSiteJSON -r .target)
+      image=$(printf '%s' "$store" | joomlaSiteJSON -r .image)
+      canonical="$base/$project/$([ "$role" = web ] && printf joomla || printf db)"
+      if [ "$kind" = bind ]; then
+        source=$(joomlaBackupFilesystemPath "$source") || exit 1
+        ! migrationPathHasSymlink "$source" || exit 1
+      fi
+      if [ "$choice:$kind" = false:volume ] || { [ "$choice:$kind" = true:bind ] && [ "$source" = "$canonical" ]; }; then continue; fi
+      [[ "$source" != *,* ]] && docker image inspect "$image" >/dev/null || exit 1
+      if [ "$kind" = bind ]; then [ -d "$source" ] && ! migrationPathHasSymlink "$source" || exit 1
+      else docker volume inspect "$source" | joomlaSiteJSON -e 'length==1 and .[0].Driver=="local" and ((.[0].Options//{})|length==0)' >/dev/null || exit 1; fi
+      printf '%s' "$store" | joomlaSiteJSON -e '((.volume//{})|del(.nocopy)|length)==0 and ((.bind//{})|del(.create_host_path)|length)==0' >/dev/null || {
+        printf 'This data mount has custom options; retain it and edit its storage explicitly.\n' >&2; exit 17;
+      }
+      joomlaPersistenceCheckShared "$site" "$kind" "$source" "$target" || exit 1
+      # An unapplied manual Compose edit must not make us copy stale data.
+      service=$(printf '%s' "$store" | joomlaSiteJSON -r .service)
+      ids=$(joomlaSiteCompose "$site" ps -aq "$service") || exit 1
+      while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        actual=$(docker inspect --format '{{json .Mounts}}' "$id") || exit 1
+        actual=$(printf '%s' "$actual" | joomlaSiteJSON -er --arg target "$target" '[.[]|select(.Destination==$target)]|if length==1 then .[0]|[.Type,(if .Type=="volume" then .Name else .Source end)]|@tsv else error("Ambiguous running mount") end') || exit 1
+        IFS=$'\t' read -r actual_type actual_source <<< "$actual"
+        if [ "$actual_type:$kind" = bind:bind ]; then actual_source=$(joomlaPersistenceCanonicalPath "$actual_source") || exit 1; actual=$(joomlaPersistenceCanonicalPath "$source") || exit 1
+        else actual="$source"; fi
+        if [ "$actual_type" != "$kind" ] || [ "$actual_source" != "$actual" ]; then
+          printf 'The existing container uses different storage from Compose. Reconcile it before changing persistence; no data was copied.\n' >&2; exit 1
+        fi
+      done <<< "$ids"
+      if [ "$choice" = true ]; then
+        if ! migrationReadEnvValue "$original_env_path" VDM_PROJECT_PATH actual; then
+          candidate_env="$work/candidate.env"; publish_env=true
+          if "$had_private_env"; then cp -p "$original_env_path" "$candidate_env" || exit 1
+          else siteWriteScopedEnv "$original_compose" "$original_env_path" "$VDM_SITE_ENV_KEY" "$candidate_env" || exit 1; fi
+          writeEnvVariable "$candidate_env" "VDM_PROJECT_PATH=$base" true || exit 1
+        fi
+        joomlaPersistenceCheckShared "$site" bind "$canonical" "$target" || exit 1
+        ! migrationPathHasSymlink "$canonical" && { [ ! -e "$canonical" ] || [ -d "$canonical" ]; } || exit 1
+        runPrivileged mkdir -p "$base/$project" || exit 1
+        storage_work=$(mktemp -d "$base/.octojoom-persistence.XXXXXX") || exit 1
+        actual="$base/$project"; [ ! -d "$canonical" ] || actual="$canonical"
+        if ! (set -o pipefail; df -P "$actual" "$storage_work" | awk 'NR>1 {if(!device) device=$1; else if(device!=$1) exit 1} END {if(NR<3) exit 1}'); then
+          rmdir "$storage_work"; printf 'Persistence recovery and project storage must use the same filesystem.\n' >&2; exit 1
+        fi
+        destination="$storage_work/candidate"
+        mkdir "$destination" || exit 1
+        replacement='${VDM_PROJECT_PATH}/'"$project/$([ "$role" = web ] && printf joomla || printf db)"
+      else
+        destination="octojoom_${project,,}_${role}_${work##*.}_$BASHPID"
+        docker volume inspect "$destination" >/dev/null 2>&1 && { printf 'Destination volume already exists.\n' >&2; exit 1; }
+        docker volume create "$destination" >/dev/null || exit 1
+        replacement="$destination"
+        joomlaPersistenceVolumeDeclaration "$work/candidate.yml" "$work/next.yml" "$destination" add && mv "$work/next.yml" "$work/candidate.yml" || exit 1
+      fi
+      roles+=("$role"); persistence_sources+=("$source"); destinations+=("$destination"); canonicals+=("$canonical"); saved+=('')
+      if [ "$choice" = true ]; then kinds+=(bind); else kinds+=(volume); fi
+      consumers=$(printf '%s' "$VDM_PERSISTENCE_MODEL" | joomlaSiteJSON -er --arg type "$kind" --arg source "$alias" --arg target "$target" '[.services|to_entries[]|.key as $service|.value.volumes[]?|select(.type==$type and .source==$source and .target==$target)|[$service,(.read_only//false)]|@tsv]|if length==0 then error("No data consumers") else join("\n") end') || exit 1
+      while IFS=$'\t' read -r service mount_readonly; do
+        [ -n "$service" ] || continue
+        joomlaPersistenceRewriteMount "$work/candidate.yml" "$work/next.yml" "$service" "$target" "$replacement" "$mount_readonly" "$work" && mv "$work/next.yml" "$work/candidate.yml" || exit 1
+        [[ " ${affected[*]} " = *" $service "* ]] || affected+=("$service")
+      done <<< "$consumers"
+      if [ "$kind" = volume ]; then
+        joomlaPersistenceVolumeDeclaration "$work/candidate.yml" "$work/next.yml" "$alias" remove && mv "$work/next.yml" "$work/candidate.yml" || exit 1
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\n' "$role" "$kind" "$source" "${kinds[${#kinds[@]}-1]}" "$destination" >> "$work/storage.tsv"
+    done
+    [ "${#roles[@]}" -gt 0 ] || { success=true; joomlaPersistenceStatus "$site"; exit $?; }
+    # Earlier database changes can leave unused ordinary volume declarations.
+    # Retire only those aliases; custom/external volumes and Docker data remain.
+    actual=$(printf '%s' "$VDM_PERSISTENCE_MODEL" | joomlaSiteJSON -r '
+      . as $m | [.services[].volumes[]?|select(.type=="volume")|.source] as $used |
+      (.volumes//{})|to_entries[]|select(.key as $key|$used|index($key)|not)|
+      select((.value|del(.name))=={})|.key') || exit 1
+    while IFS= read -r alias; do
+      [ -n "$alias" ] || continue
+      joomlaPersistenceVolumeDeclaration "$work/candidate.yml" "$work/next.yml" "$alias" remove && mv "$work/next.yml" "$work/candidate.yml" || exit 1
+    done <<< "$actual"
+    siteValidateCompose "$work/candidate.yml" "$candidate_env" "$VDM_SITE_DIR" || exit 1
+    previous_running=$(joomlaSiteCompose "$site" ps --status running --services) || exit 1
+    while IFS= read -r service; do [ -z "$service" ] || persistence_running+=("$service"); done <<< "$previous_running"
+    paused=true
+    [ "${#persistence_running[@]}" -eq 0 ] || joomlaSiteCompose "$site" stop "${persistence_running[@]}" >/dev/null || exit 1
+    for id in "${!roles[@]}"; do
+      store=$(printf '%s' "$VDM_PERSISTENCE_STORES" | joomlaSiteJSON -c --arg role "${roles[id]}" '.[$role]') || exit 1
+      kind=$(printf '%s' "$store" | joomlaSiteJSON -r .type); image=$(printf '%s' "$store" | joomlaSiteJSON -r .image)
+      joomlaPersistenceCopy "$image" "$kind" "${persistence_sources[id]}" "${kinds[id]}" "${destinations[id]}" || exit 1
+      if [ "${kinds[id]}" = bind ]; then
+        if [ -e "${canonicals[id]}" ]; then
+          saved[id]="${destinations[id]%/*}/original"
+          [ ! -e "${saved[id]}" ] || exit 1
+          printf '%s\t%s\n' "${canonicals[id]}" "${saved[id]}" >> "$work/previous-folders.tsv"
+          runPrivileged mv -- "${canonicals[id]}" "${saved[id]}" || exit 1
+        fi
+        touch "$work/publishing-$id" || exit 1
+        runPrivileged mv -- "${destinations[id]}" "${canonicals[id]}" || exit 1
+        mv "$work/publishing-$id" "$work/published-$id" || exit 1
+      fi
+    done
+    published=true
+    if "$publish_env"; then
+      cp -p "$candidate_env" "$work/publish.env" && chmod 600 "$work/publish.env" && mv "$work/publish.env" "$VDM_SITE_DIR/.env" || exit 1
+      [ -z "$mirror" ] || cp -p "$VDM_SITE_DIR/.env" "$mirror/.env" || exit 1
+    fi
+    cp -p "$work/candidate.yml" "$work/publish.yml" && mv "$work/publish.yml" "$original_compose" || exit 1
+    [ -z "$mirror" ] || cp -p "$original_compose" "$mirror/docker-compose.yml" || exit 1
+    joomlaSiteCompose "$site" up --no-start --no-deps --force-recreate "${affected[@]}" >/dev/null || exit 1
+    [ "${#persistence_running[@]}" -eq 0 ] || joomlaSiteCompose "$site" up -d --no-deps --wait --wait-timeout 120 "${persistence_running[@]}" >/dev/null || exit 1
+    service=$(printf '%s' "$VDM_PERSISTENCE_STORES" | joomlaSiteJSON -r .web.service)
+    if [[ " ${persistence_running[*]} " = *" $service "* ]]; then joomlaDatabaseVerifyConnection "$site" || exit 1; fi
+    success=true
+    printf 'Persistence changed. Source data and previous configuration retained: %s\n' "$work" >&2
+    joomlaPersistenceStatus "$site"
+  )
+}
+
 # Native argv is passed literally, providing the automation equivalent of shell.
 function joomla__TRuST__exec() {
   (
@@ -10475,6 +11166,30 @@ function openJoomlaSiteTarget() {
   esac
 }
 
+function showJoomlaPersistence() {
+  (
+    local VDM_CONTAINER="$1" VDM_ACTION=set OCTOJOOM_OUTPUT=text
+    local VDM_PERSISTENCE VDM_DB_PERSISTENCE selection destination details
+    unset VDM_PERSISTENCE VDM_DB_PERSISTENCE
+    details=$(joomlaPersistenceStatus "$VDM_CONTAINER") || exit $?
+    selection=$(whiptail --menu "$details\n\nChoose the data to move." 20 112 3 \
+      --title "Data persistence | ${VDM_CONTAINER}" --backtitle "$BACK_TITLE" \
+      website 'Website files' database 'Database data' both 'Website files and database data' \
+      3>&2 2>&1 1>&3) || exit 0
+    destination=$(whiptail --menu 'Choose where to store the selected data. The site will stop while the data is copied. The previous data will be retained for recovery.' 18 112 2 \
+      --title "Data persistence | ${VDM_CONTAINER}" --backtitle "$BACK_TITLE" \
+      true 'Persist in the project folders (default)' false 'Use Docker volumes for local testing' \
+      3>&2 2>&1 1>&3) || exit 0
+    case "$selection" in
+      website) VDM_PERSISTENCE="$destination" ;;
+      database) VDM_DB_PERSISTENCE="$destination" ;;
+      both) VDM_PERSISTENCE="$destination"; VDM_DB_PERSISTENCE="$destination" ;;
+      *) exit 17 ;;
+    esac
+    joomla__TRuST__persistence
+  )
+}
+
 # All menu actions run with the selected identity in a subshell. Existing
 # lifecycle handlers may unset VDM_CONTAINER; they cannot lose the menu's site.
 function runJoomlaSiteAction() {
@@ -10492,6 +11207,7 @@ function runJoomlaSiteAction() {
       align) VDM_ACTION=apply; local VDM_ALL=false; joomla__TRuST__align ;;
       database) showJoomlaDatabaseTools "$site" ;;
       database-change) showJoomlaDatabaseChange "$site" ;;
+      persistence) showJoomlaPersistence "$site" ;;
       backups) showJoomlaBackups "$site" ;;
       ssl) showJoomlaTLS "$site" ;;
       edit) joomla__TRuST__edit ;;
@@ -10594,6 +11310,7 @@ function showJoomlaWebsiteInformation() {
       isFunc joomla__TRuST__php && actions+=(php-switch 'Change PHP version' php-settings 'Change PHP settings')
       isFunc joomla__TRuST__webserver && actions+=(webserver 'Change webserver')
       isFunc joomla__TRuST__docroot && actions+=(docroot 'Change document root')
+      isFunc joomla__TRuST__persistence && actions+=(persistence 'Change data persistence')
       isFunc joomla__TRuST__align && actions+=(align 'Update this website configuration')
       isFunc showJoomlaDatabaseTools && actions+=(database 'Database tools')
       isFunc showJoomlaDatabaseChange && actions+=(database-change 'Change database')
@@ -14780,6 +15497,10 @@ Backups: --task backup --action create|list|verify|restore|delete|cleanup
 Configuration: --task config --action path|read|replace
        [--config-kind compose|env] [--file FILE]. Existing editors remain
        interactive. Configuration reads explicitly include secret values.
+Persistence: --task persistence --container HOSTNAME --action status|set
+       --persistence true|false changes website storage; --db-persistence
+       true|false changes database storage. True uses the project folders.
+       Omitted choices remain unchanged. Previous data is kept for recovery.
 Shell discovery is installed during normal initialization/setup and update.
 It is available in new Bash shells; an executable cannot change its parent.
 
@@ -15001,7 +15722,7 @@ function migrationPathHasSymlink() {
 function extractJoomlaMigration() {
   (
   set +x
-  local archive="$1" destination="$2" contents mode refs name value
+  local archive="$1" destination="$2" contents mode refs name value env_key relative_root
   [ -d "$destination" ] && ! migrationPathHasSymlink "$destination" || return 1
   # MSYS/Git Bash reports synthetic Unix modes; Windows privacy is governed by
   # the account's NTFS access controls rather than those reported mode bits.
@@ -15025,10 +15746,13 @@ function extractJoomlaMigration() {
   chmod 600 "$destination/manifest.env" "$destination/compose/docker-compose.yml" "$destination/compose/.env" || return 1
   if ! migrationValidateManifest "$destination/manifest.env" ||
     [ ! -f "$destination/compose/docker-compose.yml" ] || [ ! -f "$destination/compose/.env" ] ||
-    ! runPrivileged test -d "$destination/project/db" || ! runPrivileged test -f "$destination/project/joomla/configuration.php"; then
+    ! runPrivileged test -d "$destination/project/db"; then
     showError 'The migration archive is missing required Joomla metadata or project files.'
     return 1
   fi
+  migrationReadEnvValue "$destination/manifest.env" VDM_MIGRATION_ENV_KEY env_key || return 1
+  relative_root=$(joomlaProjectRelativeRoot "$destination/compose/.env" "$env_key") || return 1
+  runPrivileged test -f "$destination/project/$relative_root/configuration.php" || return 1
   refs=$(migrationComposeReferences "$destination/compose/docker-compose.yml") || return 1
   while IFS= read -r name; do
     [ -z "$name" ] || migrationReadEnvValue "$destination/compose/.env" "$name" value || return 1
@@ -15041,16 +15765,21 @@ function extractJoomlaMigration() {
 # to copy; all project binds must remain under the one selected project folder.
 # shellcheck disable=SC2016
 function migrationComposeLocalFiles() {
-  local yml="$1" project="$2" line trimmed volume source target block=false db=false web=false
+  local yml="$1" project="$2" line trimmed volume source target service='' block=false db=false web=false
   while IFS= read -r line || [ -n "$line" ]; do
     [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
     if [[ "$line" =~ ^[[:space:]]*(env_file|include|extends|build|configs|secrets): ]] || [[ "$line" =~ ^volumes: ]]; then
       return 1
     fi
+    if [[ "$line" =~ ^[[:space:]]{2}([A-Za-z][A-Za-z0-9_-]*):[[:space:]]*$ ]]; then
+      service="${BASH_REMATCH[1]}"
+    fi
     if [[ "$line" =~ ^[[:space:]]{4}volumes:[[:space:]]*$ ]]; then
       block=true
       continue
     fi
+    # Inline/long mounts are not produced by the persistent project generator.
+    [[ ! "$line" =~ ^[[:space:]]*volumes: ]] || return 1
     if "$block" && [[ ! "$line" =~ ^[[:space:]]{6} ]]; then block=false; fi
     "$block" || continue
     trimmed="${line#"${line%%[![:space:]]*}"}"
@@ -15067,11 +15796,16 @@ function migrationComposeLocalFiles() {
       [ "$source" != "$project/db" ] || [[ "$target" =~ ^/var/lib/(mysql|postgresql(/data)?)(:[a-zA-Z,]+)?$ ]] || return 1
       [ "$source" != "$project/joomla" ] || [[ "$target" == /var/www/html || "$target" == /var/www/html:* ]] || return 1
       if [[ "$target" =~ ^/var/lib/(mysql|postgresql(/data)?)(:[a-zA-Z,]+)?$ ]]; then
-        [ "$source" = "$project/db" ] && ! "$db" || return 1
+        [[ "$service" =~ ^mariadb[A-Za-z]+$ && ",${target#*:}," != *,ro,* ]] && [ "$source" = "$project/db" ] && ! "$db" || return 1
         db=true
       elif [[ "$target" == /var/www/html || "$target" == /var/www/html:* ]]; then
-        [ "$source" = "$project/joomla" ] && ! "$web" || return 1
-        web=true
+        [ "$source" = "$project/joomla" ] || return 1
+        if [[ "$service" =~ ^nginx[A-Za-z]+$ ]]; then
+          [ "$target" = /var/www/html:ro ] || return 1
+        else
+          [[ "$service" =~ ^joomla[A-Za-z]+$ && ",${target#*:}," != *,ro,* ]] && ! "$web" || return 1
+          web=true
+        fi
       fi
     elif [[ "$source" == ./* ]]; then
       source="${source#./}"
@@ -15106,7 +15840,7 @@ function exportJoomlaMigration() {
     local container="$1" archive="$2" source_dir source_yml source_env references name value project_root project key env_key secure
     requireOriginalJoomlaDataLayout "$container" Migration || exit 1
     local package='' temporary_archive='' clone_lock="${VDM_REPO_PATH}/joomla/.clone.lock" locked=false restart=false result=1
-    local locals path actual_image digests db_image='' architecture all_names state id actual_mounts declared_names config_copy='' database_target
+    local locals path actual_image digests db_image='' architecture all_names state id actual_mounts mount_source declared_names config_copy='' database_target relative_root nginx_id
     local running_ids=() source_ids=()
     local VDM_SRC_KEY VDM_SRC_ENV_KEY VDM_SRC_PROJECT_FOLDER VDM_SRC_SECURE VDM_SRC_NAMED_VOLUMES VDM_SRC_MAILCATCHER
     trap 'exit 130' INT
@@ -15133,20 +15867,22 @@ function exportJoomlaMigration() {
     source_yml="$source_dir/docker-compose.yml"
     ! migrationPathHasSymlink "$source_yml" && [ -f "$source_yml" ] || exit 1
     getJoomlaComposeIdentity "$source_yml" || { showError 'Migration requires a generated Joomla Compose layout.'; exit 1; }
-    "$VDM_SRC_NAMED_VOLUMES" && { showError 'Migration v1 supports project bind mounts; named Docker volumes require a separate migration.'; exit 1; }
+    "$VDM_SRC_NAMED_VOLUMES" && { showError 'Only persistent project folders can be migrated. Named-volume test deployments cannot be migrated.'; exit 1; }
     key="$VDM_SRC_KEY" env_key="$VDM_SRC_ENV_KEY" project="$VDM_SRC_PROJECT_FOLDER" secure="$VDM_SRC_SECURE"
     isSafeProjectName "$project" || exit 1
     source_env=$(getContainerEnvFile joomla "$container" available)
     migrationReadEnvValue "$source_env" VDM_PROJECT_PATH project_root || { showError 'The source environment has no valid project path.'; exit 1; }
+    project_root=$(joomlaBackupFilesystemPath "$project_root") || exit 1
     isSafeMigrationPath "$project_root" && ! migrationPathHasSymlink "$project_root/$project" || exit 1
     references=$(migrationComposeReferences "$source_yml") || { showError 'The Compose file contains unsupported environment interpolation.'; exit 1; }
     locals=$(migrationComposeLocalFiles "$source_yml" "$project") || { showError 'The Compose file uses unsupported volumes, external paths, or configuration dependencies.'; exit 1; }
     while IFS= read -r name; do
       [ -z "$name" ] || migrationReadEnvValue "$source_env" "$name" value || { showError 'A required Compose environment value is missing or invalid.'; exit 1; }
     done <<< "$references"
-    runPrivileged test -d "$project_root/$project/db" && runPrivileged test -f "$project_root/$project/joomla/configuration.php" || exit 1
+    relative_root=$(joomlaProjectRelativeRoot "$source_env" "$env_key") || exit 1
+    runPrivileged test -d "$project_root/$project/db" && runPrivileged test -f "$project_root/$project/$relative_root/configuration.php" || exit 1
     config_copy=$(mktemp "${TMPDIR:-/tmp}/octojoom-migration-config.XXXXXX") || exit 1
-    runPrivileged cat "$project_root/$project/joomla/configuration.php" > "$config_copy" || exit 1
+    runPrivileged cat "$project_root/$project/$relative_root/configuration.php" > "$config_copy" || exit 1
     value=$(getJoomlaConfigValue "$config_copy" host)
     rm -f -- "$config_copy" || exit 1
     config_copy=''
@@ -15172,6 +15908,11 @@ function exportJoomlaMigration() {
     actual_mounts=$(docker inspect --type container --format '{{range .Mounts}}{{printf "%s\t%s\t%s\n" .Type .Source .Destination}}{{end}}' "mariadb$key" 2>/dev/null) || exit 1
     database_target=$(joomlaServiceProperty "$source_yml" "mariadb$key" volumes | sed -nE 's#^.*:(/var/lib/(mysql|postgresql(/data)?))(:[a-zA-Z,]+)?"?[[:space:]]*$#\1#p') || exit 1
     [[ "$database_target" =~ ^/var/lib/(mysql|postgresql(/data)?)$ ]] || exit 1
+    if [[ "$actual_mounts" == bind$'\t'* && "$actual_mounts" != *$'\n'* ]]; then
+      mount_source="${actual_mounts#*$'\t'}"
+      mount_source=$(joomlaBackupFilesystemPath "${mount_source%$'\t'*}") || exit 1
+      actual_mounts=$'bind\t'"$mount_source"$'\t'"${actual_mounts##*$'\t'}"
+    fi
     [ "$actual_mounts" = $'bind\t'"$project_root/$project/db"$'\t'"$database_target" ] || { showError 'The database container mounts differ from its Compose project. Reconcile the source configuration before migration.'; exit 1; }
     if ! mkdir "$clone_lock" 2>/dev/null; then showError 'A clone or migration is already using the source project lock.'; exit 1; fi
     locked=true
@@ -15206,7 +15947,12 @@ function exportJoomlaMigration() {
       fi
       if [ "$name" = "joomla$key" ]; then
         actual_mounts=$(docker inspect --type container --format '{{range .Mounts}}{{printf "%s\t%s\t%s\n" .Type .Source .Destination}}{{end}}' "$name" 2>/dev/null) || exit 1
-        printf '%s\n' "$actual_mounts" | grep -qxF $'bind\t'"$project_root/$project/joomla"$'\t/var/www/html' || {
+        actual_mounts=$(printf '%s\n' "$actual_mounts" | awk -F '\t' '$3 == "/var/www/html" {print $1 "\t" $2}')
+        mount_source=''
+        if [[ "$actual_mounts" == bind$'\t'* && "$actual_mounts" != *$'\n'* ]]; then
+          mount_source=$(joomlaBackupFilesystemPath "${actual_mounts#*$'\t'}") || exit 1
+        fi
+        [ "$mount_source" = "$project_root/$project/joomla" ] || {
           showError 'The Joomla container mounts differ from its Compose project. Reconcile the source configuration before migration.'
           exit 1
         }
@@ -15217,6 +15963,18 @@ function exportJoomlaMigration() {
       source_ids+=("$id")
       if [ "${BASH_REMATCH[2]}" = true ]; then running_ids+=("$id"); fi
     done <<< "$declared_names"
+    # The generated Nginx service has a Compose-assigned container name. Include
+    # its actual container in the same stopped-source archive operation.
+    if joomlaServiceBlock "$source_yml" "nginx$key" >/dev/null 2>&1; then
+      nginx_id=$(migrationRunCompose "$source_env" "$source_yml" ps --all --quiet "nginx$key") || exit 1
+      if [ -n "$nginx_id" ]; then
+        [[ "$nginx_id" =~ ^[a-f0-9]{64}$ ]] || exit 1
+        state=$(docker inspect --format '{{.State.Running}}' "$nginx_id" 2>/dev/null) || exit 1
+        [[ "$state" == true || "$state" == false ]] || exit 1
+        source_ids+=("$nginx_id")
+        [ "$state" != true ] || running_ids+=("$nginx_id")
+      fi
+    fi
     [ "${#source_ids[@]}" -ge 1 ] || exit 1
     if [ "${#running_ids[@]}" -gt 0 ]; then
       restart=true
@@ -15400,7 +16158,7 @@ function realignJoomlaMigration() {
   set +x
   local package="$1" key="$2" env_key="$3" host="$4" secure="$5" resolver="${6:-}" puid="${7:-}" pgid="${8:-}"
   local old_key old_env old_container old_folder db_image source_arch manifest="$1/manifest.env" env="$1/compose/.env" compose="$1/compose/docker-compose.yml"
-  local temporary variable value suffix network="${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}"
+  local temporary variable value suffix relative_root network="${VDM_TRAEFIK_GATEWAY:-traefik_webgateway}"
   [[ "$key" =~ ^[A-Za-z]+$ && "$env_key" =~ ^[A-Z]+$ && "${host%%.*}" =~ ^[A-Za-z]+$ ]] && isValidDomain "$host" || return 1
   [[ "$secure" == true || "$secure" == false ]] || return 1
   [[ "$secure" == false || "$resolver" == vdmresolver || "$resolver" == cfresolver ]] || return 1
@@ -15419,6 +16177,7 @@ function realignJoomlaMigration() {
     return 1
   fi
   migrationRewriteComposeSettings "$compose" "$key" "$secure" "$resolver" "$db_image" "$network" || return 1
+  joomlaRealignCompanionFiles "$package/compose" "$old_key" "$key" || return 1
   temporary=$(mktemp "${env}.identity.XXXXXX") || return 1
   if ! cloneContainerEnvFile "$env" "$temporary" "$old_env" "$env_key" || ! mv -f "$temporary" "$env"; then
     rm -f "$temporary"
@@ -15444,7 +16203,8 @@ function realignJoomlaMigration() {
       [ ! -f "${package}/project/${variable}" ] || runPrivileged chown "${puid}:${pgid}" "${package}/project/${variable}" || return 1
     done
   fi
-  migrationPatchJoomlaSettings "${package}/project/joomla/configuration.php" "$old_key" "$key" "$host" "$secure" || return 1
+  relative_root=$(joomlaProjectRelativeRoot "$env" "$env_key") || return 1
+  migrationPatchJoomlaSettings "${package}/project/${relative_root}/configuration.php" "$old_key" "$key" "$host" "$secure" || return 1
   migrationValidateScopedEnv "$compose" "$env" || return 1
   # Quiet validation prevents resolved credentials from reaching progress/logs.
   migrationRunCompose "$env" "$compose" config -q >/dev/null 2>&1 || return 1
@@ -15554,7 +16314,7 @@ function migrationWaitHealthy() {
 function migrationVerifyApplication() {
   local key="$1" host="$2" secure="$3" scheme=http port=80 started=$SECONDS response code redirect current visited hop retry
   docker exec "joomla${key}" php -r '
-    require "/var/www/html/configuration.php"; $c=new JConfig; $host=explode(":",$c->host,2);
+    require "configuration.php"; $c=new JConfig; $host=explode(":",$c->host,2);
     try {
       if (in_array($c->dbtype,["pgsql","postgresql","pdo_pgsql"],true)) {
         $db=new PDO("pgsql:host=".$host[0].";port=".(int)($host[1]??5432).";dbname=".$c->db,$c->user,$c->password);
@@ -16657,6 +17417,7 @@ function cliComplete() {
       done;;
     --action)
       case "$type/$task" in
+        joomla/persistence) printf '%s\n' status set;;
         joomla/ssl) printf '%s\n' status set renew;;
         joomla/database) printf '%s\n' change export import tables console execute;;
         joomla/backup) printf '%s\n' create list verify restore delete cleanup;;

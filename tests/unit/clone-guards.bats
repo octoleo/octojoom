@@ -10,6 +10,91 @@ setup() {
   SRC="${VDM_REPO_PATH}/joomla/available/source.vdm.dev/docker-compose.yml"
 }
 
+@test "inline named database storage is refused before clone output or source mutation" {
+  awk '
+    /PROJECT_PATH.*\/source\/db:/ {print "      - {type: volume, source: original_database, target: /var/lib/mysql}"; next}
+    {print}
+  ' "$SRC" > "$SANDBOX/named.yml"
+  cp "$SANDBOX/named.yml" "$SRC"
+  cp "$SRC" "$SANDBOX/source-before.yml"
+  run requireOriginalJoomlaDataLayout source.vdm.dev Clone
+  assert_failure
+  run rewriteJoomlaComposeIdentity "$SRC" "$SANDBOX/clone.yml" source target SOURCE TARGET source target vdm.dev vdm.dev
+  assert_status 2
+  refute_file_exists "$SANDBOX/clone.yml"
+  cmp "$SRC" "$SANDBOX/source-before.yml"
+  refute_command '^docker .* (stop|start|up)'
+}
+
+@test "project copy checks actual container mounts and refuses a shared named database" {
+  hook_command docker <<'EOF'
+if [ "$1" = inspect ]; then
+  printf 'volume\toriginal_database\t/var/lib/mysql\n'
+else
+  exit 1
+fi
+EOF
+  run joomlaVerifyProjectBindings source "$VDM_PROJECT_PATH" source
+  assert_failure
+  assert_output_contains 'does not use its expected persistent project folder'
+  refute_command '^docker .* (stop|start|up)'
+}
+
+@test "project mount verification normalizes Windows host paths and rejects an unrelated bind" {
+  OS_NUMBER=3
+  cygpath() {
+    local path="${*: -1}"
+    case "$path" in
+      C:/*) printf '/c/%s\n' "${path#C:/}";;
+      *) printf '%s\n' "$path";;
+    esac
+  }
+  docker() {
+    case "${*: -1}" in
+      mariadbsource) printf 'bind\tC:/Projects/source/db\t/var/lib/mysql\n';;
+      joomlasource) printf 'bind\tC:/Projects/source/joomla\t/var/www/html\n';;
+      *) return 1;;
+    esac
+  }
+  run joomlaVerifyProjectBindings source /c/Projects source
+  assert_success
+  run joomlaVerifyProjectBindings source /c/Other source
+  assert_failure
+}
+
+@test "persistent Nginx companion mounts can be copied without sharing configuration" {
+  local work="$SANDBOX/nginx"
+  mkdir -p "$work"
+  joomlaRewriteWebserverCompose "$SRC" "$work/docker-compose.yml" joomlasource nginxsource nginx joomla:verified-fpm nginx:stable-alpine "$work"
+  run migrationComposeLocalFiles "$work/docker-compose.yml" source
+  assert_success
+  assert_output_contains nginx.conf
+  joomlaNginxConfiguration joomlasource /var/www/html/site > "$work/nginx.conf"
+  cp "$work/nginx.conf" "$SANDBOX/source-nginx.conf"
+  run joomlaRealignCompanionFiles "$work" source target
+  assert_success
+  assert_file_contains "$work/nginx.conf" 'fastcgi_pass joomlatarget:9000;'
+  assert_file_contains "$work/nginx.conf" 'root /var/www/html/site;'
+  assert_file_contains "$SANDBOX/source-nginx.conf" 'fastcgi_pass joomlasource:9000;'
+}
+
+@test "persistent project copies require a writable main web mount" {
+  sed 's#source/joomla:/var/www/html#source/joomla:/var/www/html:ro#' "$SRC" > "$SANDBOX/readonly.yml"
+  run migrationComposeLocalFiles "$SANDBOX/readonly.yml" source
+  assert_failure
+}
+
+@test "nested project roots remain inside the persistent website directory" {
+  local env="$VDM_REPO_PATH/joomla/.env"
+  writeEnvVariable "$env" 'VDM_SOURCE_DOCROOT=site/public' true
+  run joomlaProjectRelativeRoot "$env" SOURCE
+  assert_success
+  assert_equal "$output" 'joomla/site/public'
+  writeEnvVariable "$env" 'VDM_SOURCE_DOCROOT=../other' true
+  run joomlaProjectRelativeRoot "$env" SOURCE
+  assert_failure
+}
+
 @test "compose rewrite refuses the source path and aliases without changing its contents" {
   cp "${SRC}" "${SANDBOX}/before.yml"
   run rewriteJoomlaComposeIdentity "${SRC}" "${SRC}" source target SOURCE TARGET source target vdm.dev vdm.dev
@@ -122,6 +207,7 @@ setup() {
 }
 
 @test "clone aborts before writing or prompting for environment values when collision inspection fails" {
+  joomlaVerifyProjectBindings() { return 0; }
   VDM_CONTAINER_TYPE=joomla
   printf "<?php\nclass JConfig {\n    public \$host = 'mariadbsource';\n}\n" >"${VDM_PROJECT_PATH}/source/joomla/configuration.php"
   getSelectedDirectory() {

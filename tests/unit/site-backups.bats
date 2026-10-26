@@ -51,6 +51,10 @@ PHP
     VDM_DB_NAME=alpha_db VDM_DB_USER=alpha_user VDM_DB_PASSWORD=secret VDM_DB_HOST=mariadbalpha
   }
   joomlaDatabaseVerifyConnection() { return 0; }
+  # Database publication/recovery is covered by database-change.bats. Restore
+  # fixtures isolate website publication without starting a real engine.
+  joomlaDatabasePublishStorage() { return 0; }
+  joomlaDatabaseRollbackStorage() { return 0; }
   joomlaDatabaseExport() {
     printf 'dump %s\n' "$1" >> "$BACKUP_CALLS"
     printf 'CREATE TABLE abc_test (id INT);\nINSERT INTO abc_test VALUES (7);\n' > "$2"
@@ -300,9 +304,10 @@ HOOK
   joomlaBackupVerifyApplication() { return 0; }
   run joomlaBackupRestoreCurrent first.vdm.dev "$BACKUP_DIRECTORY/literal.tar.gz"
   assert_success
-  local restored=("$VDM_REPO_PATH/joomla/available/first.vdm.dev/"restore-data-*/configuration.php)
-  assert_equal "${#restored[@]}" 1
-  assert_equal "$(getJoomlaConfigValue "${restored[0]}" password)" "$secret"
+  assert_equal "$(getJoomlaConfigValue "$VDM_PROJECT_PATH/alpha/joomla/configuration.php" password)" "$secret"
+  assert_file_contains "$compose" '${VDM_PROJECT_PATH}/alpha/joomla:/var/www/html'
+  run find "$VDM_REPO_PATH/joomla/available/first.vdm.dev" -name 'restore-data-*'
+  assert_equal "$output" ''
   refute_output_contains "$secret"
 }
 
@@ -401,7 +406,7 @@ HOOK
   assert_output_contains 'cannot realign external or custom-driver volume storage'
 }
 
-@test "independent restore removes unused managed source volume declarations" {
+@test "independent restore keeps named database storage while removing old actual volume names" {
   local package="$SANDBOX/managed-volume-package" compose
   mkdir -p "$package/compose"
   compose="$package/compose/docker-compose.yml"
@@ -416,8 +421,8 @@ HOOK
   migrationRunCompose() { cat "$BACKUP_MODEL"; }
   joomlaBackupPortableCompose "$package" alpha alpha
   rewriteJoomlaComposeIdentity "$compose" "$package/compose/renamed.yml" alpha beta ALPHA BETA first second vdm.dev vdm.dev alpha
-  assert_file_contains "$package/compose/renamed.yml" '/beta/db:/var/lib/mysql'
-  run grep -q 'octojoom_alpha_db\|^volumes:' "$package/compose/renamed.yml"
+  assert_file_contains "$package/compose/renamed.yml" 'beta_db:/var/lib/mysql'
+  run grep -q 'octojoom_alpha_db\|/beta/db:/var/lib/mysql' "$package/compose/renamed.yml"
   assert_failure
 }
 
@@ -465,8 +470,149 @@ HOOK
   joomlaBackupVerifyApplication() { return 0; }
   run joomlaBackupRestoreCurrent first.vdm.dev "$BACKUP_DIRECTORY/managed-full.tar.gz"
   assert_success
-  local restored=("$directory/"restore-data-*/configuration.php)
-  assert_equal "${#restored[@]}" 2
+  assert_file_contains "$compose" "$BACKUP_ABSOLUTE_ROOT:/var/www/html"
+  local originals=("$VDM_PROJECT_PATH/".octojoom-web-stage.*/original/configuration.php)
+  assert_equal "${#originals[@]}" 1
   [ -f "$BACKUP_ABSOLUTE_ROOT/upload.txt" ]
   [ ! -e "$directory/.octojoom-change.lock" ]
+}
+
+@test "current restore returns archived files to original bind and retains newer files for recovery" {
+  joomlaBackupCreate first.vdm.dev "$BACKUP_DIRECTORY/paths.tar.gz" website tar.gz false >/dev/null
+  printf 'newer live upload\n' > "$VDM_PROJECT_PATH/alpha/joomla/upload.txt"
+  local compose="$VDM_REPO_PATH/joomla/available/first.vdm.dev/docker-compose.yml"
+  joomlaDatabaseCopyConfiguration() { cp "$VDM_PROJECT_PATH/alpha/joomla/configuration.php" "$2"; }
+  siteValidateCompose() { return 0; }
+  joomlaDatabaseStageStorage() {
+    VDM_DATABASE_STAGE_COMPOSE="$4/docker-compose.yml" VDM_DATABASE_STAGE_ENV="$4/.env"
+    cp "$compose" "$VDM_DATABASE_STAGE_COMPOSE"
+    cp "${compose%/*}/.env" "$VDM_DATABASE_STAGE_ENV"
+  }
+  joomlaDatabaseImport() { return 0; }
+  joomlaBackupVerifyApplication() { return 0; }
+  run joomlaBackupRestoreCurrent first.vdm.dev "$BACKUP_DIRECTORY/paths.tar.gz"
+  assert_success
+  assert_equal "$(cat "$VDM_PROJECT_PATH/alpha/joomla/upload.txt")" 'uploaded bytes'
+  assert_file_contains "$compose" '${VDM_PROJECT_PATH}/alpha/joomla:/var/www/html'
+  assert_file_contains "$compose" '${VDM_PROJECT_PATH}/alpha/db:/var/lib/mysql'
+  local originals=("$VDM_PROJECT_PATH/".octojoom-web-stage.*/original/upload.txt)
+  assert_equal "${#originals[@]}" 1
+  assert_equal "$(cat "${originals[0]}")" 'newer live upload'
+  run find "${compose%/*}" -name 'restore-data-*'
+  assert_equal "$output" ''
+  [ -f "$BACKUP_DIRECTORY/paths.tar.gz" ]
+}
+
+@test "final verification failure after directory swap restores original bind data and Compose" {
+  joomlaBackupCreate first.vdm.dev "$BACKUP_DIRECTORY/final-failure.tar.gz" website tar.gz false >/dev/null
+  printf 'newer live upload\n' > "$VDM_PROJECT_PATH/alpha/joomla/upload.txt"
+  local compose="$VDM_REPO_PATH/joomla/available/first.vdm.dev/docker-compose.yml"
+  cp "$compose" "$SANDBOX/compose.before"
+  joomlaDatabaseCopyConfiguration() { cp "$VDM_PROJECT_PATH/alpha/joomla/configuration.php" "$2"; }
+  siteValidateCompose() { return 0; }
+  joomlaDatabaseStageStorage() {
+    VDM_DATABASE_STAGE_COMPOSE="$4/docker-compose.yml" VDM_DATABASE_STAGE_ENV="$4/.env"
+    cp "$compose" "$VDM_DATABASE_STAGE_COMPOSE"
+    cp "${compose%/*}/.env" "$VDM_DATABASE_STAGE_ENV"
+  }
+  joomlaDatabaseImport() { return 0; }
+  VERIFY_COUNT=0
+  joomlaBackupVerifyApplication() { VERIFY_COUNT=$((VERIFY_COUNT + 1)); [ "$VERIFY_COUNT" -eq 1 ]; }
+  run joomlaBackupRestoreCurrent first.vdm.dev "$BACKUP_DIRECTORY/final-failure.tar.gz"
+  assert_failure
+  assert_equal "$(cat "$VDM_PROJECT_PATH/alpha/joomla/upload.txt")" 'newer live upload'
+  cmp "$compose" "$SANDBOX/compose.before"
+  [ ! -e "${compose%/*}/.env" ]
+  local candidates=("$VDM_PROJECT_PATH/".octojoom-web-stage.*/candidate/upload.txt)
+  assert_equal "${#candidates[@]}" 1
+  assert_equal "$(cat "${candidates[0]}")" 'uploaded bytes'
+  assert_output_contains 'original deployment/storage were restored'
+}
+
+@test "website directory recovery handles interruption between the two renames" {
+  local original="$SANDBOX/project/joomla" candidate="$SANDBOX/.octojoom-web-stage.test/candidate" work="$SANDBOX/recovery"
+  mkdir -p "$original" "$candidate" "$work"
+  printf original > "$original/index.php"
+  printf restored > "$candidate/index.php"
+  runPrivileged() {
+    if [ "$1" = mv ] && [ "$3" = "$candidate" ]; then return 143; fi
+    "$@"
+  }
+  run joomlaBackupPublishWebsite "$work" "$original" "$candidate"
+  assert_status 143
+  [ ! -e "$original" ]
+  joomlaBackupRollbackWebsite "$work"
+  assert_equal "$(cat "$original/index.php")" original
+  assert_equal "$(cat "$candidate/index.php")" restored
+}
+
+prepare_named_website_restore() {
+  VOLUME_COMPOSE="$VDM_REPO_PATH/joomla/available/first.vdm.dev/docker-compose.yml"
+  sed 's#${VDM_PROJECT_PATH}/alpha/joomla#alpha_web#g' "$VOLUME_COMPOSE" > "$VOLUME_COMPOSE.next"
+  mv "$VOLUME_COMPOSE.next" "$VOLUME_COMPOSE"
+  printf '\nvolumes:\n  alpha_web:\n    name: actual_alpha_web\n' >> "$VOLUME_COMPOSE"
+  jq '.services.joomlaalpha.volumes[0]={type:"volume",source:"alpha_web",target:"/var/www/html"}|.volumes={alpha_web:{name:"actual_alpha_web"}}' "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
+  mv "$BACKUP_MODEL.next" "$BACKUP_MODEL"
+  docker() {
+    printf 'docker %s\n' "$*" >> "$BACKUP_CALLS"
+    case "$*" in
+      'volume inspect actual_alpha_web') return 0;;
+      'volume inspect octojoom_'*) return 1;;
+      'run '*'-czpf - -C /octojoom-site .') command tar -czpf - -C "$VDM_PROJECT_PATH/alpha/joomla" .;;
+      'run '*'-xpf - -C /octojoom-site')
+        mkdir -p "$SANDBOX/restored-volume"
+        command tar -xpf - -C "$SANDBOX/restored-volume";;
+      *) return 0;;
+    esac
+  }
+  joomlaBackupCreate first.vdm.dev "$BACKUP_DIRECTORY/named-current.tar.gz" website tar.gz false >/dev/null
+  printf 'newer original volume bytes\n' > "$VDM_PROJECT_PATH/alpha/joomla/upload.txt"
+  cp "$VOLUME_COMPOSE" "$SANDBOX/named-compose.before"
+  joomlaDatabaseCopyConfiguration() { cp "$VDM_PROJECT_PATH/alpha/joomla/configuration.php" "$2"; }
+  siteValidateCompose() { return 0; }
+  joomlaDatabaseStageStorage() {
+    VDM_DATABASE_STAGE_COMPOSE="$4/docker-compose.yml" VDM_DATABASE_STAGE_ENV="$4/.env"
+    cp "$VOLUME_COMPOSE" "$VDM_DATABASE_STAGE_COMPOSE"
+    cp "${VOLUME_COMPOSE%/*}/.env" "$VDM_DATABASE_STAGE_ENV"
+  }
+  joomlaDatabaseImport() { return 0; }
+  joomlaBackupVerifyApplication() { return 0; }
+}
+
+@test "current restore keeps named website storage and retains original volume contents" {
+  prepare_named_website_restore
+  run joomlaBackupRestoreCurrent first.vdm.dev "$BACKUP_DIRECTORY/named-current.tar.gz"
+  assert_success
+  assert_equal "$(cat "$VDM_PROJECT_PATH/alpha/joomla/upload.txt")" 'newer original volume bytes'
+  assert_equal "$(cat "$SANDBOX/restored-volume/upload.txt")" 'uploaded bytes'
+  assert_file_contains "$VOLUME_COMPOSE" 'alpha_web:/var/www/html'
+  assert_file_contains "$VOLUME_COMPOSE" '"name":"octojoom_alpha_web_'
+  assert_output_contains 'Previous website volume retained: actual_alpha_web'
+  run grep -q 'docker volume rm' "$BACKUP_CALLS"
+  assert_failure
+}
+
+@test "failed named website restore restores original volume selection without modifying its files" {
+  prepare_named_website_restore
+  joomlaBackupVerifyApplication() { return 1; }
+  run joomlaBackupRestoreCurrent first.vdm.dev "$BACKUP_DIRECTORY/named-current.tar.gz"
+  assert_failure
+  cmp "$VOLUME_COMPOSE" "$SANDBOX/named-compose.before"
+  assert_equal "$(cat "$VDM_PROJECT_PATH/alpha/joomla/upload.txt")" 'newer original volume bytes'
+  assert_equal "$(cat "$SANDBOX/restored-volume/upload.txt")" 'uploaded bytes'
+  assert_output_contains 'original deployment/storage were restored'
+  run grep -q 'docker volume rm' "$BACKUP_CALLS"
+  assert_failure
+}
+
+@test "current restore refuses custom website volume drivers before stopping services" {
+  prepare_named_website_restore
+  jq '.volumes.alpha_web.driver_opts={device:"/outside/website"}' "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
+  mv "$BACKUP_MODEL.next" "$BACKUP_MODEL"
+  : > "$BACKUP_CALLS"
+  run joomlaBackupRestoreCurrent first.vdm.dev "$BACKUP_DIRECTORY/named-current.tar.gz"
+  assert_status 17
+  assert_output_contains 'external or custom-driver storage was not changed'
+  run grep -q 'first.vdm.dev stop' "$BACKUP_CALLS"
+  assert_failure
 }

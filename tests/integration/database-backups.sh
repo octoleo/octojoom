@@ -148,6 +148,8 @@ request() (
 
 create_site() {
   local key="$1" subdomain="$2" bind="$3" site="$2.$DOMAIN" compose service temporary
+  local -a persistence=()
+  if [ "$bind" != default ]; then persistence=(--persistence "$bind" --db-persistence "$bind"); fi
   request setup --key "$key" --env-key "${key^^}" --domain "$DOMAIN" --sub-domain "$subdomain" \
     --image-source "${JOOMLA_IMAGE%:*}" --image-tag "${JOOMLA_IMAGE##*:}" \
     --engine "$ENGINE" --database-image "$DATABASE_IMAGE" \
@@ -157,7 +159,7 @@ create_site() {
     --admin-username integrationadmin --admin-user 'Integration Administrator' \
     --admin-email admin@example.invalid --admin-password integration-admin-password-2026 \
     --enable false --phpmyadmin false --mailcatcher false --secure false --cloudflare false \
-    --update-hosts false --customize false --persistence "$bind" --db-persistence "$bind" >&2
+    --update-hosts false --customize false "${persistence[@]}" >&2
   compose="$VDM_REPO_PATH/joomla/available/$site/docker-compose.yml"
   service="joomla$key"
   temporary="$WORK/$key.compose"
@@ -170,7 +172,7 @@ create_site() {
   mv "$temporary" "$compose"
   joomlaSetServiceProperty "$compose" "$temporary" "mariadb$key" labels "$WORK/property"
   mv "$temporary" "$compose"
-  if [ "$bind" = true ]; then
+  if [ "$bind" != false ]; then
     mkdir -p "$VDM_PROJECT_PATH/$key/joomla"
     chmod 755 "$VDM_PROJECT_PATH/$key" "$VDM_PROJECT_PATH/$key/joomla"
   fi
@@ -188,6 +190,50 @@ assert_application() {
   joomlaSiteCompose "$site" config --format json |
     jq -e --arg service "$VDM_SITE_SERVICE" '.services[$service].labels["custom.application.label"]=="preserved"' >/dev/null
   joomlaDatabaseContext "$site"
+}
+
+# Inspect the live mounts, not saved preference flags: default setup, restore
+# and database cutover must keep both data trees in the selected project.
+assert_project_storage() {
+  local site="$1" key="$2"
+  readJoomlaSiteFacts "$site"
+  docker inspect "$VDM_SITE_SERVICE" | jq -e --arg path "$VDM_PROJECT_PATH/$key/joomla" \
+    '.[0].Mounts | any(.Destination=="/var/www/html" and .Type=="bind" and .Source==$path)' >/dev/null
+  joomlaDatabaseContext "$site"
+  docker inspect "$VDM_DB_SERVICE" | jq -e --arg path "$VDM_PROJECT_PATH/$key/db" \
+    '.[0].Mounts | any((.Destination|startswith("/var/lib/")) and .Type=="bind" and .Source==$path)' >/dev/null
+}
+
+runtime_storage() {
+  local site="$1" scope="$2" service
+  if [ "$scope" = web ]; then
+    readJoomlaSiteFacts "$site"
+    service="$VDM_SITE_SERVICE"
+  else
+    joomlaDatabaseContext "$site"
+    service="$VDM_DB_SERVICE"
+  fi
+  docker inspect "$service" | jq -ecS --arg scope "$scope" \
+    'first(.[0].Mounts[] | select(if $scope=="web" then .Destination=="/var/www/html" else (.Destination|startswith("/var/lib/")) end)) | {Type,Name,Source,Destination}'
+}
+
+assert_storage_retained() {
+  local mount="$1"
+  if [ "$(jq -r .Type <<< "$mount")" = bind ]; then
+    privileged test -d "$(jq -r .Source <<< "$mount")"
+  else
+    docker volume inspect "$(jq -r .Name <<< "$mount")" >/dev/null
+  fi
+}
+
+assert_directory_retained() {
+  local identity="$1" key="$2" retained
+  retained=$(privileged find "$VDM_PROJECT_PATH" -xdev -maxdepth 3 -type d -inum "${identity#*:}" -print -quit)
+  [ -n "$retained" ]
+  [ "$(privileged stat -c '%d:%i' "$retained")" = "$identity" ]
+  case "$retained" in
+    "$VDM_PROJECT_PATH/$key/"*) echo 'Retained storage would be copied with the active project.' >&2; return 1 ;;
+  esac
 }
 
 write_sql() {
@@ -255,9 +301,35 @@ retire_site() {
   privileged rm -rf -- "$VDM_REPO_PATH/joomla/available/$site"
 }
 
+# The source has already undergone restore-current and a database cutover.
+# A copy must run from its own canonical folders with the source stopped, and
+# writes through its installed Joomla configuration must leave the source alone.
+assert_independent_copy() {
+  local site="$1" key="$2"
+  joomlaSiteCompose "$SOURCE" stop >&2
+  joomlaSiteCompose "$site" up -d --wait --wait-timeout 300 >&2
+  assert_application "$site"
+  assert_state "$site"
+  assert_project_storage "$site" "$key"
+  [ -z "$(joomlaSiteCompose "$SOURCE" ps --status running --services)" ]
+  printf "UPDATE octojoom_marker SET label='independent project copy' WHERE id=1;\n" > "$WORK/copy-change.sql"
+  request database --container "$site" --action execute --file "$WORK/copy-change.sql" >/dev/null
+  readJoomlaSiteFacts "$site"
+  joomlaSiteCompose "$site" exec -T "$VDM_SITE_SERVICE" php -r \
+    'exit(file_put_contents($argv[1]."/images/copy-only.txt","copy only\n")===false?1:0);' "$VDM_SITE_DOCROOT"
+  [ ! -e "$VDM_PROJECT_PATH/$SOURCE_KEY/joomla/images/copy-only.txt" ]
+  assert_state "$site" 'independent project copy'
+  retire_site "$site"
+  joomlaSiteCompose "$SOURCE" up -d --wait --wait-timeout 300 >&2
+  assert_application "$SOURCE"
+  assert_state "$SOURCE"
+  assert_project_storage "$SOURCE" "$SOURCE_KEY"
+}
+
 PHASE=real-joomla-installation
-create_site "$SOURCE_KEY" source true
+create_site "$SOURCE_KEY" source default
 create_site "$VOLUME_KEY" volume false
+assert_project_storage "$SOURCE" "$SOURCE_KEY"
 write_sql
 seed_site "$SOURCE"
 seed_site "$VOLUME_SITE"
@@ -335,6 +407,11 @@ for format in tar.gz zip; do
   done
 done
 request backup --container "$VOLUME_SITE" --action create --scope full --format tar.gz --file "$ARCHIVES/named-volume.tar.gz"
+if exportJoomlaMigration "$VOLUME_SITE" "$ARCHIVES/unsupported-volume-migration.tar.gz"; then
+  echo 'Complete migration accepted a site without project-folder persistence.' >&2; exit 1
+fi
+[ ! -e "$ARCHIVES/unsupported-volume-migration.tar.gz" ]
+assert_application "$VOLUME_SITE"
 assert_state "$SOURCE"
 assert_state "$VOLUME_SITE"
 if [ "$ENGINE" = mariadb ]; then
@@ -389,8 +466,28 @@ request backup --container "$SOURCE" --action restore --target current --file "$
   --destination "$ARCHIVES" --pre-backup true --confirm true
 assert_application "$SOURCE"
 assert_state "$SOURCE"
+assert_project_storage "$SOURCE" "$SOURCE_KEY"
 archive_count_after=$(find "$ARCHIVES" -maxdepth 1 -type f | wc -l)
 [ "$archive_count_after" -gt "$archive_count_before" ]
+
+PHASE=restore-current-preserves-named-volume-storage
+original_web_storage=$(runtime_storage "$VOLUME_SITE" web)
+original_db_storage=$(runtime_storage "$VOLUME_SITE" database)
+printf "UPDATE octojoom_marker SET label='before named-volume restoration' WHERE id=1;\n" > "$WORK/volume-restore.sql"
+request database --container "$VOLUME_SITE" --action execute --file "$WORK/volume-restore.sql" >/dev/null
+readJoomlaSiteFacts "$VOLUME_SITE"
+joomlaSiteCompose "$VOLUME_SITE" exec -T "$VDM_SITE_SERVICE" php -r \
+  'exit(file_put_contents($argv[1]."/images/octojoom-upload.txt","before named-volume restoration\n")===false?1:0);' "$VDM_SITE_DOCROOT"
+request backup --container "$VOLUME_SITE" --action restore --target current --file "$ARCHIVES/named-volume.tar.gz" \
+  --pre-backup false --confirm true
+assert_application "$VOLUME_SITE"
+assert_state "$VOLUME_SITE"
+restored_web_storage=$(runtime_storage "$VOLUME_SITE" web)
+[ "$(jq -r .Type <<< "$restored_web_storage")" = volume ]
+[ "$(jq -r .Name <<< "$restored_web_storage")" != "$(jq -r .Name <<< "$original_web_storage")" ]
+[ "$(runtime_storage "$VOLUME_SITE" database | jq -r .Type)" = volume ]
+assert_storage_retained "$original_web_storage"
+assert_storage_retained "$original_db_storage"
 
 PHASE=batch-operations
 mkdir -p "$ARCHIVES/batch-sql" "$ARCHIVES/batch-backup"
@@ -434,6 +531,7 @@ joomlaDatabaseContext "$SOURCE"
 database_service="$VDM_DB_SERVICE"
 old_mount=$(docker inspect "$database_service" | jq -ec '[.[0].Mounts[] | select(.Destination|startswith("/var/lib/"))][0]')
 old_storage=$(jq -r .Source <<< "$old_mount")
+old_storage_inode=$(privileged stat -c '%d:%i' "$old_storage")
 request database --container "$SOURCE" --action change --engine "$ENGINE" --database-image "$CHANGE_IMAGE" \
   --data-mode preserve --confirm true --pre-backup true
 assert_application "$SOURCE"
@@ -443,12 +541,10 @@ after_version=$(database_version "$SOURCE")
 [ "$after_version" = "$TARGET_VERSION" ] && [ "$after_version" != "$before_version" ]
 printf 'Measured server version changed: %s -> %s\n' "$before_version" "$after_version"
 new_storage=$(docker inspect "$VDM_DB_SERVICE" | jq -er '.[0].Mounts[] | select(.Destination|startswith("/var/lib/")) | .Source' | head -n 1)
-[ "$new_storage" != "$old_storage" ]
-if [ "$(jq -r .Type <<< "$old_mount")" = volume ]; then
-  docker volume inspect "$(jq -r .Name <<< "$old_mount")" >/dev/null
-else
-  privileged test -d "$old_storage"
-fi
+assert_project_storage "$SOURCE" "$SOURCE_KEY"
+[ "$new_storage" = "$old_storage" ]
+[ "$(privileged stat -c '%d:%i' "$new_storage")" != "$old_storage_inode" ]
+assert_directory_retained "$old_storage_inode" "$SOURCE_KEY"
 
 if [ "$ENGINE" = mysql ]; then
   PHASE=successful-mysql-to-mariadb-engine-change
@@ -458,6 +554,80 @@ if [ "$ENGINE" = mysql ]; then
   assert_state "$SOURCE"
   joomlaDatabaseContext "$SOURCE"
   [ "$VDM_DB_ENGINE" = mariadb ]
+  assert_project_storage "$SOURCE" "$SOURCE_KEY"
+fi
+
+PHASE=independent-website-persistence-switches
+original_web_storage=$(runtime_storage "$SOURCE" web)
+original_db_storage=$(runtime_storage "$SOURCE" database)
+original_web_inode=$(privileged stat -c '%d:%i' "$(jq -r .Source <<< "$original_web_storage")")
+request persistence --container "$SOURCE" --action set --persistence false --confirm true
+volume_web_storage=$(runtime_storage "$SOURCE" web)
+[ "$(jq -r .Type <<< "$volume_web_storage")" = volume ]
+[ "$(runtime_storage "$SOURCE" database)" = "$original_db_storage" ]
+assert_storage_retained "$original_web_storage"
+assert_application "$SOURCE"
+assert_state "$SOURCE"
+readJoomlaSiteFacts "$SOURCE"
+joomlaSiteCompose "$SOURCE" exec -T "$VDM_SITE_SERVICE" php -r \
+  'exit(file_put_contents($argv[1]."/images/persistence-switch.txt","written in named volume\n")===false?1:0);' "$VDM_SITE_DOCROOT"
+# Earlier cutovers can leave an unused ordinary declaration in Compose.
+unused_volume="retired$RUN_ID"
+joomlaPersistenceVolumeDeclaration "$VDM_SITE_COMPOSE" "$WORK/unused-volume.compose" "$unused_volume" add
+mv "$WORK/unused-volume.compose" "$VDM_SITE_COMPOSE"
+joomlaSiteCompose "$SOURCE" config --format json | jq -e --arg name "$unused_volume" '.volumes[$name].name==$name' >/dev/null
+request persistence --container "$SOURCE" --action set --persistence true --confirm true
+joomlaSiteCompose "$SOURCE" config --format json | jq -e --arg name "$unused_volume" '.volumes[$name]==null' >/dev/null
+if grep -qF "  $unused_volume:" "$VDM_SITE_COMPOSE"; then
+  echo 'Switching back to project storage retained an unused volume declaration.' >&2; exit 1
+fi
+assert_project_storage "$SOURCE" "$SOURCE_KEY"
+[ "$(runtime_storage "$SOURCE" database)" = "$original_db_storage" ]
+assert_storage_retained "$volume_web_storage"
+assert_directory_retained "$original_web_inode" "$SOURCE_KEY"
+privileged grep -qxF 'written in named volume' "$VDM_PROJECT_PATH/$SOURCE_KEY/joomla/images/persistence-switch.txt"
+assert_application "$SOURCE"
+assert_state "$SOURCE"
+
+PHASE=independent-database-persistence-switches
+original_web_storage=$(runtime_storage "$SOURCE" web)
+original_db_storage=$(runtime_storage "$SOURCE" database)
+original_db_inode=$(privileged stat -c '%d:%i' "$(jq -r .Source <<< "$original_db_storage")")
+request persistence --container "$SOURCE" --action set --db-persistence false --confirm true
+volume_db_storage=$(runtime_storage "$SOURCE" database)
+[ "$(jq -r .Type <<< "$volume_db_storage")" = volume ]
+[ "$(runtime_storage "$SOURCE" web)" = "$original_web_storage" ]
+assert_storage_retained "$original_db_storage"
+assert_application "$SOURCE"
+assert_state "$SOURCE"
+printf "UPDATE octojoom_marker SET label='written in database volume' WHERE id=1;\n" > "$WORK/persistence-change.sql"
+request database --container "$SOURCE" --action execute --file "$WORK/persistence-change.sql" >/dev/null
+assert_state "$SOURCE" 'written in database volume'
+request persistence --container "$SOURCE" --action set --db-persistence true --confirm true
+assert_project_storage "$SOURCE" "$SOURCE_KEY"
+[ "$(runtime_storage "$SOURCE" web)" = "$original_web_storage" ]
+assert_storage_retained "$volume_db_storage"
+assert_directory_retained "$original_db_inode" "$SOURCE_KEY"
+assert_application "$SOURCE"
+assert_state "$SOURCE" 'written in database volume'
+printf "UPDATE octojoom_marker SET label='Joomla Ω 日本語' WHERE id=1;\n" > "$WORK/persistence-change.sql"
+request database --container "$SOURCE" --action execute --file "$WORK/persistence-change.sql" >/dev/null
+assert_state "$SOURCE"
+
+if [ "$ENGINE" != postgres ]; then
+  PHASE=persistent-project-clone-after-restore-and-database-change
+  copy_key="coldclone$RUN_ID"
+  copy_site="coldclone.$DOMAIN"
+  request clone --container "$SOURCE" --project "$SOURCE_KEY" --key "$copy_key" --env-key "${copy_key^^}" \
+    --domain "$DOMAIN" --sub-domain coldclone --site-name 'Octojoom database acceptance'
+  assert_independent_copy "$copy_site" "$copy_key"
+
+  PHASE=persistent-project-migration-after-restore-and-database-change
+  copy_key="coldmigration$RUN_ID"
+  copy_site="coldmigration.$DOMAIN"
+  exportJoomlaMigration "$SOURCE" "$ARCHIVES/after-database-change.tar.gz"
+  prepareJoomlaMigration "$ARCHIVES/after-database-change.tar.gz" "$copy_key" "${copy_key^^}" "$copy_site" false '' '' ''
+  assert_independent_copy "$copy_site" "$copy_key"
 fi
 
 if [ "$ENGINE" = mariadb ]; then
@@ -468,6 +638,7 @@ if [ "$ENGINE" = mariadb ]; then
   request database --container "$SOURCE" --action execute --file "$WORK/incompatible.sql" >/dev/null
   readJoomlaSiteFacts "$SOURCE"
   before_change=$(sha256sum "$VDM_SITE_COMPOSE" "$VDM_SITE_ENV")
+  before_database_directory=$(privileged stat -c '%d:%i' "$VDM_PROJECT_PATH/$SOURCE_KEY/db")
   before_config=$(joomlaSiteCompose "$SOURCE" exec -T "$VDM_SITE_SERVICE" php -r 'echo hash_file("sha256",$argv[1]."/configuration.php");' "$VDM_SITE_DOCROOT")
   if request database --container "$SOURCE" --action change --engine mysql --database-image mysql:lts \
     --data-mode preserve --confirm true --pre-backup true > "$WORK/failed-change.stdout" 2> "$WORK/failed-change.stderr"; then
@@ -482,8 +653,10 @@ if [ "$ENGINE" = mariadb ]; then
   [ "$(sha256sum "$VDM_SITE_COMPOSE" "$VDM_SITE_ENV")" = "$before_change" ]
   assert_application "$SOURCE"
   assert_state "$SOURCE"
+  assert_project_storage "$SOURCE" "$SOURCE_KEY"
+  [ "$(privileged stat -c '%d:%i' "$VDM_PROJECT_PATH/$SOURCE_KEY/db")" = "$before_database_directory" ]
   joomlaDatabaseContext "$SOURCE"
   [ "$VDM_DB_ENGINE" = mariadb ]
 fi
 
-printf 'Database integration passed: %s, real Joomla, logical SQL, selected tables, Unicode/binary data, ZIP/tar restores, named volumes, batch, and fresh-storage database change.\n' "$ENGINE"
+printf 'Database integration passed: %s, real Joomla, logical SQL, selected tables, Unicode/binary data, ZIP/tar restores, named volumes, batch, project storage preservation, and fresh-storage database change.\n' "$ENGINE"

@@ -105,6 +105,99 @@ EOF
   assert_command '^docker start '
 }
 
+@test "migration package: accepts equivalent Windows Docker host mount paths" {
+  OS_NUMBER=3
+  cygpath() {
+    local path="${*: -1}"
+    printf '%s\n' "${path#C:}"
+  }
+  docker() {
+    if [[ "$*" == *'.Mounts'* ]]; then
+      command docker "$@" | sed $'s#bind\\t/#bind\\tC:/#'
+    else
+      command docker "$@"
+    fi
+  }
+  run exportJoomlaMigration source.example.org "$SANDBOX/windows.tar.gz"
+  assert_success
+  assert_file_exists "$SANDBOX/windows.tar.gz"
+}
+
+@test "migration package: persistent Nginx and nested root retain one complete raw archive" {
+  local work="$SANDBOX/nginx"
+  mkdir -p "$work" "$VDM_PROJECT_PATH/source/joomla/site"
+  mv "$VDM_PROJECT_PATH/source/joomla/configuration.php" "$VDM_PROJECT_PATH/source/joomla/site/configuration.php"
+  writeEnvVariable "$VDM_REPO_PATH/joomla/.env" 'VDM_SOURCE_DOCROOT=site' true
+  writeEnvVariable "$VDM_REPO_PATH/joomla/.env" 'VDM_SOURCE_WEBSERVER=nginx' true
+  joomlaRewriteWebserverCompose "$PACKAGE_SOURCE/docker-compose.yml" "$work/docker-compose.yml" joomlasource nginxsource nginx joomla:verified-fpm nginx:stable-alpine "$work"
+  cp "$work/docker-compose.yml" "$PACKAGE_SOURCE/docker-compose.yml"
+  joomlaNginxConfiguration joomlasource /var/www/html/site > "$PACKAGE_SOURCE/nginx.conf"
+  docker() {
+    if [ "$1" = compose ]; then
+      printf '%064d\n' 5
+    else
+      command docker "$@"
+    fi
+  }
+  run exportJoomlaMigration source.example.org "$SANDBOX/nginx.tar.gz"
+  assert_success
+  createPrivateDirectory "$SANDBOX/unpacked-nginx"
+  run extractJoomlaMigration "$SANDBOX/nginx.tar.gz" "$SANDBOX/unpacked-nginx"
+  assert_success
+  assert_file_contains "$SANDBOX/unpacked-nginx/compose/nginx.conf" 'fastcgi_pass joomlasource:9000;'
+  assert_file_contains "$SANDBOX/unpacked-nginx/project/db/ibdata1" 'cold database bytes'
+  assert_file_contains "$SANDBOX/unpacked-nginx/project/joomla/site/configuration.php" mariadbsource
+  assert_command "^docker stop .*$(printf '%064d' 5)"
+  assert_command "^docker start .*$(printf '%064d' 5)"
+}
+
+@test "migration package: named database volumes are ineligible before source downtime" {
+  awk '
+    /PROJECT_PATH.*\/source\/db:/ {print "      - {type: volume, source: original_database, target: /var/lib/mysql}"; next}
+    {print}
+  ' "$PACKAGE_SOURCE/docker-compose.yml" > "$SANDBOX/named.yml"
+  cp "$SANDBOX/named.yml" "$PACKAGE_SOURCE/docker-compose.yml"
+  run exportJoomlaMigration source.example.org "$SANDBOX/refused.tar.gz"
+  assert_failure
+  assert_output_contains 'requires persistent Joomla and database folders'
+  refute_file_exists "$SANDBOX/refused.tar.gz"
+  refute_command '^docker stop '
+}
+
+@test "migration package: an actual named database mount cannot hide behind persistent Compose text" {
+  docker() {
+    if [[ "$*" == *'.Mounts'* && "${*: -1}" == mariadbsource ]]; then
+      printf 'volume\toriginal_database\t/var/lib/mysql\n'
+    else
+      command docker "$@"
+    fi
+  }
+  run exportJoomlaMigration source.example.org "$SANDBOX/project.tar.gz"
+  assert_failure
+  refute_file_exists "$SANDBOX/project.tar.gz"
+  refute_command '^docker stop '
+  assert_file_contains "$VDM_PROJECT_PATH/source/db/ibdata1" 'cold database bytes'
+}
+
+@test "migration package: MySQL keeps its exact image and existing raw database files" {
+  sed -i.bak -e 's/mariadb:latest/mysql:8.4/' -e 's/MARIADB_/MYSQL_/g' "$PACKAGE_SOURCE/docker-compose.yml"
+  docker() {
+    if [[ "$1" == image && "$*" == *'.RepoDigests'* ]]; then
+      printf 'mysql@sha256:%064d\n' 1
+    else
+      command docker "$@"
+    fi
+  }
+  run exportJoomlaMigration source.example.org "$SANDBOX/mysql.tar.gz"
+  assert_success
+  createPrivateDirectory "$SANDBOX/mysql"
+  run extractJoomlaMigration "$SANDBOX/mysql.tar.gz" "$SANDBOX/mysql"
+  assert_success
+  assert_file_contains "$SANDBOX/mysql/manifest.env" 'mysql@sha256:'
+  assert_file_contains "$SANDBOX/mysql/project/db/ibdata1" 'cold database bytes'
+  assert_file_contains "$SANDBOX/mysql/compose/docker-compose.yml" 'image: mysql:8.4'
+}
+
 @test "migration package: missing required env fails before stopping services" {
   sed '/VDM_SOURCE_DB_PASS=/d' "$VDM_REPO_PATH/joomla/.env" > "$SANDBOX/env.next"
   mv "$SANDBOX/env.next" "$VDM_REPO_PATH/joomla/.env"

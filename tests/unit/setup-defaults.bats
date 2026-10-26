@@ -54,6 +54,8 @@ headless_setup() {
   migrationReadEnvValue "$env_file" VDM_ALPHA_DB_ROOT saved
   [ "${#saved}" -eq 40 ]
   assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" 'image: joomla:latest'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" '${VDM_PROJECT_PATH}/alpha/joomla:/var/www/html'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" '${VDM_PROJECT_PATH}/alpha/db:/var/lib/mysql'
   refute_file_exists "${VDM_REPO_PATH}/joomla/enabled/alpha.example.test"
   assert_command '^docker compose .* config --quiet$'
   refute_command '^whiptail '
@@ -117,7 +119,7 @@ headless_setup() {
   refute_file_exists BAD
 }
 
-@test "setup: bulk automation uses one generator and keeps its named-volume defaults" {
+@test "setup: bulk automation keeps every website and database in its own project folder" {
   headless_setup
   VDM_TASK=bulk
   VDM_SUBDOMAIN=website
@@ -131,6 +133,34 @@ headless_setup() {
   refute_command '^docker compose .* up '
   assert_file_contains "${VDM_REPO_PATH}/joomla/.env" '_DB="vdm_io1"'
   assert_file_contains "${VDM_REPO_PATH}/joomla/.env" '_DB="vdm_io2"'
+  local compose
+  for compose in "${VDM_REPO_PATH}/joomla/available/"*/docker-compose.yml; do
+    getJoomlaComposeIdentity "$compose"
+    assert_file_contains "$compose" '${VDM_PROJECT_PATH}/'"${VDM_SRC_KEY}"'/joomla:/var/www/html'
+    assert_file_contains "$compose" '${VDM_PROJECT_PATH}/'"${VDM_SRC_KEY}"'/db:/var/lib/mysql'
+  done
+}
+
+@test "setup: explicit local-test storage opt-out remains available for single and bulk setup" {
+  headless_setup
+  VDM_PERSISTENCE=false
+  VDM_DB_PERSISTENCE=false
+  run joomla__TRuST__setup
+  assert_success
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" 'alpha_web:/var/www/html'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" 'alpha_db:/var/lib/mysql'
+  VDM_TASK=bulk
+  VDM_SUBDOMAIN=website
+  VDM_NUMBER_CONTAINERS=2
+  run joomla__TRuST__bulk
+  assert_success
+  local compose
+  for compose in "${VDM_REPO_PATH}/joomla/available/website"*/docker-compose.yml; do
+    getJoomlaComposeIdentity "$compose"
+    assert_file_contains "$compose" "${VDM_SRC_KEY}_web:/var/www/html"
+    assert_file_contains "$compose" "${VDM_SRC_KEY}_db:/var/lib/mysql"
+  done
+  refute_command '^whiptail '
 }
 
 @test "setup: a different project path gets a complete scoped ENV without changing siblings" {
@@ -322,6 +352,6 @@ saved_nginx_php_setup() {
   assert_file_contains "$SANDBOX/php-validation" 'custom/joomla:fpm-build /opt/fpm/conf.d/zz-octojoom.ini'
   assert_file_contains "${VDM_REPO_PATH}/joomla/available/website1.example.test/docker-compose.yml" '/bulk/php.ini:/opt/fpm/conf.d/zz-octojoom.ini'
   assert_file_contains "${VDM_REPO_PATH}/joomla/available/website2.example.test/docker-compose.yml" '/bulk/php.ini:/opt/fpm/conf.d/zz-octojoom.ini'
-  assert_file_contains "${VDM_REPO_PATH}/joomla/available/website1.example.test/docker-compose.yml" 'firstn_web:/var/www/html:ro'
-  assert_file_contains "${VDM_REPO_PATH}/joomla/available/website2.example.test/docker-compose.yml" 'second_web:/var/www/html:ro'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/website1.example.test/docker-compose.yml" '${VDM_PROJECT_PATH}/firstn/joomla:/var/www/html:ro'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/website2.example.test/docker-compose.yml" '${VDM_PROJECT_PATH}/second/joomla:/var/www/html:ro'
 }

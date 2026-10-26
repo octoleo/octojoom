@@ -66,6 +66,13 @@ details. Their options and data behavior are documented in [database tools](DATA
 menu also offers **Back up websites** for a selected group or all discovered
 websites, using the same backup operation as the individual-site action.
 
+**Change data persistence** moves website files and database storage independently
+between the site's project folders and Docker named volumes. It retains the
+original data for recovery and preserves the prior running state. Named volumes
+are a local-testing option; complete-project migration and cold cloning require
+both stores in the supported project-folder layout. See the
+[persistence choices and commands](SETUP-DEFAULTS.md#change-an-existing-sites-persistence).
+
 ## Commands
 
 The original `--type` and `--task` grammar is retained:
