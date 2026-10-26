@@ -10927,7 +10927,7 @@ function joomla__TRuST__persistence() {
     umask 077
     local site="${VDM_CONTAINER:-}" action="${VDM_ACTION:-}" work='' lock='' result=0 paused=false published=false success=false recovery_failed=false
     local role choice store kind source alias target image destination replacement canonical project base service mount_readonly id original_compose storage_work previous_running mirror='' ids actual actual_type actual_source consumers
-    local candidate_env='' publish_env=false had_private_env=false original_env_path
+    local candidate_env='' publish_env=false had_private_env=false original_env_path volume_references
     local -a persistence_running=() affected=() roles=() kinds=() persistence_sources=() destinations=() canonicals=() saved=()
     [ -n "$site" ] || { printf 'Persistence requires --container.\n' >&2; exit 17; }
     if [ -z "$action" ]; then action=status; [ "${VDM_PERSISTENCE+x}${VDM_DB_PERSISTENCE+x}" = '' ] || action='set'; fi
@@ -11057,14 +11057,26 @@ function joomla__TRuST__persistence() {
       printf '%s\t%s\t%s\t%s\t%s\n' "$role" "$kind" "$source" "${kinds[${#kinds[@]}-1]}" "$destination" >> "$work/storage.tsv"
     done
     [ "${#roles[@]}" -gt 0 ] || { success=true; joomlaPersistenceStatus "$site"; exit $?; }
-    # Earlier database changes can leave unused ordinary volume declarations.
-    # Retire only those aliases; custom/external volumes and Docker data remain.
-    actual=$(printf '%s' "$VDM_PERSISTENCE_MODEL" | joomlaSiteJSON -r '
-      . as $m | [.services[].volumes[]?|select(.type=="volume")|.source] as $used |
-      (.volumes//{})|to_entries[]|select(.key as $key|$used|index($key)|not)|
-      select((.value|del(.name))=={})|.key') || exit 1
+    # Compose omits unused declarations from its model. Read only ordinary
+    # empty/name-only blocks from the original source; leave custom blocks alone.
+    volume_references=$(printf '%s' "$VDM_PERSISTENCE_MODEL" | joomlaSiteJSON -r '.services[].volumes[]?|select(.type=="volume")|.source') || exit 1
+    actual=$(awk '
+      function flush() {if(name!="" && ordinary) print name; name=""; ordinary=0}
+      /^volumes:[[:space:]]*$/ {section=1; next}
+      section && /^[^[:space:]#]/ {flush(); section=0}
+      section && /^  [^[:space:]#]/ {
+        flush()
+        if($0 ~ /^  [A-Za-z0-9][A-Za-z0-9_.-]*:[[:space:]]*(#.*)?$/) {
+          name=$0; sub(/^  /,"",name); sub(/:.*/,"",name); ordinary=1
+        }
+        next
+      }
+      section && name!="" && !/^[[:space:]]*(#.*)?$/ && !/^    name:[[:space:]]*[A-Za-z0-9][A-Za-z0-9_.-]*[[:space:]]*(#.*)?$/ {ordinary=0}
+      END {flush()}
+    ' "$original_compose") || exit 1
     while IFS= read -r alias; do
       [ -n "$alias" ] || continue
+      [[ $'\n'"$volume_references"$'\n' != *$'\n'"$alias"$'\n'* ]] || continue
       joomlaPersistenceVolumeDeclaration "$work/candidate.yml" "$work/next.yml" "$alias" remove && mv "$work/next.yml" "$work/candidate.yml" || exit 1
     done <<< "$actual"
     siteValidateCompose "$work/candidate.yml" "$candidate_env" "$VDM_SITE_DIR" || exit 1

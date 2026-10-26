@@ -128,6 +128,7 @@ persistence_fixture() {
   assert_success
   assert_file_contains "$compose" '"${VDM_PROJECT_PATH}/alpha/db:/var/lib/mysql"'
   refute_file_contains "$compose" '"${VDM_PROJECT_PATH}/alpha/joomla:/var/www/html"'
+  assert_file_contains "$compose" 'name: octojoom_alpha_web_'
   assert_file_contains "$VDM_PROJECT_PATH/alpha/joomla/marker" 'original website'
   assert_file_contains "$VDM_PROJECT_PATH/alpha/db/marker" 'original database'
   [ "$(find "$SANDBOX/volumes" -name marker | wc -l | tr -d ' ')" = 1 ]
@@ -238,20 +239,30 @@ volume_fixture() {
   cat >> "$compose" <<'YAML'
   retired_db:
     name: retired_db
+  retired_empty:
   custom_cache:
     external: true
+  custom_driver:
+    name: custom_driver
+    driver_opts:
+      type: nfs
+  custom_inline: {external: true}
   current_cache:
     name: current_cache
 YAML
-  PERSISTENCE_EXTRA_MODEL='{"volumes":{"retired_db":{"name":"retired_db"},"custom_cache":{"external":true},"current_cache":{"name":"current_cache"}},"services":{"cache":{"volumes":[{"type":"volume","source":"current_cache","target":"/cache"}]}}}'
+  # Real Compose drops all unused declarations from config --format json.
+  PERSISTENCE_EXTRA_MODEL='{"volumes":{"current_cache":{"name":"current_cache"}},"services":{"cache":{"volumes":[{"type":"volume","source":"current_cache","target":"/cache"}]}}}'
   mkdir "$SANDBOX/volumes/retired_db"
   printf 'retired data\n' > "$SANDBOX/volumes/retired_db/marker"
   VDM_PERSISTENCE=true
   run joomla__TRuST__persistence
   assert_success
   refute_file_contains "$compose" 'retired_db:'
+  refute_file_contains "$compose" 'retired_empty:'
   refute_file_contains "$compose" 'active_web:'
   assert_file_contains "$compose" 'custom_cache:'
+  assert_file_contains "$compose" 'custom_driver:'
+  assert_file_contains "$compose" 'custom_inline:'
   assert_file_contains "$compose" 'current_cache:'
   assert_file_contains "$SANDBOX/volumes/retired_db/marker" 'retired data'
 }
@@ -289,15 +300,16 @@ YAML
 
 @test "physical alias comparison uses privileged resolution when directory traversal is denied" {
   mkdir "$SANDBOX/protected directory"
-  local physical
+  local physical expected_argument
   physical=$(cd "$SANDBOX/protected directory" && pwd -P)
+  expected_argument=$(joomlaBackupFilesystemPath "$SANDBOX/protected directory")
   runPrivileged() { printf '<%s>\n' "$@" > "$SANDBOX/privileged-argv"; "$@"; }
   cd() { return 77; }
   run joomlaPersistenceCanonicalPath "$SANDBOX/protected directory/missing-child"
   unset -f cd
   assert_success
   assert_equal "$output" "$physical/missing-child"
-  assert_file_contains "$SANDBOX/privileged-argv" "<$SANDBOX/protected directory>"
+  assert_file_contains "$SANDBOX/privileged-argv" "<$expected_argument>"
 }
 
 @test "single JSON data mount returns to original short bind form" {
