@@ -455,6 +455,7 @@ transaction_doubles() {
   stage_doubles
   make_joomla_container beta BETA beta
   ln -s "$VDM_PROJECT_PATH/alpha" "$work/alias"
+  [ -L "$work/alias" ] || skip 'Symbolic links are unavailable'
   joomlaSiteCompose() {
     [ "$2" = config ] || return 1
     local source="$VDM_PROJECT_PATH/alpha/db"
