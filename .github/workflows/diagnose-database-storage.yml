@@ -38,6 +38,13 @@ jobs:
           write_sql
           seed_site "$SOURCE"
           assert_state "$SOURCE"
+          PHASE=diagnostic-source-restoration
+          request backup --container "$SOURCE" --action create --scope full --format tar.gz --file "$ARCHIVES/full.tar.gz"
+          request backup --container "$SOURCE" --action restore --target current --file "$ARCHIVES/full.tar.gz" \
+            --destination "$ARCHIVES" --pre-backup true --confirm true
+          assert_application "$SOURCE"
+          assert_state "$SOURCE"
+          assert_project_storage "$SOURCE" "$SOURCE_KEY"
           PHASE=diagnostic-independent-database-change
           clone_target="dbclone.$DOMAIN"
           request database --container "$SOURCE" --action change --engine "$ENGINE" --database-image "$CHANGE_IMAGE" \
