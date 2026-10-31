@@ -7,16 +7,26 @@ no registration, conversion or additional project record is needed.
 
 ## Information and actions
 
-The selected website opens with focus in its information area. This area shows
-up to ten lines at a time; on shorter terminals it uses less space so the actions
-remain visible underneath. The complete report is available by scrolling.
+The selected website opens with **keyboard focus on the actions menu**. The
+initial selected item is unchanged. **Up/Down** immediately selects an action;
+**Enter** activates it without first pressing Tab.
 
-- **Up/Down** or **Page Up/Page Down** scroll the information.
-- **Tab** moves from the information to the actions. Use **Up/Down** to choose an
-  action, then **Enter** to select it.
-- **Shift+Tab** returns from the actions to the information. Further Tab presses
-  cycle through the **Select** and **Back** buttons using normal whiptail behavior.
+The information remains visible above the menu, showing up to ten lines at a
+time; on shorter terminals it uses less space so the actions remain visible.
+The complete report is available by scrolling.
+
+- **Shift+Tab** moves directly from the actions to the information. **Up/Down**
+  or **Page Up/Page Down** then scroll the information; **Tab** returns to actions.
+- Forward **Tab** also reaches the information through the native **Select** and
+  **Back** buttons. Their order and behavior are unchanged.
 - **Back** or **Escape** leaves the selected website without running an action.
+
+Only this menu uses the host's `script` utility to supply one initial focus
+traversal after whiptail initializes. Whiptail still renders every widget and
+handles all subsequent keys. There is no replacement renderer, theme override,
+or change to progress displays. Terminal settings and private temporary files
+are restored/removed on exit. Noninteractive callers and systems without a
+supported `script` utility retain the original native dialog and Tab order.
 
 The dialog uses the usual 112-column width when space permits and fits inside
 narrower terminals. Long paths, URLs and image identifiers wrap within the
@@ -148,10 +158,9 @@ is not replayed after the gauge closes. Warnings remain visible; errors and
 cancellation preserve the full captured diagnostics and native exit status.
 Headless and redirected streams retain their original behavior.
 
-The website information screen deliberately retains stock whiptail's scrollable
-textbox and Tab order, including its initial information focus. The custom
-initial-focus renderer has been removed, not restyled. There is no new UI
-framework, keyboard emulator or runtime dependency.
+The website information screen retains stock whiptail's scrollable textbox,
+widgets and Tab order. Its focus bridge changes only the initial focus, as
+described above; it does not wrap or change the Compose progress display.
 
 ## Read and isolation rules
 
@@ -178,11 +187,14 @@ selected lifecycle behavior, native failures, exported-variable isolation,
 menu return navigation, JSON redaction and structured custom layouts.
 
 `native-website-ui.bats` covers native dialog selection and disabled-site
-settings; `site-action-state.bats` covers lifecycle guards;
+settings; `website-menu-focus.bats` covers focus initialization and fallback
+behavior; `site-action-state.bats` covers lifecycle guards;
 `compose-activity.bats` covers live status, stage progress, output and failure
 handling. `tests/integration/website-terminal.sh` uses real whiptail under a Linux
-pseudo-terminal (only Docker is simulated), including Tab, Escape, progress
-rendering, suppression of keyboard echo, and terminal restoration.
+pseudo-terminal (only Docker is simulated), including immediate Down/Enter,
+unchanged default selection, slow startup/typeahead, small terminals, Tab and
+Shift+Tab, Escape/Back, progress rendering, suppression of keyboard echo, and
+terminal restoration.
 
 Portable tests use sandboxed Docker stand-ins. They do not establish real route
 reachability, administrator login, browser launch support or platform-specific
