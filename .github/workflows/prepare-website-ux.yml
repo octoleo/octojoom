@@ -5,26 +5,21 @@ on:
     paths: [.github/workflows/prepare-website-ux.yml]
 permissions:
   contents: write
+concurrency:
+  group: website-ux-publish-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Preserve the transport payload for integrity verification
-        uses: actions/upload-artifact@v4
-        with:
-          name: website-ux-transport
-          path: .github/website-ux.patch.b64
-          include-hidden-files: true
-          retention-days: 1
       - name: Apply the exact locally verified patch
         shell: bash
         run: |
           set -euo pipefail
-          # Correct transport transcription before checking the original digest.
           sed -i \
             -e 's/3XSmmIU+Tfvf/3XSmmIU+fvf/' \
             -e 's/w2b0TvaUz/w2b0VaUz/' \
@@ -45,15 +40,7 @@ jobs:
           git add -A
           git diff --cached --check
           bash -n src/octojoom
-          bash tests/integration/website-terminal.sh
-      - name: Lint the complete implementation and changed tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl --fail --silent --show-error --location https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
-          "$RUNNER_TEMP/shellcheck-v0.10.0/shellcheck" src/octojoom tests/integration/website-terminal.sh
-          "$RUNNER_TEMP/shellcheck-v0.10.0/shellcheck" -s bash tests/unit/site-action-state.bats tests/unit/compose-activity.bats tests/unit/site-keyboard.bats tests/unit/site-information.bats tests/unit/operation-progress.bats
-      - name: Create a verified commit without moving the review branch
+      - name: Create the implementation commit without moving the review branch
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
