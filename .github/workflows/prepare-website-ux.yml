@@ -1,0 +1,32 @@
+name: Prepare website UX checkout
+on:
+  push:
+    branches: [fix/site-actions-progress-focus]
+    paths: [.github/workflows/prepare-website-ux.yml]
+permissions:
+  contents: read
+jobs:
+  checkout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export source and pinned offline test tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/website-ux/tools"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/website-ux/source.tar.gz"
+          git clone --quiet --depth 1 --branch v1.11.1 https://github.com/bats-core/bats-core.git "$RUNNER_TEMP/website-ux/tools/bats-core"
+          rm -rf "$RUNNER_TEMP/website-ux/tools/bats-core/.git"
+          curl --fail --silent --show-error --location https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz | tar -xJ -C "$RUNNER_TEMP/website-ux/tools"
+          tar -czf "$RUNNER_TEMP/website-ux/tools.tar.gz" -C "$RUNNER_TEMP/website-ux/tools" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: website-ux-checkout
+          path: |
+            ${{ runner.temp }}/website-ux/source.tar.gz
+            ${{ runner.temp }}/website-ux/tools.tar.gz
+          retention-days: 1
