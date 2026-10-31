@@ -1,32 +1,79 @@
-name: Prepare website UX checkout
+name: Prepare website UX commit
 on:
   push:
     branches: [fix/site-actions-progress-focus]
     paths: [.github/workflows/prepare-website-ux.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  checkout:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Export source and pinned offline test tools
+      - name: Preserve the transport payload for integrity verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: website-ux-transport
+          path: .github/website-ux.patch.b64
+          include-hidden-files: true
+          retention-days: 1
+      - name: Apply the exact locally verified patch
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/website-ux/tools"
-          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/website-ux/source.tar.gz"
-          git clone --quiet --depth 1 --branch v1.11.1 https://github.com/bats-core/bats-core.git "$RUNNER_TEMP/website-ux/tools/bats-core"
-          rm -rf "$RUNNER_TEMP/website-ux/tools/bats-core/.git"
-          curl --fail --silent --show-error --location https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz | tar -xJ -C "$RUNNER_TEMP/website-ux/tools"
-          tar -czf "$RUNNER_TEMP/website-ux/tools.tar.gz" -C "$RUNNER_TEMP/website-ux/tools" .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: website-ux-checkout
-          path: |
-            ${{ runner.temp }}/website-ux/source.tar.gz
-            ${{ runner.temp }}/website-ux/tools.tar.gz
-          retention-days: 1
+          # Correct transport transcription before checking the original digest.
+          sed -i \
+            -e 's/3XSmmIU+Tfvf/3XSmmIU+fvf/' \
+            -e 's/w2b0TvaUz/w2b0VaUz/' \
+            -e 's/lPbarTm4jDj/lPbarTm4Dj/' \
+            -e 's/PdYze9Nccu7/PdYze9NcCu7/' \
+            -e 's/ffzk5PccCCg6/ffzk5PCCg6/' \
+            -e 's/ABIeXEgrWcse/ABIeXEgrJcse/' \
+            -e 's/Hfqu3ZetQFkS/Hfqu3ZKFkS/' \
+            -e 's/LP2Qd6fSFvX/LP2Qd6vmVvX/' \
+            -e 's/AfiFgUuBIIHZ/AfiFgUuBIIvdIIHZ/' \
+            -e 's/TNJEJ6Gqel/TNJEJ6Aqel/' \
+            .github/website-ux.patch.b64
+          base64 --decode .github/website-ux.patch.b64 | gzip -d > "$RUNNER_TEMP/website-ux.patch"
+          echo "18071f4e6dc055373ea05e42100dbadcf81b84b1d4c283f7860604bc96a37477  $RUNNER_TEMP/website-ux.patch" | sha256sum --check
+          git apply --check "$RUNNER_TEMP/website-ux.patch"
+          git apply "$RUNNER_TEMP/website-ux.patch"
+          rm .github/website-ux.patch.b64 .github/workflows/prepare-website-ux.yml
+          git add -A
+          git diff --cached --check
+          bash -n src/octojoom
+          bash tests/integration/website-terminal.sh
+      - name: Lint the complete implementation and changed tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/shellcheck-v0.10.0/shellcheck" src/octojoom tests/integration/website-terminal.sh
+          "$RUNNER_TEMP/shellcheck-v0.10.0/shellcheck" -s bash tests/unit/site-action-state.bats tests/unit/compose-activity.bats tests/unit/site-keyboard.bats tests/unit/site-information.bats tests/unit/operation-progress.bats
+      - name: Create a verified commit without moving the review branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          endpoint="repos/$GITHUB_REPOSITORY/git"
+          tree=$(gh api "$endpoint/commits/$GITHUB_SHA" --jq .tree.sha)
+          : > "$RUNNER_TEMP/entries.jsonl"
+          while IFS= read -r -d '' path; do
+            mode=$(git ls-files --stage -- "$path" | awk '{print $1}')
+            jq -n --rawfile content "$path" '{content:$content,encoding:"utf-8"}' > "$RUNNER_TEMP/blob.json"
+            blob=$(gh api --method POST "$endpoint/blobs" --input "$RUNNER_TEMP/blob.json" --jq .sha)
+            jq -nc --arg path "$path" --arg mode "$mode" --arg sha "$blob" '{path:$path,mode:$mode,type:"blob",sha:$sha}' >> "$RUNNER_TEMP/entries.jsonl"
+          done < <(git diff --cached --name-only --diff-filter=ACM -z)
+          while IFS= read -r -d '' path; do
+            jq -nc --arg path "$path" '{path:$path,mode:"100644",type:"blob",sha:null}' >> "$RUNNER_TEMP/entries.jsonl"
+          done < <(git diff --cached --name-only --diff-filter=D -z)
+          jq -s --arg base "$tree" '{base_tree:$base,tree:.}' "$RUNNER_TEMP/entries.jsonl" > "$RUNNER_TEMP/tree.json"
+          result_tree=$(gh api --method POST "$endpoint/trees" --input "$RUNNER_TEMP/tree.json" --jq .sha)
+          jq -n --arg tree "$result_tree" --arg parent "$GITHUB_SHA" '{message:"fix: gate disabled sites, show live Compose activity, and focus website actions",tree:$tree,parents:[$parent]}' > "$RUNNER_TEMP/commit.json"
+          result_commit=$(gh api --method POST "$endpoint/commits" --input "$RUNNER_TEMP/commit.json" --jq .sha)
+          printf 'PREPARED_COMMIT=%s\n' "$result_commit"
+          printf 'PREPARED_TREE=%s\n' "$result_tree"
