@@ -1,17 +1,37 @@
 #!/usr/bin/env bash
-# Linux pseudo-terminal acceptance for website menus and lifecycle activity.
-# Uses the real terminal renderer with a fake Docker function; no daemon needed.
+# Exercise the actual whiptail widgets under a Linux pseudo-terminal. Only
+# Docker is simulated: rendering, colours, keyboard input and tty cleanup are real.
 set -euo pipefail
 
-if [[ "${OSTYPE:-}" != linux* ]] || ! command -v script >/dev/null 2>&1; then
-  printf 'SKIP: website terminal acceptance needs Linux util-linux script.\n'
+if [[ "${OSTYPE:-}" != linux* ]]; then
+  printf 'SKIP: native terminal acceptance requires Linux util-linux script.\n'
   exit 0
 fi
-
+for required in script timeout whiptail; do
+  command -v "$required" >/dev/null || { printf 'Missing test dependency: %s\n' "$required" >&2; exit 1; }
+done
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+cleanup() {
+  if [ -n "${OCTOJOOM_TTY_ARTIFACT_DIR:-}" ]; then
+    mkdir -p "$OCTOJOOM_TTY_ARTIFACT_DIR"
+    cp "$WORK"/*.log "$WORK"/*.args "$WORK"/*.stderr "$OCTOJOOM_TTY_ARTIFACT_DIR/" 2>/dev/null || true
+  fi
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 export OCTOJOOM_TTY_TEST_WORK="$WORK" TERM=xterm-256color
+REAL_WHIPTAIL=$(command -v whiptail)
+export REAL_WHIPTAIL
+mkdir "$WORK/bin"
+cat > "$WORK/bin/whiptail" <<'WRAPPER'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "$OCTOJOOM_TTY_TEST_WORK/$OCTOJOOM_TTY_TEST_CASE.args"
+: > "$OCTOJOOM_TTY_TEST_WORK/ready"
+exec "$REAL_WHIPTAIL" "$@"
+WRAPPER
+chmod +x "$WORK/bin/whiptail"
+export PATH="$WORK/bin:$PATH"
 awk '/^(function )?[A-Za-z_][A-Za-z0-9_]*\(\) \{$/ {p=1} p {print} p && /^}$/ {p=0}' \
   "$ROOT/src/octojoom" > "$WORK/functions.sh"
 cat > "$WORK/session.sh" <<'SESSION'
@@ -19,35 +39,32 @@ cat > "$WORK/session.sh" <<'SESSION'
 # shellcheck disable=SC1091
 source "$OCTOJOOM_TTY_TEST_WORK/functions.sh"
 BACK_TITLE=OctoJoom
-stty rows 24 cols 80
+stty rows 37 cols 120
 before=$(stty -g)
-# Signal readiness at the first key read, after the menu owns the terminal.
-# This clones a trusted function definition, not user-provided shell text.
-eval "$(declare -f readJoomlaWebsiteKey | sed '1s/readJoomlaWebsiteKey/readJoomlaWebsiteKeyOriginal/')"
-readJoomlaWebsiteKey() {
-  : > "$OCTOJOOM_TTY_TEST_WORK/ready"
-  readJoomlaWebsiteKeyOriginal "$@"
-}
 case "$OCTOJOOM_TTY_TEST_CASE" in
   menu-*)
     details=$(printf 'Information line %s\n' {1..40})
-    result=$(showJoomlaWebsiteMenu first.example.test "$details" back Back start Start stop Stop)
+    result=$(showJoomlaWebsiteMenu first.example.test "$details" back Back enable Enable php-settings 'PHP settings')
     status=$?
     printf '\nRESULT=%s STATUS=%s\n' "$result" "$status"
     ;;
   progress-*)
-    : > "$OCTOJOOM_TTY_TEST_WORK/ready"
-    whiptail() { :; }
+    # Keep diagnostics separate for exact-once assertions while the real native
+    # gauge still owns /dev/tty. No alternate renderer is substituted.
+    composeProgressCanCapture() { return 0; }
     docker() {
-      printf 'Container database Starting\n' >&2
-      sleep 0.4
-      printf 'Container database Waiting\n' >&2
-      sleep 0.4
-      printf 'Container database Healthy\n' >&2
-      sleep 0.4
+      if [[ "$*" == *'config --services' ]]; then printf 'database\nwebsite\n'; return; fi
+      printf 'Container database Started\n' >&2
+      sleep 0.5
+      printf 'Container database Waiting\nContainer database Waiting\n' >&2
+      sleep 1
+      printf 'Container database Healthy\nContainer website Started\n' >&2
+      sleep 0.5
       return "${OCTOJOOM_TTY_TEST_CASE#progress-}"
     }
-    runComposeProgress '/tmp/a site/docker-compose.yml' compose --file '/tmp/a site/docker-compose.yml' up -d
+    runComposeProgress '/tmp/a site/docker-compose.yml' compose --file '/tmp/a site/docker-compose.yml' up -d \
+      > "$OCTOJOOM_TTY_TEST_WORK/$OCTOJOOM_TTY_TEST_CASE.stdout" \
+      2> "$OCTOJOOM_TTY_TEST_WORK/$OCTOJOOM_TTY_TEST_CASE.stderr"
     status=$?
     printf '\nPROGRESS_STATUS=%s\n' "$status"
     ;;
@@ -63,9 +80,9 @@ feed_keys() {
     [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 0.05
   done
+  # Wait for the native widget to finish tty initialization before sending input.
+  sleep 0.5
   printf '%b' "$keys"
-  # Keep script's stdin open until the session exits. Early EOF injects an EOT
-  # byte into the terminal and can consume a standalone Escape as a sequence.
   while [ ! -f "$WORK/done" ]; do
     [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 0.05
@@ -73,10 +90,9 @@ feed_keys() {
 }
 
 run_case() {
-  local name="$1" keys="$2" expected="$3"
+  local name="$1" keys="$2" expected="$3" widget="$4"
   export OCTOJOOM_TTY_TEST_CASE="$name"
   rm -f "$WORK/ready" "$WORK/done"
-  # The inner shell expands this path after script creates its terminal.
   # shellcheck disable=SC2016
   if ! feed_keys "$keys" |
     timeout --signal=TERM --kill-after=2s 20s script --quiet --return \
@@ -86,27 +102,24 @@ run_case() {
   fi
   grep -qF "$expected" "$WORK/$name.log"
   grep -qF 'TERMINAL_RESTORED' "$WORK/$name.log"
-  grep -qF $'\033[?1049l' "$WORK/$name.log"
-  if grep -Eq 'Bad file descriptor|ambiguous redirect|TERMINAL_NOT_RESTORED' "$WORK/$name.log"; then
+  grep -qxF -- "$widget" "$WORK/$name.args"
+  if grep -Eq 'Bad file descriptor|ambiguous redirect|TERMINAL_NOT_RESTORED|duration unknown|\^\[\[5~' "$WORK/$name.log"; then
     cat "$WORK/$name.log" >&2
     return 1
   fi
-  printf 'PASS: %s\n' "$name"
+  printf 'PASS: %s uses native %s and restores the terminal\n' "$name" "$widget"
 }
 
-run_case menu-actions '\033[B\n' 'RESULT=start STATUS=0'
-run_case menu-tab '\t\033[B\033[6~\t\033[B\n' 'RESULT=start STATUS=0'
-run_case menu-info-enter '\t\n\033[B\n' 'RESULT=start STATUS=0'
-run_case menu-escape '\033' 'RESULT= STATUS=255'
-run_case progress-0 '' 'PROGRESS_STATUS=0'
-run_case progress-23 '' 'PROGRESS_STATUS=23'
+# Native whiptail starts in its scrollable information textbox. Preserve that
+# behaviour rather than replacing the UI to force an unsupported focus order.
+run_case menu-tab '\t\033[B\n' 'RESULT=enable STATUS=0' --menu
+run_case menu-escape '\033' 'RESULT= STATUS=255' --menu
+run_case progress-0 '\033[5~' 'PROGRESS_STATUS=0' --gauge
+run_case progress-23 '' 'PROGRESS_STATUS=23' --gauge
+[ ! -s "$WORK/progress-0.stderr" ]
+[ "$(grep -cF 'Container database Waiting' "$WORK/progress-23.stderr")" = 2 ]
 for result in 0 23; do
-  grep -qF 'Activity (duration unknown)' "$WORK/progress-$result.log"
-  grep -qF 'Container database Waiting' "$WORK/progress-$result.log"
-  # Everything after leaving the alternate screen is ordinary command output.
-  awk -v end=$'\033[?1049l' 'index($0,end) {after=1; $0=substr($0,index($0,end)+length(end))} after {print}' \
-    "$WORK/progress-$result.log" > "$WORK/after-$result.log"
+  grep -qF 'Waiting' "$WORK/progress-$result.log"
+  [ ! -s "$WORK/progress-$result.stdout" ]
 done
-if grep -qF 'Container database' "$WORK/after-0.log"; then exit 1; fi
-[ "$(grep -cF 'Container database Waiting' "$WORK/after-23.log")" = 1 ]
-printf 'PASS: successful output is not replayed; failures retain diagnostics once\n'
+printf 'PASS: live native progress, no successful log replay, full failure diagnostics\n'

@@ -1,0 +1,43 @@
+name: Verify native UI restoration
+on:
+  push:
+    branches: [fix/restore-native-website-ui]
+    paths: [.github/workflows/restore-native-ui.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Apply and verify the exact restoration
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git hash-object src/octojoom)" = 849b6e78eda218072337db06beb733c0ee8fd00b
+          git fetch --depth=1 origin aa29d318f227f664a2a5ce662424ac1ff0c04fdc
+          git show aa29d318f227f664a2a5ce662424ac1ff0c04fdc:src/octojoom > src/octojoom
+          git apply --check .github/native-ui.patch
+          git apply .github/native-ui.patch
+          echo '3815dd1a2f7fcfa827158f38ec101d6daf21fc2793064a43604e26084637459b  src/octojoom' | sha256sum --check
+          bash -n src/octojoom
+          jq -n --rawfile content src/octojoom '{content:$content,encoding:"utf-8"}' > "$RUNNER_TEMP/source.json"
+          blob=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/blobs" --input "$RUNNER_TEMP/source.json" --jq .sha)
+          test "$blob" = adbe00800249b229217ef8ed615feb00f7534e27
+          echo "SOURCE_BLOB=$blob"
+      - name: Install native dialog
+        run: sudo apt-get update -qq && sudo apt-get install -y whiptail
+      - name: Exercise real native dialogs and terminal restoration
+        env:
+          OCTOJOOM_TTY_ARTIFACT_DIR: ${{ runner.temp }}/native-ui-evidence
+        run: bash tests/integration/website-terminal.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-ui-evidence
+          path: ${{ runner.temp }}/native-ui-evidence
+          retention-days: 3

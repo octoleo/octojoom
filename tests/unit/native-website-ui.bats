@@ -8,6 +8,11 @@ setup() {
   export REAL_DOCKER
 }
 
+whiptail() {
+  printf '%s ' "$@" > "$SANDBOX/native.args"
+  command whiptail "$@"
+}
+
 @test "website information always uses the existing whiptail menu" {
   # A real controlling terminal must not select a different renderer.
   joomlaWebsiteMenuCanRender() { return 0; }
@@ -17,7 +22,7 @@ setup() {
   assert_success
   assert_equal "$output" back
   assert_answers_used
-  assert_file_contains "$STUB_DIR/dialogs.full" 'Website Information | first.vdm.dev'
+  assert_file_contains "$SANDBOX/native.args" 'Website Information | first.vdm.dev'
 }
 
 @test "disabled website retains configuration navigation but hides service lifecycle actions" {
@@ -60,4 +65,16 @@ setup() {
   assert_output_contains 'whiptail'
   refute_output_contains 'actionProgressActivityDialog'
   refute_output_contains 'terminalPanel'
+}
+
+@test "native website menu keeps the complete report and user theme unchanged" {
+  export NEWT_COLORS='root=white,blue window=black,white'
+  local report=$'Website: first.vdm.dev\nEnabled: disabled\nLong configuration details'
+  answers back
+  run showJoomlaWebsiteMenu first.vdm.dev "$report" back Back enable Enable
+  assert_success
+  assert_equal "$NEWT_COLORS" 'root=white,blue window=black,white'
+  assert_file_contains "$STUB_DIR/dialogs.full" 'Long configuration details'
+  assert_file_contains "$SANDBOX/native.args" '--scrolltext'
+  assert_file_contains "$SANDBOX/native.args" '--ok-button Select --cancel-button Back'
 }
