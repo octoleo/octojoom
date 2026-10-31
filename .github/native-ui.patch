@@ -1,0 +1,252 @@
+diff --git a/src/octojoom b/src/octojoom
+index 6c75565..adbe008 100755
+--- a/src/octojoom
++++ b/src/octojoom
+@@ -3550,33 +3550,125 @@ function saveContainerCompose() {
+ 
+ # Run Compose exactly once with the selected environment. A failed operation must
+ # never be retried without its credentials or hidden by later filesystem changes.
++# Keep Docker status text inside native whiptail controls. Never interpret its
++# escape sequences or allow resource output to inject gauge protocol frames.
++function actionProgressText() {
++  LC_ALL=C sed -E $'s/\033\\[[0-?]*[ -/]*[@-~]//g' |
++    LC_ALL=C tr -d '\000-\010\013-\037\177' | tr '\t' ' '
++}
++
++function actionProgressLogSummary() {
++  [ -f "${OCTOJOOM_PROGRESS_DIR:-}/compose-output" ] || return 0
++  tail -n 60 "$OCTOJOOM_PROGRESS_DIR/compose-output" 2>/dev/null | actionProgressText | awk '
++    NF {
++      sub(/^[[:space:]]+/, "")
++      key = ($1 ~ /^(Container|Network|Volume)$/ ? $1 " " $2 : $0)
++      latest[key] = substr($0, 1, 160)
++      order[key] = NR
++    }
++    END {
++      for (i = 0; i < 3; i++) {
++        best = ""; n = -1
++        for (key in order) if (order[key] > n) { best = key; n = order[key] }
++        if (n < 0) break
++        result[i] = latest[best]
++        delete order[best]
++      }
++      for (j = i - 1; j >= 0; j--) print "  " result[j]
++    }'
++}
++
++# Configuration accounts for the first completed stage. Container milestones
++# account for the next stage; only successful command completion reaches 100.
++# This measures service work, not elapsed time or HTTP/browser readiness.
++function actionProgressComposePercent() {
++  local total=0 completed=0 operation="${OCTOJOOM_COMPOSE_OPERATION:-}"
++  [ -f "$OCTOJOOM_PROGRESS_DIR/compose-count" ] || { printf '0\n'; return; }
++  IFS= read -r total 2>/dev/null < "$OCTOJOOM_PROGRESS_DIR/compose-count" || total=0
++  [[ "$total" =~ ^[1-9][0-9]*$ ]] || { printf '10\n'; return; }
++  if [ -f "$OCTOJOOM_PROGRESS_DIR/compose-output" ]; then
++    completed=$(awk -v operation="$operation" '
++      $1 == "Container" {
++        if ((operation ~ /^(up|start|restart)$/ && $3 ~ /^(Started|Running|Healthy)$/) ||
++            (operation == "stop" && $3 == "Stopped") ||
++            (operation == "down" && $3 == "Removed")) done[$2] = 1
++      }
++      END { for (name in done) count++; print count + 0 }
++    ' "$OCTOJOOM_PROGRESS_DIR/compose-output" 2>/dev/null) || completed=0
++  fi
++  [ "$completed" -le "$total" ] || completed=$total
++  printf '%s\n' "$((10 + 80 * completed / total))"
++}
++
++function composeProgressCanCapture() {
++  actionProgressActive || { [ -t 1 ] && [ -t 2 ]; }
++}
++
++# Only interactive lifecycle output is captured. Docker runs the requested
++# operation exactly once. The preliminary config query is read-only and does
++# not render credentials. A failed query never substitutes for command status.
++function runComposeActivity() {
++  if ! actionProgressActive || [ "${OCTOJOOM_COMPOSE_CAPTURE:-false}" != true ]; then
++    docker "$@"
++    return $?
++  fi
++  local result=0 log="$OCTOJOOM_PROGRESS_DIR/compose-output" total=0
++  : > "$log" || return 1
++  rm -f "$OCTOJOOM_PROGRESS_DIR/compose-count"
++  if COMPOSE_ANSI=never docker "${OCTOJOOM_COMPOSE_PREFIX[@]}" config --services \
++      > "$OCTOJOOM_PROGRESS_DIR/compose-services" 2> "$OCTOJOOM_PROGRESS_DIR/compose-config-errors"; then
++    total=$(awk 'NF {count++} END {print count + 0}' "$OCTOJOOM_PROGRESS_DIR/compose-services")
++    printf '%s\n' "$total" > "$OCTOJOOM_PROGRESS_DIR/compose-count.next"
++    mv -f "$OCTOJOOM_PROGRESS_DIR/compose-count.next" "$OCTOJOOM_PROGRESS_DIR/compose-count"
++  fi
++  COMPOSE_ANSI=never COMPOSE_PROGRESS=plain docker "$@" > "$log" 2>&1 || result=$?
++  if [ "$result" -ne 0 ]; then
++    cat "$log" >&2
++  else
++    # Keep warnings, but do not replay routine Creating/Waiting/Started chatter.
++    LC_ALL=C grep -E '(^|[[:space:]])(WARN(ING)?([[:space:]:\[]|$)|level=warning)' "$log" | awk '!seen[$0]++' >&2 || true
++  fi
++  rm -f "$log" "$OCTOJOOM_PROGRESS_DIR/compose-count" \
++    "$OCTOJOOM_PROGRESS_DIR/compose-services" "$OCTOJOOM_PROGRESS_DIR/compose-config-errors"
++  return "$result"
++}
++
+ function runComposeProgress() {
+   local compose_file="$1" argument operation='' message='' skip_value=false
++  local -a OCTOJOOM_COMPOSE_PREFIX=()
+   shift
+-  # Inspect only Compose's command position. A path or project called "up"
+-  # must not turn config/log/exec output into a progress display.
++  # Only the command position identifies an operation; names/paths are data.
+   for argument in "$@"; do
+-    if "$skip_value"; then skip_value=false; continue; fi
++    if "$skip_value"; then
++      skip_value=false
++      OCTOJOOM_COMPOSE_PREFIX+=("$argument")
++      continue
++    fi
+     case "$argument" in
+       compose) ;;
+-      --file|-f|--env-file|--project-directory|--project-name|-p|--profile|--ansi|--progress|--parallel) skip_value=true;;
++      --file|-f|--env-file|--project-directory|--project-name|-p|--profile|--ansi|--progress|--parallel) skip_value=true ;;
+       --file=*|--env-file=*|--project-directory=*|--project-name=*|--profile=*|--ansi=*|--progress=*|--parallel=*|--compatibility|--all-resources) ;;
+-      up|start|stop|restart|down|pull|build) operation="$argument"; break;;
+-      *) break;;
++      up|start|stop|restart|down|pull|build) operation="$argument"; break ;;
++      *) break ;;
+     esac
++    OCTOJOOM_COMPOSE_PREFIX+=("$argument")
+   done
+   case "$operation" in
+-    up) message='Preparing images and starting the selected services';;
+-    start) message='Starting the selected services';;
+-    stop) message='Stopping the selected services safely';;
+-    restart) message='Restarting the selected services';;
+-    down) message='Stopping and removing the selected containers';;
+-    pull) message='Downloading the selected container images';;
+-    build) message='Building the selected container images';;
+-    *) docker "$@"; return $?;;
++    up) message='Preparing images and starting the selected services' ;;
++    start) message='Starting the selected services' ;;
++    stop) message='Stopping the selected services safely' ;;
++    restart) message='Restarting the selected services' ;;
++    down) message='Stopping and removing the selected containers' ;;
++    pull) message='Downloading the selected container images' ;;
++    build) message='Building the selected container images' ;;
++    *) docker "$@"; return $? ;;
+   esac
++  # Nested operations keep the outer renderer and its measured stage.
++  local OCTOJOOM_PROGRESS_MODE=compose OCTOJOOM_COMPOSE_CAPTURE=false
++  local OCTOJOOM_COMPOSE_OPERATION="$operation"
++  if composeProgressCanCapture; then OCTOJOOM_COMPOSE_CAPTURE=true; fi
+   runActionProgress 'Docker Compose' "$message
+-Configuration: $compose_file" docker "$@"
++Configuration: $compose_file" runComposeActivity "$@"
+ }
+ 
+ function runContainerCompose() {
+@@ -10687,13 +10779,17 @@ function joomla__TRuST__path() {
+ 
+ function joomlaSiteLifecycle() {
+   local site="${VDM_CONTAINER:-}" action="$1"
++  case "$action" in start|stop|restart|redeploy) ;; *) return 17 ;; esac
+   resolveJoomlaSite "$site" || return 1
++  if [ "$(getJoomlaSiteEnabledState "$site")" != enabled ]; then
++    printf 'Website %s is not enabled; enable it first before using %s.\n' "$site" "$action" >&2
++    return 1
++  fi
+   case "$action" in
+     start) joomlaSiteCompose "$site" up -d ;;
+     stop) joomlaSiteCompose "$site" stop ;;
+     restart) joomlaSiteCompose "$site" restart ;;
+     redeploy) joomlaSiteCompose "$site" up -d --force-recreate ;;
+-    *) return 17 ;;
+   esac
+ }
+ 
+@@ -11214,6 +11310,16 @@ function runJoomlaSiteAction() {
+     local site="$1" action="$2" status=0
+     local VDM_CONTAINER="$site" VDM_CONTAINER_TYPE=joomla VDM_ACTION=''
+     readJoomlaSiteFacts "$site" || exit 1
++    # Disabled sites still have files, configuration, backups and tools. Guard
++    # only service lifecycle actions, including selections from a stale menu.
++    case "$action" in
++      start|stop|restart|redeploy|disable)
++        if [ "$VDM_SITE_ENABLED" != enabled ]; then
++          printf 'Website %s is not enabled; enable it first before using %s.\n' "$site" "$action" >&2
++          exit 1
++        fi
++        ;;
++    esac
+     # Variables are read by the feature action handlers.
+     # shellcheck disable=SC2034
+     case "$action" in
+@@ -11315,8 +11421,15 @@ function showJoomlaWebsiteInformation() {
+       # Facts and flags stay inside this menu invocation; site ENV is never loaded.
+       readJoomlaSiteFacts "$site" || break
+       details=$(showJoomlaSiteFacts)
+-      actions=(back '<-- Return to website list' start 'Start website services' stop 'Stop website services' restart 'Restart website services' redeploy 'Recreate website services using current configuration')
+-      if [ "$VDM_SITE_ENABLED" = enabled ]; then actions+=(disable 'Disable website'); else actions+=(enable 'Enable website'); fi
++      actions=(back '<-- Return to website list')
++      if [ "$VDM_SITE_ENABLED" = enabled ]; then
++        actions+=(start 'Start website services' stop 'Stop website services'
++          restart 'Restart website services' redeploy 'Recreate website services using current configuration'
++          disable 'Disable website')
++      else
++        actions+=(enable 'Enable website')
++      fi
++      # Settings and maintenance remain available independently of service state.
+       actions+=(logs 'Read logs')
+       [ -z "$VDM_SITE_URL" ] || actions+=(website 'Open website' admin 'Open administrator')
+       [ -z "$VDM_SITE_VIEWER_URL" ] || actions+=(viewer 'Open database viewer')
+@@ -12072,13 +12185,24 @@ function actionProgressResume() {
+ }
+ 
+ function actionProgressDialog() {
++  local rows columns height=14 width=112
++  rows=$(tput lines 2>/dev/null) || rows=24
++  columns=$(tput cols 2>/dev/null) || columns=80
++  [[ "$rows" =~ ^[1-9][0-9]*$ ]] || rows=24
++  [[ "$columns" =~ ^[1-9][0-9]*$ ]] || columns=80
++  [ "$rows" -ge 12 ] && [ "$columns" -ge 40 ] || return 1
++  [ "$height" -le "$((rows - 2))" ] || height=$((rows - 2))
++  [ "$width" -le "$((columns - 2))" ] || width=$((columns - 2))
++  # Reserve text rows up front: newt otherwise clips later updates to one line.
++  # Use the same native renderer and NEWT_COLORS as every other OctoJoom screen.
+   exec whiptail --title "$1" --backtitle "${BACK_TITLE:-}" \
+-    --gauge 'Preparing...' 10 112 0 >/dev/tty 2>/dev/tty
++    --gauge $'Preparing...\n \n \n \n \n \n \n \n \n \n ' "$height" "$width" 0 >/dev/tty 2>/dev/tty
+ }
+ 
+ function actionProgressRender() {
+   local title="$1" gauge_pid='' sleeper='' percent=0 message='' elapsed=0
+-  local started=$SECONDS outcome=''
++  local started=$SECONDS outcome='' activity='' frame=0 spinner=$'|/-\\'
++  local observed=0 compose_percent=0
+   trap '
+     [ -z "$sleeper" ] || { kill "$sleeper" 2>/dev/null || true; wait "$sleeper" 2>/dev/null || true; }
+     exec 9>&-
+@@ -12111,8 +12235,15 @@ function actionProgressRender() {
+         IFS= read -r message || true
+       } <"$OCTOJOOM_PROGRESS_DIR/state"
+       elapsed=$((SECONDS - started))
+-      printf 'XXX\n%s\n%s\n\nElapsed: %ss. Working; please wait.\nProgress reflects completed stages.\nXXX\n' \
+-        "$percent" "$message" "$elapsed" >&9 || break
++      activity=$(actionProgressLogSummary)
++      if [ "${OCTOJOOM_PROGRESS_MODE:-stages}" = compose ]; then
++        observed=$(actionProgressComposePercent)
++        [ "$observed" -le "$compose_percent" ] || compose_percent=$observed
++        percent=$compose_percent
++      fi
++      printf 'XXX\n%s\n%s\n\n%s\nElapsed: %ss. %s Working; please wait.\nXXX\n' \
++        "$percent" "${message:0:220}" "$activity" "$elapsed" "${spinner:frame%4:1}" >&9 || break
++      frame=$((frame + 1))
+     fi
+     sleep 0.2 &
+     sleeper=$!
+@@ -12143,6 +12274,7 @@ function runActionProgress() {
+       [ -z "$renderer_pid" ] || { kill "$renderer_pid" 2>/dev/null || true; wait "$renderer_pid" 2>/dev/null || true; }
+       [ ! -f "$OCTOJOOM_PROGRESS_DIR/stdout" ] || cat "$OCTOJOOM_PROGRESS_DIR/stdout" >&"$progress_stdout_fd"
+       [ ! -f "$OCTOJOOM_PROGRESS_DIR/diagnostics" ] || cat "$OCTOJOOM_PROGRESS_DIR/diagnostics" >&"$progress_stderr_fd"
++      [ ! -s "$OCTOJOOM_PROGRESS_DIR/compose-output" ] || cat "$OCTOJOOM_PROGRESS_DIR/compose-output" >&"$progress_stderr_fd"
+       exec {progress_stdout_fd}>&- {progress_stderr_fd}>&-
+       rm -rf "$OCTOJOOM_PROGRESS_DIR"
+     ' EXIT
