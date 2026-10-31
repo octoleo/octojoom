@@ -44,6 +44,7 @@ setup() {
   local file="$VDM_REPO_PATH/joomla/available/abc.vdm.dev/docker-compose.yml"
   fail_command docker-compose-up 23
   VDM_CONTAINER=abc.vdm.dev
+  link_enabled joomla abc.vdm.dev
   run joomlaSiteLifecycle redeploy
   assert_status 23
   assert_equal "$(grep -c '^Docker Compose$' "$PROGRESS_CALLS")" 1

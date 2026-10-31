@@ -150,13 +150,14 @@ HOOK
   assert_failure
 }
 
-@test "site lifecycle preserves Compose failure status and disabled state" {
+@test "site lifecycle preserves Compose failure status and enabled state" {
   make_joomla_container alpha ALPHA first
+  link_enabled joomla first.vdm.dev
   VDM_CONTAINER=first.vdm.dev
   fail_command docker-compose-up 27
   run joomla__TRuST__redeploy
   assert_status 27
-  [ ! -e "${VDM_REPO_PATH}/joomla/enabled/first.vdm.dev" ]
+  assert_equal "$(getJoomlaSiteEnabledState first.vdm.dev)" enabled
 }
 
 @test "site Compose isolates interpolated exported values including custom default expressions" {
@@ -175,6 +176,7 @@ HOOK
 
 @test "site navigation returns from an action to same details then back to list" {
   make_joomla_container alpha ALPHA first
+  link_enabled joomla first.vdm.dev
   answers first.vdm.dev stop back back
   run showJoomlaWebsiteInformation
   assert_success
@@ -185,6 +187,7 @@ HOOK
 
 @test "database and backup menus keep the selected website and return to its details" {
   make_joomla_container alpha ALPHA first
+  link_enabled joomla first.vdm.dev
   make_joomla_container beta BETA second
   showJoomlaDatabaseTools() { printf 'tools %s\n' "$1" >> "$SANDBOX/site-actions"; }
   showJoomlaDatabaseChange() { printf 'change %s\n' "$1" >> "$SANDBOX/site-actions"; }
@@ -211,6 +214,7 @@ HOOK
 
 @test "persistence menu changes only the selected store and keeps the selected website" {
   make_joomla_container alpha ALPHA first
+  link_enabled joomla first.vdm.dev
   VDM_PERSISTENCE=true VDM_DB_PERSISTENCE=true
   joomlaPersistenceStatus() { printf 'Storage for %s\n' "$1"; }
   joomla__TRuST__persistence() {
