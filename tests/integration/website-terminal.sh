@@ -21,6 +21,13 @@ source "$OCTOJOOM_TTY_TEST_WORK/functions.sh"
 BACK_TITLE=OctoJoom
 stty rows 24 cols 80
 before=$(stty -g)
+# Signal readiness at the first key read, after the menu owns the terminal.
+# This clones a trusted function definition, not user-provided shell text.
+eval "$(declare -f readJoomlaWebsiteKey | sed '1s/readJoomlaWebsiteKey/readJoomlaWebsiteKeyOriginal/')"
+readJoomlaWebsiteKey() {
+  : > "$OCTOJOOM_TTY_TEST_WORK/ready"
+  readJoomlaWebsiteKeyOriginal "$@"
+}
 case "$OCTOJOOM_TTY_TEST_CASE" in
   menu-*)
     details=$(printf 'Information line %s\n' {1..40})
@@ -29,6 +36,7 @@ case "$OCTOJOOM_TTY_TEST_CASE" in
     printf '\nRESULT=%s STATUS=%s\n' "$result" "$status"
     ;;
   progress-*)
+    : > "$OCTOJOOM_TTY_TEST_WORK/ready"
     whiptail() { :; }
     docker() {
       printf 'Container database Starting\n' >&2
@@ -46,15 +54,36 @@ case "$OCTOJOOM_TTY_TEST_CASE" in
 esac
 [ "$before" = "$(stty -g)" ] || { printf 'TERMINAL_NOT_RESTORED\n'; exit 1; }
 printf 'TERMINAL_RESTORED\n'
+: > "$OCTOJOOM_TTY_TEST_WORK/done"
 SESSION
+
+feed_keys() {
+  local keys="$1" deadline=$((SECONDS + 15))
+  while [ ! -f "$WORK/ready" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.05
+  done
+  printf '%b' "$keys"
+  # Keep script's stdin open until the session exits. Early EOF injects an EOT
+  # byte into the terminal and can consume a standalone Escape as a sequence.
+  while [ ! -f "$WORK/done" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.05
+  done
+}
 
 run_case() {
   local name="$1" keys="$2" expected="$3"
   export OCTOJOOM_TTY_TEST_CASE="$name"
+  rm -f "$WORK/ready" "$WORK/done"
   # The inner shell expands this path after script creates its terminal.
   # shellcheck disable=SC2016
-  { sleep 0.5; printf '%b' "$keys"; } |
-    script --quiet --return --command 'bash "$OCTOJOOM_TTY_TEST_WORK/session.sh"' /dev/null > "$WORK/$name.log" 2>&1
+  if ! feed_keys "$keys" |
+    timeout --signal=TERM --kill-after=2s 20s script --quiet --return \
+      --command 'bash "$OCTOJOOM_TTY_TEST_WORK/session.sh"' /dev/null > "$WORK/$name.log" 2>&1; then
+    cat "$WORK/$name.log" >&2
+    return 1
+  fi
   grep -qF "$expected" "$WORK/$name.log"
   grep -qF 'TERMINAL_RESTORED' "$WORK/$name.log"
   grep -qF $'\033[?1049l' "$WORK/$name.log"
