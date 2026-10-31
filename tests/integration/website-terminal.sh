@@ -28,6 +28,8 @@ cat > "$WORK/bin/whiptail" <<'WRAPPER'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >> "$OCTOJOOM_TTY_TEST_WORK/$OCTOJOOM_TTY_TEST_CASE.args"
 : > "$OCTOJOOM_TTY_TEST_WORK/ready"
+# Typeahead must survive even when the native widget starts slowly.
+[ "$OCTOJOOM_TTY_TEST_CASE" != menu-delayed ] || sleep 1
 exec "$REAL_WHIPTAIL" "$@"
 WRAPPER
 chmod +x "$WORK/bin/whiptail"
@@ -43,6 +45,7 @@ stty rows 37 cols 120
 before=$(stty -g)
 case "$OCTOJOOM_TTY_TEST_CASE" in
   menu-*)
+    [ "$OCTOJOOM_TTY_TEST_CASE" != menu-small ] || stty rows 24 cols 80
     details=$(printf 'Information line %s\n' {1..40})
     result=$(showJoomlaWebsiteMenu first.example.test "$details" back Back enable Enable php-settings 'PHP settings')
     status=$?
@@ -110,9 +113,15 @@ run_case() {
   printf 'PASS: %s uses native %s and restores the terminal\n' "$name" "$widget"
 }
 
-# Native whiptail starts in its scrollable information textbox. Preserve that
-# behaviour rather than replacing the UI to force an unsupported focus order.
-run_case menu-tab '\t\033[B\r' 'RESULT=enable STATUS=0' --menu
+# The first Down/Enter must act on the real native menu, without an initial Tab.
+run_case menu-actions '\033[B\r' 'RESULT=enable STATUS=0' --menu
+run_case menu-default '\r' 'RESULT=back STATUS=0' --menu
+run_case menu-delayed '\033[B\r' 'RESULT=enable STATUS=0' --menu
+run_case menu-small '\033[B\r' 'RESULT=enable STATUS=0' --menu
+# Shift+Tab reaches information directly; forward Tab retains the native buttons.
+run_case menu-shift-tab '\033[Z\033[B\t\033[B\r' 'RESULT=enable STATUS=0' --menu
+run_case menu-tab '\t\t\t\033[6~\t\033[B\r' 'RESULT=enable STATUS=0' --menu
+run_case menu-cancel '\t\t\r' 'RESULT= STATUS=1' --menu
 run_case menu-escape '\033' 'RESULT= STATUS=255' --menu
 run_case progress-0 '\033[5~' 'PROGRESS_STATUS=0' --gauge
 run_case progress-23 '' 'PROGRESS_STATUS=23' --gauge
