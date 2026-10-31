@@ -392,7 +392,7 @@ transaction_doubles() {
   docker() {
     case "$1" in
       ps) printf 'running-database\n';;
-      inspect) jq -n --arg source "$VDM_DATABASE_STAGE_STORAGE" '[{Mounts:[{Type:"bind",Source:$source}]}]';;
+      inspect) jq -n --arg source "$VDM_DATABASE_STAGE_STORAGE" '[{State:{Running:true,Restarting:false},Mounts:[{Type:"bind",Source:$source}]}]';;
       *) return 1;;
     esac
   }
