@@ -40,7 +40,7 @@ setup() {
   assert_equal "$output" 'first.vdm.dev up -d --force-recreate'
 }
 
-@test "disabled website details expose only enable and back" {
+@test "disabled website details expose enable and retain maintenance settings" {
   make_joomla_container alpha ALPHA first
   readJoomlaSiteFacts() { VDM_SITE_ENABLED=disabled; }
   showJoomlaSiteFacts() { printf 'Website: first.vdm.dev\nEnabled: disabled\n'; }
@@ -51,7 +51,9 @@ setup() {
   }
   run showJoomlaWebsiteInformation first.vdm.dev true
   assert_success
-  assert_equal "$(wc -l < "$SANDBOX/site-actions" | tr -d ' ')" 4
+  grep -qxF php-settings "$SANDBOX/site-actions"
+  grep -qxF backups "$SANDBOX/site-actions"
+  run ! grep -qxF stop "$SANDBOX/site-actions"
   grep -qxF back "$SANDBOX/site-actions"
   grep -qxF enable "$SANDBOX/site-actions"
 }
@@ -63,7 +65,7 @@ setup() {
   joomla__TRuST__php() { touch "$SANDBOX/unexpected-action"; }
   joomlaSiteLifecycle() { touch "$SANDBOX/unexpected-action"; }
   local action
-  for action in start stop restart redeploy disable website php-switch; do
+  for action in start stop restart redeploy disable; do
     run runJoomlaSiteAction first.vdm.dev "$action"
     assert_failure
     assert_output_contains 'enable it first'
