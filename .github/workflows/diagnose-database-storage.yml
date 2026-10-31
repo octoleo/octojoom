@@ -1,28 +1,99 @@
-name: Diagnose database storage
+name: Prepare database storage correction
 on:
   push:
     branches: [fix/website-menu-initial-focus]
     paths: [.github/workflows/diagnose-database-storage.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  postgres:
+  source:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Trace the complete PostgreSQL backup and cutover sequence
+      - name: Verify and store the exact corrected source
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/storage-diagnostic.sh" <<'SH'
-          # Keep the production predicate intact; record the exact operands only
-          # when it refuses publication. Do not print environment credentials.
-          eval "$(declare -f joomlaDatabaseStorageStopped | sed '/printf.*Database storage is still mounted/i\            printf "BLOCKING_SOURCE=%s\\nPROTECTED_PATH=%s\\n" "$source" "$path" >&2; docker inspect "${containers[@]}" | jq '\''[.[]|{Id,Name,State:{Status:.State.Status,Running:.State.Running},Mounts}]'\'' >&2;')"
-          SH
-          awk '/^PHASE=real-joomla-installation/ {print "source \"$RUNNER_TEMP/storage-diagnostic.sh\""} {print}' \
-            tests/integration/database-backups.sh > tests/integration/pg-diagnostic.sh
-          bash -n tests/integration/pg-diagnostic.sh "$RUNNER_TEMP/storage-diagnostic.sh"
-          OCTOJOOM_DB_TEST_ENGINE=postgres timeout --signal=TERM --kill-after=30s 42m bash tests/integration/pg-diagnostic.sh
+          test "$(git hash-object src/octojoom)" = ec2f5287a2ab6a08ecbe85f9a2e541a9c2f24dd2
+          cat > "$RUNNER_TEMP/storage.patch" <<'PATCH'
+          diff --git a/src/octojoom b/src/octojoom
+          index ec2f528..68ddf04 100755
+          --- a/src/octojoom
+          +++ b/src/octojoom
+          @@ -6201,26 +6201,44 @@ function joomlaDatabaseStageStorage() {
+             chmod 600 "$VDM_DATABASE_STAGE_COMPOSE" && siteValidateCompose "$VDM_DATABASE_STAGE_COMPOSE" "$VDM_DATABASE_STAGE_ENV" "$directory"
+           }
+           
+          -# A stopped project is required before moving database directories. Inspect all
+          -# running containers too, so another deployment cannot keep either directory live.
+          +# A stopped project is required before moving database directories. Docker may
+          +# finish stopping a container between ps and inspect; inspect is authoritative.
+          +# Briefly re-observe a settling mount, never stop another deployment or publish
+          +# while any running/restarting container still uses either directory.
+          +# shellcheck disable=SC2016
+           function joomlaDatabaseStorageStopped() {
+          -  local ids mounts source path
+          +  local ids mounts source path attempt blocked_source='' blocked_path=''
+             local -a containers=()
+          -  ids=$(docker ps --quiet) || return 1
+          -  while IFS= read -r source; do [ -z "$source" ] || containers+=("$source"); done <<< "$ids"
+          -  [ "${#containers[@]}" -gt 0 ] || return 0
+          -  mounts=$(docker inspect "${containers[@]}") || return 1
+          -  mounts=$(printf '%s' "$mounts" | joomlaSiteJSON -r '.[] | .Mounts[]? | select(.Type=="bind") | .Source') || return 1
+          -  while IFS= read -r source; do
+          -    [ -n "$source" ] || continue
+          -    source=$(joomlaBackupFilesystemPath "$source") || return 1
+          -    for path in "$@"; do
+          -      if [[ "$source" = "$path" || "$source" = "$path/"* || "$path" = "$source/"* ]] || [ "$source" -ef "$path" ]; then
+          -        printf 'Database storage is still mounted by a running container; directory publication was refused.\n' >&2
+          -        return 1
+          -      fi
+          -    done
+          -  done <<< "$mounts"
+          +  for ((attempt=0; attempt<10; attempt++)); do
+          +    ids=$(docker ps --quiet) || return 1
+          +    containers=()
+          +    while IFS= read -r source; do [ -z "$source" ] || containers+=("$source"); done <<< "$ids"
+          +    [ "${#containers[@]}" -gt 0 ] || return 0
+          +    mounts=$(docker inspect "${containers[@]}") || return 1
+          +    [ -n "$mounts" ] || { printf 'Docker returned no container inspection; directory publication was refused.\n' >&2; return 1; }
+          +    mounts=$(printf '%s' "$mounts" | joomlaSiteJSON -r --argjson expected "${#containers[@]}" '
+          +      if type!="array" or length!=$expected or any(.[];
+          +        (.State.Running|type)!="boolean" or (.State.Restarting|type)!="boolean" or (.Mounts|type)!="array" or
+          +        any(.Mounts[]; .Type=="bind" and ((.Source|type)!="string" or .Source=="" or (.Source|test("[[:cntrl:]]")))))
+          +      then error("Incomplete container state or mounts; directory publication refused")
+          +      else .[] | select(.State.Running or .State.Restarting) | .Mounts[] | select(.Type=="bind") | .Source end') || return 1
+          +    blocked_source='' blocked_path=''
+          +    while IFS= read -r source; do
+          +      [ -n "$source" ] || continue
+          +      source=$(joomlaBackupFilesystemPath "$source") || return 1
+          +      for path in "$@"; do
+          +        if [[ "$source" = "$path" || "$source" = "$path/"* || "$path" = "$source/"* ]] || [ "$source" -ef "$path" ]; then
+          +          blocked_source="$source" blocked_path="$path"
+          +          break 2
+          +        fi
+          +      done
+          +    done <<< "$mounts"
+          +    [ -n "$blocked_source" ] || return 0
+          +    [ "$attempt" -ge 9 ] || sleep 0.2
+          +  done
+          +  printf 'Database storage is still mounted by a running container; directory publication was refused.\nLive bind: %s\nProtected directory: %s\n' \
+          +    "$blocked_source" "$blocked_path" >&2
+          +  return 1
+           }
+           
+           # Publish a verified, stopped bind candidate at its original project location.
+          PATCH
+          git apply --check "$RUNNER_TEMP/storage.patch"
+          git apply "$RUNNER_TEMP/storage.patch"
+          echo '680b394acb36b220dc0484f15f26288576778c543825335ce1e9743cd91446b5  src/octojoom' | sha256sum --check
+          bash -n src/octojoom
+          jq -n --rawfile content src/octojoom '{content:$content,encoding:"utf-8"}' > "$RUNNER_TEMP/blob.json"
+          blob=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/blobs" --input "$RUNNER_TEMP/blob.json" --jq .sha)
+          test "$blob" = 68ddf0456a9b83407fc7bde2cfd6aa9982608606
+          printf 'VERIFIED_SOURCE_BLOB=%s\n' "$blob"
