@@ -3548,98 +3548,18 @@ function saveContainerCompose() {
   fi
 }
 
-# Shared, bounded terminal panels. All text is data, never a printf format.
-# Callers own the terminal descriptor, alternate screen and cleanup traps.
-function terminalPanelText() {
-  LC_ALL=C tr -d '\000-\010\013-\037\177' | tr '\t' ' '
+# Run Compose exactly once with the selected environment. A failed operation must
+# never be retried without its credentials or hidden by later filesystem changes.
+# Keep Docker status text inside native whiptail controls. Never interpret its
+# escape sequences or allow resource output to inject gauge protocol frames.
+function actionProgressText() {
+  LC_ALL=C sed -E $'s/\033\\[[0-?]*[ -/]*[@-~]//g' |
+    LC_ALL=C tr -d '\000-\010\013-\037\177' | tr '\t' ' '
 }
 
-function terminalPanelBorder() {
-  local width="$1" left="$2" title="${3:-}" rule
-  printf -v rule '%*s' "$((width - 2))" ''
-  rule="${rule// /-}"
-  if [ -n "$title" ]; then
-    title=" ${title:0:width-4} "
-    rule="${title}${rule:${#title}}"
-  fi
-  printf '\r%*s+%s+\n' "$left" '' "$rule"
-}
-
-function terminalPanelLine() {
-  local width="$1" left="$2" text="$3" selected="${4:-false}"
-  printf '\r%*s| ' "$left" ''
-  [ "$selected" != true ] || printf '\033[7m'
-  printf '%-*.*s' "$((width - 4))" "$((width - 4))" "$text"
-  [ "$selected" != true ] || printf '\033[0m'
-  printf ' |\n'
-}
-
-# Compose operations have no honest overall percentage while pulling images or
-# waiting for dependencies. Animate activity instead of inventing a percentage.
-# This reads the same framed stream as whiptail, so pause/resume and termination
-# remain owned by the existing progress session.
-function actionProgressActivityDialog() {
-  local title="$1" tty_fd marker percent='' line text='' frame=0
-  local rows columns height width left top index span position bar state dimensions='' previous_dimensions=''
-  local -a lines=()
-  exec {tty_fd}<>/dev/tty || exit 1
-  trap 'tput sgr0 1>&"$tty_fd" 2>/dev/null || true; tput cnorm 1>&"$tty_fd" 2>/dev/null || true; tput rmcup 1>&"$tty_fd" 2>/dev/null || true; exec {tty_fd}>&-' EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' HUP TERM
-  tput smcup 1>&"$tty_fd" 2>/dev/null || true
-  tput civis 1>&"$tty_fd" 2>/dev/null || true
-  while IFS= read -r marker; do
-    [ "$marker" = XXX ] || continue
-    IFS= read -r percent || break
-    text=''
-    while IFS= read -r line && [ "$line" != XXX ]; do text+="$line"$'\n'; done
-    rows='' columns=''
-    read -r rows columns < <(stty size <&"$tty_fd" 2>/dev/null) || true
-    if [ -z "$rows" ]; then rows=$(tput lines 2>/dev/null) || rows=24; fi
-    if [ -z "$columns" ]; then columns=$(tput cols 2>/dev/null) || columns=80; fi
-    [[ "$rows" =~ ^[1-9][0-9]*$ ]] || rows=24
-    [[ "$columns" =~ ^[1-9][0-9]*$ ]] || columns=80
-    dimensions="$rows $columns"
-    if [ "$dimensions" != "$previous_dimensions" ]; then
-      tput clear 1>&"$tty_fd" 2>/dev/null || true
-      previous_dimensions="$dimensions"
-    fi
-    if [ "$rows" -lt 10 ] || [ "$columns" -lt 40 ]; then continue; fi
-    height=14; [ "$height" -le "$((rows - 2))" ] || height=$((rows - 2))
-    width=112; [ "$width" -le "$((columns - 2))" ] || width=$((columns - 2))
-    left=$(((columns - width) / 2)); top=$(((rows - height) / 2))
-    lines=()
-    while IFS= read -r line; do lines+=("$line"); done < <(printf '%s' "$text" | terminalPanelText | fold -s -w "$((width - 4))")
-    span=$((width - 10)); position=$((frame % (span - 3))); frame=$((frame + 1))
-    printf -v bar '%*s' "$span" ''
-    state='Activity (duration unknown)'
-    if [ "$percent" = 100 ]; then
-      bar="${bar// /#}"
-      state='Completed successfully'
-    else
-      bar="${bar:0:position}####${bar:position+4}"
-    fi
-    {
-      tput cup "$top" 0 2>/dev/null || true
-      terminalPanelBorder "$width" "$left" "$title"
-      for ((index=0; index<height-4; index++)); do
-        terminalPanelLine "$width" "$left" "${lines[index]:-}"
-      done
-      terminalPanelLine "$width" "$left" "$state"
-      terminalPanelLine "$width" "$left" "[ $bar ]"
-      terminalPanelBorder "$width" "$left"
-    } 1>&"$tty_fd"
-  done
-  # This function owns the dedicated renderer process. Exit while its local
-  # descriptor is still in scope so the EXIT trap can restore the terminal.
-  exit 0
-}
-
-# Keep the latest state of each resource, not repeated Waiting/Healthy messages.
-# Read only a bounded log tail and strip terminal controls before rendering it.
 function actionProgressLogSummary() {
   [ -f "${OCTOJOOM_PROGRESS_DIR:-}/compose-output" ] || return 0
-  tail -n 60 "$OCTOJOOM_PROGRESS_DIR/compose-output" 2>/dev/null | terminalPanelText | awk '
+  tail -n 60 "$OCTOJOOM_PROGRESS_DIR/compose-output" 2>/dev/null | actionProgressText | awk '
     NF {
       sub(/^[[:space:]]+/, "")
       key = ($1 ~ /^(Container|Network|Volume)$/ ? $1 " " $2 : $0)
@@ -3658,235 +3578,94 @@ function actionProgressLogSummary() {
     }'
 }
 
-# Only interactive lifecycle output is captured. Headless commands, logs, exec,
-# config, stdout consumers and exact Docker exit statuses retain their behavior.
+# Configuration accounts for the first completed stage. Container milestones
+# account for the next stage; only successful command completion reaches 100.
+# This measures service work, not elapsed time or HTTP/browser readiness.
+function actionProgressComposePercent() {
+  local total=0 completed=0 operation="${OCTOJOOM_COMPOSE_OPERATION:-}"
+  [ -f "$OCTOJOOM_PROGRESS_DIR/compose-count" ] || { printf '0\n'; return; }
+  IFS= read -r total 2>/dev/null < "$OCTOJOOM_PROGRESS_DIR/compose-count" || total=0
+  [[ "$total" =~ ^[1-9][0-9]*$ ]] || { printf '10\n'; return; }
+  if [ -f "$OCTOJOOM_PROGRESS_DIR/compose-output" ]; then
+    completed=$(awk -v operation="$operation" '
+      $1 == "Container" {
+        if ((operation ~ /^(up|start|restart)$/ && $3 ~ /^(Started|Running|Healthy)$/) ||
+            (operation == "stop" && $3 == "Stopped") ||
+            (operation == "down" && $3 == "Removed")) done[$2] = 1
+      }
+      END { for (name in done) count++; print count + 0 }
+    ' "$OCTOJOOM_PROGRESS_DIR/compose-output" 2>/dev/null) || completed=0
+  fi
+  [ "$completed" -le "$total" ] || completed=$total
+  printf '%s\n' "$((10 + 80 * completed / total))"
+}
+
+function composeProgressCanCapture() {
+  actionProgressActive || { [ -t 1 ] && [ -t 2 ]; }
+}
+
+# Only interactive lifecycle output is captured. Docker runs the requested
+# operation exactly once. The preliminary config query is read-only and does
+# not render credentials. A failed query never substitutes for command status.
 function runComposeActivity() {
   if ! actionProgressActive || [ "${OCTOJOOM_COMPOSE_CAPTURE:-false}" != true ]; then
     docker "$@"
     return $?
   fi
-  local result=0 log="$OCTOJOOM_PROGRESS_DIR/compose-output"
-  : >"$log" || return 1
-  COMPOSE_ANSI=never COMPOSE_PROGRESS=plain docker "$@" >"$log" 2>&1 || result=$?
-  # Successful lifecycle chatter has already been displayed live. Failures must
-  # retain all diagnostics, once, through the enclosing session's cleanup.
+  local result=0 log="$OCTOJOOM_PROGRESS_DIR/compose-output" total=0
+  : > "$log" || return 1
+  rm -f "$OCTOJOOM_PROGRESS_DIR/compose-count"
+  if COMPOSE_ANSI=never docker "${OCTOJOOM_COMPOSE_PREFIX[@]}" config --services \
+      > "$OCTOJOOM_PROGRESS_DIR/compose-services" 2> "$OCTOJOOM_PROGRESS_DIR/compose-config-errors"; then
+    total=$(awk 'NF {count++} END {print count + 0}' "$OCTOJOOM_PROGRESS_DIR/compose-services")
+    printf '%s\n' "$total" > "$OCTOJOOM_PROGRESS_DIR/compose-count.next"
+    mv -f "$OCTOJOOM_PROGRESS_DIR/compose-count.next" "$OCTOJOOM_PROGRESS_DIR/compose-count"
+  fi
+  COMPOSE_ANSI=never COMPOSE_PROGRESS=plain docker "$@" > "$log" 2>&1 || result=$?
   if [ "$result" -ne 0 ]; then
     cat "$log" >&2
   else
-    # Do not discard successful-command warnings together with routine status.
+    # Keep warnings, but do not replay routine Creating/Waiting/Started chatter.
     LC_ALL=C grep -E '(^|[[:space:]])(WARN(ING)?([[:space:]:\[]|$)|level=warning)' "$log" | awk '!seen[$0]++' >&2 || true
   fi
-  rm -f "$log"
+  rm -f "$log" "$OCTOJOOM_PROGRESS_DIR/compose-count" \
+    "$OCTOJOOM_PROGRESS_DIR/compose-services" "$OCTOJOOM_PROGRESS_DIR/compose-config-errors"
   return "$result"
-}
-
-# Return dimensions rather than retaining global terminal state across menus.
-function joomlaWebsiteMenuSize() {
-  local action_count="$1" terminal_fd="${2:-}" rows='' columns='' height width=112 information_height menu_height
-  if [ -n "$terminal_fd" ]; then
-    read -r rows columns < <(stty size <&"$terminal_fd" 2>/dev/null) || true
-  fi
-  if [ -z "$rows" ]; then rows=$(tput lines 2>/dev/null) || rows="${LINES:-24}"; fi
-  if [ -z "$columns" ]; then columns=$(tput cols 2>/dev/null) || columns="${COLUMNS:-80}"; fi
-  [[ "$rows" =~ ^[1-9][0-9]*$ ]] || rows=24
-  [[ "$columns" =~ ^[1-9][0-9]*$ ]] || columns=80
-  if [ "$rows" -lt 12 ] || [ "$columns" -lt 40 ] || [ "$action_count" -eq 0 ]; then
-    printf 'The website menu needs at least 40 columns and 12 rows. Enlarge the terminal and reopen Website Information.\n' >&2
-    return 1
-  fi
-  height=$((rows - 2))
-  [ "$height" -le "$((action_count + 17))" ] || height=$((action_count + 17))
-  [ "$columns" -ge 114 ] || width=$((columns - 2))
-  information_height=$(((height - 7) / 2))
-  [ "$information_height" -le 10 ] || information_height=10
-  menu_height=$((height - 7 - information_height))
-  [ "$menu_height" -le "$action_count" ] || menu_height=$action_count
-  # Small menus still use the remaining rows for the scrollable information.
-  height=$((information_height + menu_height + 7))
-  printf '%s %s %s %s %s %s\n' "$height" "$width" "$information_height" "$menu_height" "$rows" "$columns"
-}
-
-function joomlaWebsiteMenuCanRender() {
-  [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] &&
-    command -v tput >/dev/null 2>&1 && ( : </dev/tty >/dev/tty ) 2>/dev/null
-}
-
-# Decode keys without consuming the following key. Escape waits only briefly
-# for a terminal sequence; a standalone Escape retains whiptail's status 255.
-function readJoomlaWebsiteKey() {
-  local fd="$1" key='' sequence='' character='' status=0
-  IFS= read -r -s -n 1 -t 0.2 -u "$fd" key || status=$?
-  if [ "$status" -gt 128 ]; then return 1; fi
-  [ "$status" -eq 0 ] || return 2
-  case "$key" in
-    '') printf 'enter\n' ;;
-    $'\t') printf 'tab\n' ;;
-    $'\004') printf 'cancel\n' ;;
-    $'\033')
-      if ! IFS= read -r -s -n 1 -t 0.08 -u "$fd" character; then printf 'escape\n'; return 0; fi
-      sequence="$character"
-      if [[ "$character" = '[' || "$character" = O ]]; then
-        while [ "${#sequence}" -lt 8 ] && IFS= read -r -s -n 1 -t 0.08 -u "$fd" character; do
-          sequence+="$character"
-          [[ "$character" = [A-Za-z~] ]] && break
-        done
-      fi
-      case "$sequence" in
-        '[A'|OA) printf 'up\n' ;; '[B'|OB) printf 'down\n' ;;
-        '[H'|OH|'[1~'|'[7~') printf 'home\n' ;; '[F'|OF|'[4~'|'[8~') printf 'end\n' ;;
-        '[5~') printf 'pageup\n' ;; '[6~') printf 'pagedown\n' ;;
-        '[Z') printf 'tab\n' ;; *) printf 'ignore\n' ;;
-      esac
-      ;;
-    *) printf 'ignore\n' ;;
-  esac
-}
-
-# The frame reads only the local menu_* variables owned by the menu loop below.
-function joomlaWebsiteMenuFrame() {
-  local index row label left=$(((menu_columns - menu_width) / 2)) top=$(((menu_rows - menu_height) / 2))
-  tput cup "$top" 0 2>/dev/null || true
-  terminalPanelBorder "$menu_width" "$left" "Website Information | $menu_site"
-  label="Information ($((menu_info_top + 1))/${#menu_information[@]})"
-  [ "$menu_focus" != information ] || label="[ $label ]"
-  terminalPanelLine "$menu_width" "$left" "$label"
-  for ((index=0; index<menu_information_height; index++)); do
-    terminalPanelLine "$menu_width" "$left" "${menu_information[menu_info_top+index]:-}"
-  done
-  label="Actions ($((menu_selected + 1))/$menu_action_count)"
-  [ "$menu_focus" != actions ] || label="[ $label ]"
-  terminalPanelLine "$menu_width" "$left" "$label"
-  for ((index=0; index<menu_action_height; index++)); do
-    row=$((menu_top + index))
-    if [ "$row" -lt "$menu_action_count" ]; then
-      printf -v label '%-18s %s' "${menu_actions[row*2]}" "${menu_actions[row*2+1]}"
-    else label=''; fi
-    if [ "$menu_focus" = actions ] && [ "$row" -eq "$menu_selected" ]; then
-      terminalPanelLine "$menu_width" "$left" "$label" true
-    else
-      terminalPanelLine "$menu_width" "$left" "$label"
-    fi
-  done
-  terminalPanelLine "$menu_width" "$left" ''
-  terminalPanelLine "$menu_width" "$left" 'Tab: actions/information | Up/Down: navigate'
-  terminalPanelLine "$menu_width" "$left" 'Enter: select | Esc: back | PgUp/PgDn: scroll'
-  terminalPanelBorder "$menu_width" "$left"
-}
-
-function joomlaWebsiteMenuLoop() {
-  local menu_site="$1" details="$2" menu_fd="$3"
-  shift 3
-  local -a menu_actions=("$@") menu_information=()
-  local menu_action_count=$(($# / 2)) menu_selected=0 menu_top=0 menu_info_top=0 menu_focus=actions
-  local menu_height menu_width menu_information_height menu_action_height menu_rows menu_columns
-  local dimensions previous_dimensions='' key status delta limit action_limit line redraw=true
-  menu_site=$(printf '%s' "$menu_site" | terminalPanelText)
-  while true; do
-    dimensions=$(joomlaWebsiteMenuSize "$menu_action_count" "$menu_fd") || return 1
-    if [ "$dimensions" != "$previous_dimensions" ]; then
-      read -r menu_height menu_width menu_information_height menu_action_height menu_rows menu_columns <<< "$dimensions"
-      menu_information=()
-      while IFS= read -r line; do menu_information+=("$line"); done < <(printf '%s\n' "$details" | terminalPanelText | fold -s -w "$((menu_width - 4))")
-      previous_dimensions="$dimensions"
-      tput clear 1>&"$menu_fd" 2>/dev/null || true
-      redraw=true
-    fi
-    limit=$((${#menu_information[@]} - menu_information_height))
-    [ "$limit" -ge 0 ] || limit=0
-    [ "$menu_info_top" -le "$limit" ] || menu_info_top=$limit
-    action_limit=$((menu_action_count - menu_action_height))
-    [ "$action_limit" -ge 0 ] || action_limit=0
-    [ "$menu_top" -le "$action_limit" ] || menu_top=$action_limit
-    [ "$menu_selected" -ge "$menu_top" ] || menu_top=$menu_selected
-    [ "$menu_selected" -lt "$((menu_top + menu_action_height))" ] || menu_top=$((menu_selected - menu_action_height + 1))
-    if "$redraw"; then joomlaWebsiteMenuFrame 1>&"$menu_fd"; redraw=false; fi
-    status=0
-    key=$(readJoomlaWebsiteKey "$menu_fd") || status=$?
-    [ "$status" -ne 2 ] || return 1
-    [ "$status" -eq 0 ] || continue
-    redraw=true
-    case "$key" in
-      tab) if [ "$menu_focus" = actions ]; then menu_focus=information; else menu_focus=actions; fi ;;
-      escape) return 255 ;;
-      cancel) return 1 ;;
-      enter)
-        if [ "$menu_focus" = actions ]; then printf '%s\n' "${menu_actions[menu_selected*2]}"; return 0; fi
-        menu_focus=actions
-        ;;
-      up|down|pageup|pagedown|home|end)
-        delta=1
-        if [ "$menu_focus" = actions ]; then
-          [[ "$key" != page* ]] || delta=$menu_action_height
-          case "$key" in
-            up|pageup) menu_selected=$((menu_selected - delta)) ;;
-            down|pagedown) menu_selected=$((menu_selected + delta)) ;;
-            home) menu_selected=0 ;; end) menu_selected=$((menu_action_count - 1)) ;;
-          esac
-          [ "$menu_selected" -ge 0 ] || menu_selected=0
-          [ "$menu_selected" -lt "$menu_action_count" ] || menu_selected=$((menu_action_count - 1))
-        else
-          [[ "$key" != page* ]] || delta=$menu_information_height
-          case "$key" in
-            up|pageup) menu_info_top=$((menu_info_top - delta)) ;;
-            down|pagedown) menu_info_top=$((menu_info_top + delta)) ;;
-            home) menu_info_top=0 ;; end) menu_info_top=$limit ;;
-          esac
-          [ "$menu_info_top" -ge 0 ] || menu_info_top=0
-        fi
-        ;;
-      *) redraw=false ;;
-    esac
-  done
-}
-
-function showJoomlaWebsiteTerminal() {
-  (
-    local menu_fd saved_terminal status=0
-    exec {menu_fd}<>/dev/tty || exit 1
-    saved_terminal=$(stty -g <&"$menu_fd") || exit 1
-    trap 'stty "$saved_terminal" <&"$menu_fd" 2>/dev/null || true; tput sgr0 1>&"$menu_fd" 2>/dev/null || true; tput cnorm 1>&"$menu_fd" 2>/dev/null || true; tput rmcup 1>&"$menu_fd" 2>/dev/null || true; exec {menu_fd}>&-' EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' HUP TERM
-    stty -echo -icanon min 1 time 0 <&"$menu_fd" || exit 1
-    tput smcup 1>&"$menu_fd" 2>/dev/null || true
-    tput civis 1>&"$menu_fd" 2>/dev/null || true
-    joomlaWebsiteMenuLoop "$1" "$2" "$menu_fd" "${@:3}" || status=$?
-    exit "$status"
-  )
-}
-
-# Run Compose exactly once with the selected environment. A failed operation must
-# never be retried without its credentials or hidden by later filesystem changes.
-function composeProgressCanCapture() {
-  actionProgressActive || { [ -t 1 ] && [ -t 2 ]; }
 }
 
 function runComposeProgress() {
   local compose_file="$1" argument operation='' message='' skip_value=false
+  local -a OCTOJOOM_COMPOSE_PREFIX=()
   shift
+  # Only the command position identifies an operation; names/paths are data.
   for argument in "$@"; do
-    if "$skip_value"; then skip_value=false; continue; fi
+    if "$skip_value"; then
+      skip_value=false
+      OCTOJOOM_COMPOSE_PREFIX+=("$argument")
+      continue
+    fi
     case "$argument" in
       compose) ;;
-      --file|-f|--env-file|--project-directory|--project-name|-p|--profile|--ansi|--progress|--parallel) skip_value=true;;
+      --file|-f|--env-file|--project-directory|--project-name|-p|--profile|--ansi|--progress|--parallel) skip_value=true ;;
       --file=*|--env-file=*|--project-directory=*|--project-name=*|--profile=*|--ansi=*|--progress=*|--parallel=*|--compatibility|--all-resources) ;;
-      up|start|stop|restart|down|pull|build) operation="$argument"; break;;
-      *) break;;
+      up|start|stop|restart|down|pull|build) operation="$argument"; break ;;
+      *) break ;;
     esac
+    OCTOJOOM_COMPOSE_PREFIX+=("$argument")
   done
   case "$operation" in
-    up) message='Preparing images and starting the selected services';;
-    start) message='Starting the selected services';;
-    stop) message='Stopping the selected services safely';;
-    restart) message='Restarting the selected services';;
-    down) message='Stopping and removing the selected containers';;
-    pull) message='Downloading the selected container images';;
-    build) message='Building the selected container images';;
-    *) docker "$@"; return $?;;
+    up) message='Preparing images and starting the selected services' ;;
+    start) message='Starting the selected services' ;;
+    stop) message='Stopping the selected services safely' ;;
+    restart) message='Restarting the selected services' ;;
+    down) message='Stopping and removing the selected containers' ;;
+    pull) message='Downloading the selected container images' ;;
+    build) message='Building the selected container images' ;;
+    *) docker "$@"; return $? ;;
   esac
-  # A nested operation keeps its parent's real stage percentage; a standalone
-  # Compose operation uses activity because Docker provides no overall total.
-  local OCTOJOOM_PROGRESS_MODE=activity OCTOJOOM_COMPOSE_CAPTURE=false
+  # Nested operations keep the outer renderer and its measured stage.
+  local OCTOJOOM_PROGRESS_MODE=compose OCTOJOOM_COMPOSE_CAPTURE=false
+  local OCTOJOOM_COMPOSE_OPERATION="$operation"
   if composeProgressCanCapture; then OCTOJOOM_COMPOSE_CAPTURE=true; fi
   runActionProgress 'Docker Compose' "$message
 Configuration: $compose_file" runComposeActivity "$@"
@@ -11531,10 +11310,16 @@ function runJoomlaSiteAction() {
     local site="$1" action="$2" status=0
     local VDM_CONTAINER="$site" VDM_CONTAINER_TYPE=joomla VDM_ACTION=''
     readJoomlaSiteFacts "$site" || exit 1
-    if [ "$VDM_SITE_ENABLED" != enabled ] && [ "$action" != enable ]; then
-      printf 'Website %s is not enabled; enable it first before using %s.\n' "$site" "$action" >&2
-      exit 1
-    fi
+    # Disabled sites still have files, configuration, backups and tools. Guard
+    # only service lifecycle actions, including selections from a stale menu.
+    case "$action" in
+      start|stop|restart|redeploy|disable)
+        if [ "$VDM_SITE_ENABLED" != enabled ]; then
+          printf 'Website %s is not enabled; enable it first before using %s.\n' "$site" "$action" >&2
+          exit 1
+        fi
+        ;;
+    esac
     # Variables are read by the feature action handlers.
     # shellcheck disable=SC2034
     case "$action" in
@@ -11581,23 +11366,35 @@ function runJoomlaSiteAction() {
   )
 }
 
-# Keep information and actions visible together, with actions focused first.
-# A controlling terminal uses the Bash two-pane keyboard loop; callers without
-# one retain the existing whiptail dialog and its positive, bounded dimensions.
+# Give the native, focusable information scroller a bounded share of the window.
+# With compact buttons, whiptail needs seven rows besides its text and menu.
+# All dimensions must be positive: automatic sizing gives the full report
+# priority over the actions and can leave only one menu entry visible.
 function showJoomlaWebsiteMenu() {
   local site="$1" details="$2"
   shift 2
-  local dimensions height width information_height menu_height rows columns
-  dimensions=$(joomlaWebsiteMenuSize "$(($# / 2))") || return 1
-  read -r height width information_height menu_height rows columns <<< "$dimensions"
-  if joomlaWebsiteMenuCanRender; then
-    showJoomlaWebsiteTerminal "$site" "$details" "$@"
-    return $?
+  local rows columns height width=112 information_height menu_height
+  local action_count=$(($# / 2))
+  rows=$(tput lines 2>/dev/null) || rows="${LINES:-24}"
+  columns=$(tput cols 2>/dev/null) || columns="${COLUMNS:-80}"
+  [[ "$rows" =~ ^[1-9][0-9]*$ ]] || rows=24
+  [[ "$columns" =~ ^[1-9][0-9]*$ ]] || columns=80
+  if [ "$rows" -lt 12 ] || [ "$columns" -lt 40 ] || [ "$action_count" -eq 0 ]; then
+    printf 'The website menu needs at least 40 columns and 12 rows. Enlarge the terminal and reopen Website Information.\n' >&2
+    return 1
   fi
-  # Retain the existing dialog fallback for callers without a controlling tty.
+  height=$((rows - 2))
+  [ "$height" -le "$((action_count + 17))" ] || height=$((action_count + 17))
+  [ "$columns" -ge 114 ] || width=$((columns - 2))
+  information_height=$(((height - 7) / 2))
+  [ "$information_height" -le 10 ] || information_height=10
+  menu_height=$((height - 7 - information_height))
+  [ "$menu_height" -le "$action_count" ] || menu_height=$action_count
+  # --scrolltext focuses the wrapped report first. Tab moves to the action list;
+  # Shift+Tab returns to the report. Keep the complete report for vertical scrolling.
   whiptail --menu "$details" "$height" "$width" "$menu_height" --scrolltext \
     --title "Website Information | ${site}" \
-    --backtitle "${BACK_TITLE} | Tab: actions/information | Up/Down: scroll" \
+    --backtitle "${BACK_TITLE} | Tab: information/actions | Up/Down: scroll" \
     --ok-button Select --cancel-button Back \
     "$@" 3>&2 2>&1 1>&3
 }
@@ -11624,30 +11421,33 @@ function showJoomlaWebsiteInformation() {
       # Facts and flags stay inside this menu invocation; site ENV is never loaded.
       readJoomlaSiteFacts "$site" || break
       details=$(showJoomlaSiteFacts)
-      if [ "$VDM_SITE_ENABLED" != enabled ]; then
-        actions=(back '<-- Return to website list' enable 'Enable website')
+      actions=(back '<-- Return to website list')
+      if [ "$VDM_SITE_ENABLED" = enabled ]; then
+        actions+=(start 'Start website services' stop 'Stop website services'
+          restart 'Restart website services' redeploy 'Recreate website services using current configuration'
+          disable 'Disable website')
       else
-        actions=(back '<-- Return to website list' start 'Start website services' stop 'Stop website services' restart 'Restart website services' redeploy 'Recreate website services using current configuration')
-        actions+=(disable 'Disable website')
-        actions+=(logs 'Read logs')
-        [ -z "$VDM_SITE_URL" ] || actions+=(website 'Open website' admin 'Open administrator')
-        [ -z "$VDM_SITE_VIEWER_URL" ] || actions+=(viewer 'Open database viewer')
-        [ -z "$VDM_SITE_MAIL_URL" ] || actions+=(mail 'Open mail viewer')
-        if [ -n "$VDM_SITE_HOST_PATH" ]; then
-          actions+=(directory 'Open website directory' permissions 'Repair website file permissions')
-        elif [ -n "$VDM_SITE_SERVICE" ]; then actions+=(files 'Open website container shell'); fi
-        isFunc joomla__TRuST__php && actions+=(php-switch 'Change PHP version' php-settings 'Change PHP settings')
-        isFunc joomla__TRuST__webserver && actions+=(webserver 'Change webserver')
-        isFunc joomla__TRuST__docroot && actions+=(docroot 'Change document root')
-        isFunc joomla__TRuST__persistence && actions+=(persistence 'Change data persistence')
-        isFunc joomla__TRuST__align && actions+=(align 'Update this website configuration')
-        isFunc showJoomlaDatabaseTools && actions+=(database 'Database tools')
-        isFunc showJoomlaDatabaseChange && actions+=(database-change 'Change database')
-        isFunc showJoomlaBackups && actions+=(backups 'Backups and restore points')
-        actions+=(ssl 'Connection / SSL')
-        actions+=(clone 'Clone website' migrate 'Migrate website' delete 'Delete website configuration')
-        if isExpert; then actions+=(edit 'Edit Compose configuration' env 'View or edit environment and credentials'); fi
+        actions+=(enable 'Enable website')
       fi
+      # Settings and maintenance remain available independently of service state.
+      actions+=(logs 'Read logs')
+      [ -z "$VDM_SITE_URL" ] || actions+=(website 'Open website' admin 'Open administrator')
+      [ -z "$VDM_SITE_VIEWER_URL" ] || actions+=(viewer 'Open database viewer')
+      [ -z "$VDM_SITE_MAIL_URL" ] || actions+=(mail 'Open mail viewer')
+      if [ -n "$VDM_SITE_HOST_PATH" ]; then
+        actions+=(directory 'Open website directory' permissions 'Repair website file permissions')
+      elif [ -n "$VDM_SITE_SERVICE" ]; then actions+=(files 'Open website container shell'); fi
+      isFunc joomla__TRuST__php && actions+=(php-switch 'Change PHP version' php-settings 'Change PHP settings')
+      isFunc joomla__TRuST__webserver && actions+=(webserver 'Change webserver')
+      isFunc joomla__TRuST__docroot && actions+=(docroot 'Change document root')
+      isFunc joomla__TRuST__persistence && actions+=(persistence 'Change data persistence')
+      isFunc joomla__TRuST__align && actions+=(align 'Update this website configuration')
+      isFunc showJoomlaDatabaseTools && actions+=(database 'Database tools')
+      isFunc showJoomlaDatabaseChange && actions+=(database-change 'Change database')
+      isFunc showJoomlaBackups && actions+=(backups 'Backups and restore points')
+      actions+=(ssl 'Connection / SSL')
+      actions+=(clone 'Clone website' migrate 'Migrate website' delete 'Delete website configuration')
+      if isExpert; then actions+=(edit 'Edit Compose configuration' env 'View or edit environment and credentials'); fi
       choice=$(showJoomlaWebsiteMenu "$site" "$details" "${actions[@]}") || break
       [ "$choice" != back ] || break
       status=0
@@ -12385,18 +12185,24 @@ function actionProgressResume() {
 }
 
 function actionProgressDialog() {
-  if [ "${OCTOJOOM_PROGRESS_MODE:-stages}" = activity ]; then
-    actionProgressActivityDialog "$1"
-  fi
-  # newt sizes the textbox from the initial text. Reserve its rows now or all
-  # subsequent elapsed/status lines will be clipped to the initial single row.
+  local rows columns height=14 width=112
+  rows=$(tput lines 2>/dev/null) || rows=24
+  columns=$(tput cols 2>/dev/null) || columns=80
+  [[ "$rows" =~ ^[1-9][0-9]*$ ]] || rows=24
+  [[ "$columns" =~ ^[1-9][0-9]*$ ]] || columns=80
+  [ "$rows" -ge 12 ] && [ "$columns" -ge 40 ] || return 1
+  [ "$height" -le "$((rows - 2))" ] || height=$((rows - 2))
+  [ "$width" -le "$((columns - 2))" ] || width=$((columns - 2))
+  # Reserve text rows up front: newt otherwise clips later updates to one line.
+  # Use the same native renderer and NEWT_COLORS as every other OctoJoom screen.
   exec whiptail --title "$1" --backtitle "${BACK_TITLE:-}" \
-    --gauge $'Preparing...\n \n \n \n \n \n \n \n ' 12 112 0 >/dev/tty 2>/dev/tty
+    --gauge $'Preparing...\n \n \n \n \n \n \n \n \n \n ' "$height" "$width" 0 >/dev/tty 2>/dev/tty
 }
 
 function actionProgressRender() {
   local title="$1" gauge_pid='' sleeper='' percent=0 message='' elapsed=0
   local started=$SECONDS outcome='' activity='' frame=0 spinner=$'|/-\\'
+  local observed=0 compose_percent=0
   trap '
     [ -z "$sleeper" ] || { kill "$sleeper" 2>/dev/null || true; wait "$sleeper" 2>/dev/null || true; }
     exec 9>&-
@@ -12430,6 +12236,11 @@ function actionProgressRender() {
       } <"$OCTOJOOM_PROGRESS_DIR/state"
       elapsed=$((SECONDS - started))
       activity=$(actionProgressLogSummary)
+      if [ "${OCTOJOOM_PROGRESS_MODE:-stages}" = compose ]; then
+        observed=$(actionProgressComposePercent)
+        [ "$observed" -le "$compose_percent" ] || compose_percent=$observed
+        percent=$compose_percent
+      fi
       printf 'XXX\n%s\n%s\n\n%s\nElapsed: %ss. %s Working; please wait.\nXXX\n' \
         "$percent" "${message:0:220}" "$activity" "$elapsed" "${spinner:frame%4:1}" >&9 || break
       frame=$((frame + 1))

@@ -112,7 +112,7 @@ run_case() {
 
 # Native whiptail starts in its scrollable information textbox. Preserve that
 # behaviour rather than replacing the UI to force an unsupported focus order.
-run_case menu-tab '\t\033[B\n' 'RESULT=enable STATUS=0' --menu
+run_case menu-tab '\t\033[B\r' 'RESULT=enable STATUS=0' --menu
 run_case menu-escape '\033' 'RESULT= STATUS=255' --menu
 run_case progress-0 '\033[5~' 'PROGRESS_STATUS=0' --gauge
 run_case progress-23 '' 'PROGRESS_STATUS=23' --gauge

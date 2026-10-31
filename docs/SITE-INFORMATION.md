@@ -7,27 +7,33 @@ no registration, conversion or additional project record is needed.
 
 ## Information and actions
 
-The selected website opens with the **actions focused**. The information remains
-visible above the actions and shows up to ten lines at a time. On shorter
-terminals it uses less space so the actions remain accessible.
+The selected website opens with focus in its information area. This area shows
+up to ten lines at a time; on shorter terminals it uses less space so the actions
+remain visible underneath. The complete report is available by scrolling.
 
-- **Up/Down** selects an action immediately; **Enter** runs the selected action.
-- **Tab** or **Shift+Tab** switches between actions and information. Arrows,
-  **Page Up/Page Down**, **Home**, and **End** navigate the focused area only.
-- **Enter** in the information area returns focus to the actions without running
-  anything. **Back** or **Escape** leaves the website without running an action.
+- **Up/Down** or **Page Up/Page Down** scroll the information.
+- **Tab** moves from the information to the actions. Use **Up/Down** to choose an
+  action, then **Enter** to select it.
+- **Shift+Tab** returns from the actions to the information. Further Tab presses
+  cycle through the **Select** and **Back** buttons using normal whiptail behavior.
+- **Back** or **Escape** leaves the selected website without running an action.
 
-The terminal panel uses the usual maximum width of 112 columns and fits narrower
-terminals. Long paths, URLs and image identifiers wrap in the information area;
-the complete report remains available by scrolling. Its length does not reduce
-the action-list height. A 24-row terminal provides eight action rows when the
-site has that many actions. The panel follows terminal resizing and preserves
-its selection and separate information scroll position.
+The dialog uses the usual 112-column width when space permits and fits inside
+narrower terminals. Long paths, URLs and image identifiers wrap within the
+information area; the report is neither shortened nor horizontally scrolled.
+Its length does not reduce the action-list height. A 24-row terminal provides
+eight action rows; taller terminals show more. The remaining actions are reached
+by scrolling the list.
 
-The interactive panel uses Bash and the existing terminal tools, without an
-additional UI dependency. It restores the terminal and cursor when closed or
-interrupted. The existing bounded whiptail dialog remains the fallback for
-callers without a controlling terminal.
+The layout is recalculated whenever the website dialog opens or refreshes after
+an action. Whiptail does not rearrange an already-open dialog when the terminal
+is resized; close and reopen the website details after resizing.
+
+This uses the existing whiptail controls. Some whiptail/newt versions draw an
+incomplete right border around a menu with scrollable text, and Debian/Ubuntu
+builds can also hide the information scrollbar
+([newt issue 945320](https://bugs.debian.org/945320)). The text still wraps and
+scrolls with the keys above, and the action-list scrollbar remains available.
 
 ## Website state and details
 
@@ -39,14 +45,14 @@ copies and incorrect links are reported as invalid. Running service state and
 health are inspected separately. An unavailable Docker daemon is reported as
 unavailable, not stopped. Viewing information never starts or redeploys a site.
 
-A **disabled** website's action menu contains only **Enable** and **Back**.
-Enable the site before using its settings or service actions. Once enabled, the
-normal actions become available. **Stop** leaves the site enabled; **Disable**
-returns its menu to Enable and Back. The shared lifecycle handler also rejects
-start, stop, restart, and redeploy for disabled sites, including direct CLI
-requests. The menu dispatcher rechecks state before executing an action so a
-stale menu selection cannot bypass this restriction. Invalid enabled links are
-not treated as enabled.
+A disabled website retains its configuration, files, logs, database tools,
+backups, SSL settings, cloning, migration and deletion actions. Within the
+service-control group it offers **Enable**, not Start, Stop, Restart, Redeploy
+or Disable. Enabling restores those service controls. Stopping an enabled site
+leaves it enabled; disabling does not hide its settings or maintenance tools.
+The shared lifecycle handler and menu dispatcher reject service actions against
+a disabled site, including stale selections. Individual maintenance handlers
+retain their own prerequisites and safety checks.
 
 The details show the configured and actual running image, measured PHP version,
 installed Joomla version, services, document root, storage, Compose and effective
@@ -94,8 +100,8 @@ octojoom --type joomla --task logs --container demo.example.test --service jooml
 
 `start` runs Compose `up -d`; `stop` stops this site's services; `restart` restarts
 its current containers; `redeploy` recreates them from current configuration.
-These commands require an enabled site, preserve that enabled state, and do not
-remove volumes or implicitly pull newer images. Existing `up` and `down` tasks still operate on all
+These commands require an enabled site, preserve that state and do not remove volumes or
+implicitly pull newer images. Existing `up` and `down` tasks still operate on all
 enabled sites. Enable/disable retain their original platform behavior; a failed
 enable may leave the site enabled even though services could not start.
 
@@ -124,18 +130,28 @@ Scoped document-root settings are resolved under the actual mounted root.
 
 ## Lifecycle progress
 
-Interactive Compose operations show a moving **activity** indicator, elapsed
-time, and recent resource states while Docker is working. Pulls and dependency
-waits have no reliable overall duration, so this display does not invent a
-percentage. Repeated statuses for a resource replace its previous displayed
-status rather than accumulating. Operations with measured stages keep their
-existing stage progress and share one renderer with nested Compose commands.
+Interactive Compose operations use the same native whiptail gauge and theme as
+other OctoJoom screens. The screen shows live, deduplicated container states and
+elapsed time; it does not switch to an ASCII panel. Text rows are reserved when
+the gauge opens so later updates remain visible.
 
-Routine successful Compose output is not replayed after the panel closes.
-Warnings are retained, and failures preserve the native exit status and full
-captured diagnostics. Cancellation also preserves captured diagnostics and
-cleans up the private temporary files and terminal. Noninteractive commands,
-redirected output, and config/log/exec commands retain their normal streams.
+A read-only `config --services` query establishes the configured service count.
+The gauge advances after configuration is read and as containers report the
+requested lifecycle milestones (started/running, stopped, or removed). This is
+service-work progress, not a time estimate or a promise of HTTP readiness. It
+may wait at a stage while images download or dependencies become healthy.
+Only a successful Compose exit reaches 100%. Uncounted operations still show
+live status, and nested operations retain the enclosing action's stage.
+
+The requested lifecycle operation runs once. Routine successful status output
+is not replayed after the gauge closes. Warnings remain visible; errors and
+cancellation preserve the full captured diagnostics and native exit status.
+Headless and redirected streams retain their original behavior.
+
+The website information screen deliberately retains stock whiptail's scrollable
+textbox and Tab order, including its initial information focus. The custom
+initial-focus renderer has been removed, not restyled. There is no new UI
+framework, keyboard emulator or runtime dependency.
 
 ## Read and isolation rules
 
@@ -161,12 +177,12 @@ and unhealthy state, named volumes, installed-version filtering, nested roots,
 selected lifecycle behavior, native failures, exported-variable isolation,
 menu return navigation, JSON redaction and structured custom layouts.
 
-Additional regression suites cover disabled action restrictions
-(`site-action-state.bats`), Compose activity and output handling
-(`compose-activity.bats`), and actions-first keyboard navigation
-(`site-keyboard.bats`). The Linux `tests/integration/website-terminal.sh` check
-uses a real pseudo-terminal to verify keyboard focus, terminal restoration, and
-successful/failed progress cleanup without starting Docker.
+`native-website-ui.bats` covers native dialog selection and disabled-site
+settings; `site-action-state.bats` covers lifecycle guards;
+`compose-activity.bats` covers live status, stage progress, output and failure
+handling. `tests/integration/website-terminal.sh` uses real whiptail under a Linux
+pseudo-terminal (only Docker is simulated), including Tab, Escape, progress
+rendering, suppression of keyboard echo, and terminal restoration.
 
 Portable tests use sandboxed Docker stand-ins. They do not establish real route
 reachability, administrator login, browser launch support or platform-specific
