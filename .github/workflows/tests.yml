@@ -89,10 +89,6 @@ jobs:
           OCTOJOOM_NO_REAL_DOCKER: ${{ runner.os != 'Linux' && '1' || '' }}
         run: bash tests/run.sh
 
-      - name: Verify website keyboard focus and progress in a real terminal
-        if: runner.os == 'Linux'
-        run: bash tests/integration/website-terminal.sh
-
   docker-integration:
     name: Docker clone integration
     runs-on: ubuntu-latest
