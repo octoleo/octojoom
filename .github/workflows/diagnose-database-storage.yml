@@ -1,0 +1,60 @@
+name: Diagnose database storage
+on:
+  push:
+    branches: [fix/website-menu-initial-focus]
+    paths: [.github/workflows/diagnose-database-storage.yml]
+permissions:
+  contents: read
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reproduce storage publication with real PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed '/^PHASE=real-joomla-installation/,$d' tests/integration/database-backups.sh > tests/integration/pg-diagnostic.sh
+          cat >> tests/integration/pg-diagnostic.sh <<'SH'
+          eval "$(declare -f joomlaDatabaseStorageStopped | sed '1s/joomlaDatabaseStorageStopped/joomlaDatabaseStorageStoppedOriginal/')"
+          joomlaDatabaseStorageStopped() {
+            local result=0 ids
+            joomlaDatabaseStorageStoppedOriginal "$@" || result=$?
+            if [ "$result" -ne 0 ]; then
+              printf 'Storage guard rejected these paths:\n' >&2
+              printf '  %s\n' "$@" >&2
+              ids=$(docker ps -q)
+              if [ -n "$ids" ]; then
+                printf '%s\n' "$ids" | xargs docker inspect | jq '[.[]|{Id,Name,State:{Status:.State.Status,Running:.State.Running},Mounts}]' >&2
+              fi
+            fi
+            return "$result"
+          }
+          PHASE=diagnostic-source-installation
+          create_site "$SOURCE_KEY" source default
+          write_sql
+          seed_site "$SOURCE"
+          assert_state "$SOURCE"
+          PHASE=diagnostic-independent-database-change
+          clone_target="dbclone.$DOMAIN"
+          request database --container "$SOURCE" --action change --engine "$ENGINE" --database-image "$CHANGE_IMAGE" \
+            --data-mode clone --confirm true --pre-backup false --key "dbclone$RUN_ID" \
+            --domain "$DOMAIN" --sub-domain dbclone --enable true --secure false
+          assert_application "$clone_target"
+          assert_state "$clone_target"
+          [ "$(database_version "$clone_target")" = "$TARGET_VERSION" ]
+          printf 'Diagnostic database clone succeeded.\n'
+          SH
+          OCTOJOOM_DB_TEST_ENGINE=postgres timeout --signal=TERM --kill-after=30s 12m bash tests/integration/pg-diagnostic.sh
+      - name: Export exact checkout for local regression verification
+        if: always()
+        run: git archive --format=tar.gz HEAD > source.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: database-diagnostic-source
+          path: source.tar.gz
+          retention-days: 1
