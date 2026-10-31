@@ -1,10 +1,10 @@
-name: Prepare native focus verification
+name: Prepare native focus implementation
 on:
   push:
     branches: [fix/website-menu-initial-focus]
     paths: [.github/workflows/focus-checkout.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
   prepare:
     runs-on: ubuntu-24.04
@@ -13,21 +13,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Export current source and native test dependencies
+      - name: Verify and prepare the exact focus-only source
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y whiptail
-          mkdir -p "$RUNNER_TEMP/focus/native"
-          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/focus/source.tar.gz"
-          cp /usr/bin/whiptail "$RUNNER_TEMP/focus/native/"
-          ldd /usr/bin/whiptail | awk '/=> \/.*lib(newt|popt)/ {print $3}' | while IFS= read -r library; do cp -L "$library" "$RUNNER_TEMP/focus/native/"; done
-          tar -czf "$RUNNER_TEMP/focus/native.tar.gz" -C "$RUNNER_TEMP/focus/native" .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: native-focus-checkout
-          path: |
-            ${{ runner.temp }}/focus/source.tar.gz
-            ${{ runner.temp }}/focus/native.tar.gz
-          retention-days: 1
+          test "$(git hash-object src/octojoom)" = adbe00800249b229217ef8ed615feb00f7534e27
+          git apply --check .github/website-focus.patch
+          git apply .github/website-focus.patch
+          echo '7a131a254e6eea0c05568a8a6ac96bf255dd6bd0d7284c8f84763c90e451dc18  src/octojoom' | sha256sum --check
+          bash -n src/octojoom
+          git diff --check
+          jq -n --rawfile content src/octojoom '{content:$content,encoding:"utf-8"}' > "$RUNNER_TEMP/source.json"
+          blob=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/blobs" --input "$RUNNER_TEMP/source.json" --jq .sha)
+          test "$blob" = ec2f5287a2ab6a08ecbe85f9a2e541a9c2f24dd2
+          printf 'SOURCE_BLOB=%s\n' "$blob"
