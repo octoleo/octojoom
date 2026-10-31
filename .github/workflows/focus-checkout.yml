@@ -1,0 +1,33 @@
+name: Prepare native focus verification
+on:
+  push:
+    branches: [fix/website-menu-initial-focus]
+    paths: [.github/workflows/focus-checkout.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export current source and native test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y whiptail
+          mkdir -p "$RUNNER_TEMP/focus/native"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/focus/source.tar.gz"
+          cp /usr/bin/whiptail "$RUNNER_TEMP/focus/native/"
+          ldd /usr/bin/whiptail | awk '/=> \/.*lib(newt|popt)/ {print $3}' | while IFS= read -r library; do cp -L "$library" "$RUNNER_TEMP/focus/native/"; done
+          tar -czf "$RUNNER_TEMP/focus/native.tar.gz" -C "$RUNNER_TEMP/focus/native" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-focus-checkout
+          path: |
+            ${{ runner.temp }}/focus/source.tar.gz
+            ${{ runner.temp }}/focus/native.tar.gz
+          retention-days: 1
