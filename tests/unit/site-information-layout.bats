@@ -47,7 +47,7 @@ read_website_menu() {
   done
 }
 
-@test "website menu reserves visible actions and bounded information at large and small terminal sizes" {
+@test "website menu reserves visible actions and a bounded non-focusable summary at large and small terminal sizes" {
   local dimensions information_rows
   for dimensions in '43 190' '37 168' '24 112' '24 80'; do
     read -r LAYOUT_ROWS LAYOUT_COLUMNS <<< "$dimensions"
@@ -62,13 +62,13 @@ read_website_menu() {
     [ "$MENU_WIDTH" -le 112 ]
     [ "$MENU_ROWS" -ge 8 ]
     information_rows=$((MENU_HEIGHT - MENU_ROWS - 7))
-    [ "$information_rows" -ge 1 ] && [ "$information_rows" -le 10 ]
-    assert_equal "$MENU_SCROLL" true
+    [ "$information_rows" -ge 1 ] && [ "$information_rows" -le 4 ]
+    assert_equal "$MENU_SCROLL" false
     [[ "$MENU_HINT" == *Tab* && "$MENU_HINT" == *Up/Down* ]]
   done
 }
 
-@test "long website reports and unbroken paths retain every character without reducing action space" {
+@test "long reports and unbroken paths cannot crowd out the native actions" {
   LAYOUT_ROWS=24 LAYOUT_COLUMNS=80
   local details short_height short_rows index
   details=$'Website: first.vdm.dev\nEnabled: enabled\nServices: running\n'
@@ -84,7 +84,12 @@ read_website_menu() {
   run showJoomlaWebsiteMenu first.vdm.dev "$details" "${LAYOUT_ACTIONS[@]}"
   assert_success
   read_website_menu
-  assert_equal "$MENU_DETAILS" "$details"
+  [[ "$MENU_DETAILS" == $'Website: first.vdm.dev\nEnabled: enabled\nServices: running\nCompose: /a path with spaces/'* ]]
+  [[ "$MENU_DETAILS" == *... ]]
+  [ "$(printf '%s\n' "$MENU_DETAILS" | wc -l | tr -d ' ')" -eq 4 ]
+  local line
+  while IFS= read -r line; do [ "${#line}" -le "$((MENU_WIDTH - 8))" ]; done <<< "$MENU_DETAILS"
+  [[ "$MENU_DETAILS" != *'Last service:'* ]]
   assert_equal "$MENU_HEIGHT" "$short_height"
   assert_equal "$MENU_ROWS" "$short_rows"
   assert_answers_used
@@ -142,7 +147,7 @@ read_website_menu() {
     assert_answers_used
     [ ! -e "$SANDBOX/unexpected-action" ]
     read_website_menu
-    assert_equal "$MENU_SCROLL" true
+    assert_equal "$MENU_SCROLL" false
     [[ "$MENU_DETAILS" == *'Website: first.vdm.dev'* ]]
   done
 }

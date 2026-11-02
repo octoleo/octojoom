@@ -14,9 +14,6 @@ whiptail() {
 }
 
 @test "website information always uses the existing whiptail menu" {
-  # A real controlling terminal must not select a different renderer.
-  joomlaWebsiteMenuCanRender() { return 0; }
-  showJoomlaWebsiteTerminal() { printf 'unexpected replacement UI'; return 99; }
   answers back
   run showJoomlaWebsiteMenu first.vdm.dev 'Website information' back Back enable Enable
   assert_success
@@ -35,7 +32,7 @@ whiptail() {
   run showJoomlaWebsiteInformation first.vdm.dev true
   assert_success
   local action
-  for action in back enable logs directory permissions php-switch php-settings webserver docroot persistence align database database-change backups ssl clone migrate delete; do
+  for action in back enable information logs directory permissions php-switch php-settings webserver docroot persistence align database database-change backups ssl clone migrate delete; do
     grep -qxF "$action" "$SANDBOX/actions"
   done
   for action in start stop restart redeploy disable; do
@@ -67,14 +64,15 @@ whiptail() {
   refute_output_contains 'terminalPanel'
 }
 
-@test "native website menu keeps the complete report and user theme unchanged" {
+@test "native website menu keeps the user theme and gives actions a non-scrollable summary" {
   export NEWT_COLORS='root=white,blue window=black,white'
-  local report=$'Website: first.vdm.dev\nEnabled: disabled\nLong configuration details'
+  local report=$'Website: first.vdm.dev\nEnabled: disabled\nServices: stopped\nHealth: not-running\nLong configuration details'
   answers back
   run showJoomlaWebsiteMenu first.vdm.dev "$report" back Back enable Enable
   assert_success
   assert_equal "$NEWT_COLORS" 'root=white,blue window=black,white'
-  assert_file_contains "$STUB_DIR/dialogs.full" 'Long configuration details'
-  assert_file_contains "$SANDBOX/native.args" '--scrolltext'
+  assert_file_contains "$STUB_DIR/dialogs.full" 'Enabled: disabled'
+  refute_file_contains "$STUB_DIR/dialogs.full" 'Long configuration details'
+  refute_file_contains "$SANDBOX/native.args" '--scrolltext'
   assert_file_contains "$SANDBOX/native.args" '--ok-button Select --cancel-button Back'
 }
