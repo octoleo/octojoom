@@ -351,3 +351,29 @@ proxy_fixture_model() {
   assert_file_exists "$SANDBOX/proxy-running"
   refute_file_exists "$proxy_dir/.octojoom-change.lock"
 }
+
+@test "local HTTPS directory creation avoids Windows mode-setting failures after mkdir succeeds" {
+  local conf="$VDM_PROJECT_PATH/Windows compatible/proxy/conf"
+  mkdir() {
+    local argument
+    for argument in "$@"; do
+      case "$argument" in
+        -m*|--mode*)
+          # Cygwin can create the directory, then fail to apply mkdir's mode.
+          command mkdir -- "${!#}"
+          printf '%s\n' "$*" >> "$SANDBOX/unexpected-mkdir-mode"
+          return 77
+          ;;
+      esac
+    done
+    command mkdir "$@"
+  }
+  cliSudo() { printf '%s\n' "$*" >> "$SANDBOX/unexpected-elevation"; return 98; }
+  prepare_private() { (umask 077; joomlaTLSPrepareDirectories "$conf"); }
+  run prepare_private
+  assert_success
+  [ -d "$conf/octojoom" ]
+  refute_file_exists "$SANDBOX/unexpected-mkdir-mode"
+  refute_file_exists "$SANDBOX/unexpected-elevation"
+  assert_equal "$(find "$conf/octojoom" -mindepth 1 -print)" ''
+}

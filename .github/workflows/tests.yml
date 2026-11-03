@@ -83,6 +83,13 @@ jobs:
           echo "OSTYPE=${OSTYPE}"
           sed --version 2>/dev/null | head -n 1 || echo "sed: BSD"
 
+      # Catch filesystem compatibility failures before the long Windows suite.
+      - name: Verify HTTPS directory setup (Windows)
+        if: runner.os == 'Windows'
+        env:
+          OCTOJOOM_NO_REAL_DOCKER: '1'
+        run: bash tests/run.sh tests/unit/traefik-local-https.bats
+
       - name: Run the test suite
         env:
           # docker compose config only runs for real on Linux, where docker is installed
