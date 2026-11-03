@@ -6926,6 +6926,45 @@ function traefikLocalHTTPSRewrite() {
   fi
 }
 
+# Shared directories must remain traversable when sudo inherits umask 077.
+# Set modes only on directories we create; keep existing proxy data untouched.
+function joomlaTLSPrepareDirectories() {
+  local conf="$1" path="$1" parent private probe index
+  local -a missing=()
+  ! migrationPathHasSymlink "$conf/octojoom" || { printf 'Certificate directories must not use symbolic links: %s\n' "$conf" >&2; return 1; }
+  while [ ! -d "$path" ]; do
+    missing+=("$path")
+    parent="${path%/*}"
+    [ "$parent" != "$path" ] || parent=.
+    [ -n "$parent" ] || parent=/
+    path="$parent"
+  done
+  if [ ! -x "$path" ]; then
+    printf 'Cannot access certificate directory: %s. Grant your user directory traversal access before retrying; existing permissions were preserved.\n' "$path" >&2
+    return 1
+  fi
+  for ((index=${#missing[@]}-1; index>=0; index--)); do
+    path="${missing[index]}"
+    mkdir -m 755 -- "$path" 2>/dev/null || cliSudo mkdir -m 755 -- "$path" || {
+      printf 'Cannot create certificate directory: %s\n' "$path" >&2; return 1;
+    }
+  done
+  private="$conf/octojoom"
+  if [ ! -d "$private" ]; then
+    if ! mkdir -m 700 -- "$private" 2>/dev/null; then
+      cliSudo mkdir -m 700 -- "$private" && cliSudo chown "$(id -u):$(id -g)" "$private" || return 1
+    fi
+  fi
+  if [ ! -r "$private" ] || [ ! -w "$private" ] || [ ! -x "$private" ]; then
+    printf 'Local certificate directory is not accessible to your user: %s\n' "$private" >&2
+    return 1
+  fi
+  probe=$(mktemp "$private/.octojoom-access.XXXXXX") || {
+    printf 'Cannot write to local certificate directory: %s\n' "$private" >&2; return 1;
+  }
+  rm -f -- "$probe"
+}
+
 # Prepare the proxy without rebuilding it or upgrading its image. start=true
 # accompanies a website's local HTTPS action; false keeps a stopped proxy stopped.
 # shellcheck disable=SC2016
@@ -6996,10 +7035,7 @@ function traefikPrepareLocalHTTPS() {
     conf=$(printf '%s' "$model" | joomlaSiteJSON -r '[.services.traefik.volumes[]? | select(.target=="/conf" and .type=="bind") | .source] | if length==1 then .[0] else empty end') || exit 1
     if command -v cygpath >/dev/null 2>&1 && [ -n "$conf" ]; then conf=$(cygpath -u "$conf") || exit 1; fi
     if [ -z "$conf" ] || migrationPathHasSymlink "$conf"; then printf 'Traefik /conf must use one local bind directory. Check the volumes in %s.\n' "$file" >&2; exit 1; fi
-    if [ ! -d "$conf" ]; then
-      mkdir -p "$conf" 2>/dev/null || cliSudo mkdir -p "$conf" || { printf 'Cannot create the certificate configuration directory: %s\n' "$conf" >&2; exit 1; }
-      joomlaTLSReport "Created Traefik certificate configuration directory: $conf"
-    fi
+    joomlaTLSPrepareDirectories "$conf" || exit 1
     OCTOJOOM_TRAEFIK_COMPOSE="$work/candidate.yml" joomlaTLSProxy local || exit 1
     if [ "$original" = true ]; then
       value=$(traefikRunCompose "$file" ps --status running --services) || { printf 'Cannot determine whether Traefik is running; configuration unchanged.\n' >&2; exit 1; }
@@ -7445,12 +7481,9 @@ function joomlaTLSSet() {
       OCTOJOOM_SITE_VALIDATE_FUNCTION=joomlaTLSVerify
       VDM_TLS_VERIFY_ROUTES="$routes"
       ! migrationPathHasSymlink "$conf" || exit 1
-      if [ ! -d "$conf" ]; then
-        # Only our child directory becomes user-owned, never the proxy's ACME
-        # files or other dynamic configuration. OS authorization is explicit.
-        cliSudo mkdir -p -- "$conf" && cliSudo chown "$(id -u):$(id -g)" "$conf" && chmod 700 "$conf" || exit 1
+      if [ ! -w "$conf" ] || [ ! -x "$conf" ]; then
+        printf 'Local certificate directory is not writable: %s\n' "$conf" >&2; exit 1
       fi
-      [ -w "$conf" ] || { printf 'Local certificate directory is not writable: %s\n' "$conf" >&2; exit 1; }
     fi
     work=$(mktemp -d "$directory/.octojoom-tls.XXXXXX") || exit 1
     trap 'status=$?; if [ "$success" != true ]; then

@@ -174,9 +174,13 @@ jobs:
         run: bash tests/integration/local-trust.sh
 
   local-https:
-    name: Docker local HTTPS integration
-    runs-on: ubuntu-latest
+    name: Docker local HTTPS integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
     steps:
       - uses: actions/checkout@v4
       - name: Install mkcert

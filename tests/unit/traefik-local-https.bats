@@ -270,3 +270,84 @@ proxy_fixture_model() {
   assert_equal "$VDM_TLS_PORT" 8443
   assert_file_contains "$proxy_file" '9443:443/udp'
 }
+
+@test "local HTTPS directories remain traversable under a private umask and keep leaf storage private" {
+  skip_on_windows 'Unix directory modes are not enforced by Git Bash'
+  local parent="$VDM_PROJECT_PATH/new proxy" conf="$VDM_PROJECT_PATH/new proxy/traefik/conf" ancestor_mode
+  ancestor_mode=$(file_mode "$VDM_PROJECT_PATH")
+  prepare_private() { (umask 077; joomlaTLSPrepareDirectories "$conf"); }
+  run prepare_private
+  assert_success
+  assert_equal "$(file_mode "$parent")" 755
+  assert_equal "$(file_mode "$parent/traefik")" 755
+  assert_equal "$(file_mode "$conf")" 755
+  assert_equal "$(file_mode "$conf/octojoom")" 700
+  assert_equal "$(file_mode "$VDM_PROJECT_PATH")" "$ancestor_mode"
+  assert_equal "$(find "$conf/octojoom" -mindepth 1 -print)" ''
+}
+
+@test "local HTTPS directory preparation preserves existing custom modes and certificate files" {
+  skip_on_windows 'Unix directory modes are not enforced by Git Bash'
+  local parent="$VDM_PROJECT_PATH/traefik" conf="$VDM_PROJECT_PATH/traefik/conf"
+  mkdir -p "$conf/octojoom"
+  printf 'existing ACME account\n' > "$parent/acme.json"
+  printf 'existing leaf key\n' > "$conf/octojoom/existing.key"
+  chmod 751 "$parent"
+  chmod 750 "$conf" "$conf/octojoom"
+  chmod 600 "$parent/acme.json"
+  chmod 640 "$conf/octojoom/existing.key"
+  cliSudo() { printf '%s\n' "$*" >> "$SANDBOX/unexpected-privileged-change"; return 1; }
+  run joomlaTLSPrepareDirectories "$conf"
+  assert_success
+  assert_equal "$(file_mode "$parent")" 751
+  assert_equal "$(file_mode "$conf")" 750
+  assert_equal "$(file_mode "$conf/octojoom")" 750
+  assert_equal "$(file_mode "$parent/acme.json")" 600
+  assert_equal "$(file_mode "$conf/octojoom/existing.key")" 640
+  assert_equal "$(cat "$parent/acme.json")" 'existing ACME account'
+  assert_equal "$(cat "$conf/octojoom/existing.key")" 'existing leaf key'
+  refute_file_exists "$SANDBOX/unexpected-privileged-change"
+}
+
+@test "privileged local HTTPS creation sets every new ancestor mode and owns only the new leaf directory" {
+  skip_on_windows 'Unix directory modes are not enforced by Git Bash'
+  local parent="$VDM_PROJECT_PATH/privileged proxy" conf="$VDM_PROJECT_PATH/privileged proxy/traefik/conf"
+  mkdir() {
+    local target
+    for target in "$@"; do :; done
+    [[ "$target" != "$parent" && "$target" != "$parent/"* ]] || return 1
+    command mkdir "$@"
+  }
+  cliSudo() {
+    printf '%s\n' "$*" >> "$SANDBOX/privileged-directory.log"
+    command "$@"
+  }
+  prepare_private() { (umask 077; joomlaTLSPrepareDirectories "$conf"); }
+  run prepare_private
+  assert_success
+  assert_equal "$(file_mode "$parent")" 755
+  assert_equal "$(file_mode "$parent/traefik")" 755
+  assert_equal "$(file_mode "$conf")" 755
+  assert_equal "$(file_mode "$conf/octojoom")" 700
+  [ "$(grep -c '^chown ' "$SANDBOX/privileged-directory.log")" -eq 1 ]
+  grep '^chown ' "$SANDBOX/privileged-directory.log" | grep -qF -- "$conf/octojoom"
+  refute_file_contains "$SANDBOX/privileged-directory.log" '-R'
+}
+
+@test "certificate directory access failure prevents Traefik publication and restart" {
+  legacy_proxy
+  proxy_daemon
+  cp "$proxy_file" "$SANDBOX/original.yml"
+  touch "$SANDBOX/proxy-running"
+  joomlaTLSPrepareDirectories() {
+    printf '%s\n' "$1" > "$SANDBOX/rejected-certificate-directory"
+    return 19
+  }
+  run traefikPrepareLocalHTTPS true
+  assert_failure
+  assert_equal "$(cat "$SANDBOX/rejected-certificate-directory")" "$VDM_PROJECT_PATH/traefik/conf"
+  cmp "$proxy_file" "$SANDBOX/original.yml"
+  refute_file_exists "$SANDBOX/proxy-up.log"
+  assert_file_exists "$SANDBOX/proxy-running"
+  refute_file_exists "$proxy_dir/.octojoom-change.lock"
+}

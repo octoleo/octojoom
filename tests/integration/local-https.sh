@@ -60,6 +60,58 @@ trap 'exit 143' TERM
 # shellcheck disable=SC1090
 source <(awk '/^(function )?[A-Za-z_][A-Za-z0-9_]*\(\) \{$/ {p=1} p {print} p && /^}$/ {p=0}' "$ROOT/src/octojoom")
 
+# Use the runner's real user/sudo boundary: mocked chmod/chown cannot reproduce
+# an owned child that is unreachable through its root-owned parent.
+verify_certificate_directory_permissions() {
+  if (( EUID == 0 )); then
+    printf 'SKIP: certificate permission regression requires an ordinary user with passwordless sudo.\n'
+    return 0
+  fi
+  (
+    umask 077
+    OCTOJOOM_NON_INTERACTIVE=true
+    local fixture="$WORK/permissions" shared private expected_owner original
+    expected_owner="$(id -u):$(id -g)"
+    privileged mkdir -m 755 "$fixture"
+    original=$(stat -c '%a:%u:%g' "$fixture")
+    shared="$fixture/nested/conf"
+    joomlaTLSPrepareDirectories "$shared"
+    [ "$(stat -c '%a' "$fixture/nested")" = 755 ]
+    [ "$(stat -c '%a' "$shared")" = 755 ]
+    private="$shared/octojoom"
+    [ "$(stat -c '%a:%u:%g' "$private")" = "700:$expected_owner" ]
+    printf 'permission probe\n' > "$private/probe"
+    rm "$private/probe"
+    [ "$(stat -c '%a:%u:%g' "$fixture")" = "$original" ]
+
+    # Existing shared permissions and ownership remain deliberate user policy.
+    shared="$fixture/existing"
+    privileged mkdir -m 711 "$shared"
+    original=$(stat -c '%a:%u:%g' "$shared")
+    joomlaTLSPrepareDirectories "$shared"
+    joomlaTLSPrepareDirectories "$shared"
+    [ "$(stat -c '%a:%u:%g' "$shared")" = "$original" ]
+    [ "$(stat -c '%a:%u:%g' "$shared/octojoom")" = "700:$expected_owner" ]
+
+    shared="$fixture/inaccessible"
+    privileged mkdir -m 700 "$shared"
+    original=$(stat -c '%a:%u:%g' "$shared")
+    if joomlaTLSPrepareDirectories "$shared" 2> "$WORK/permission-refusal.log"; then
+      printf 'Certificate setup accepted an inaccessible existing directory.\n' >&2
+      exit 1
+    fi
+    [ -s "$WORK/permission-refusal.log" ]
+    [ "$(stat -c '%a:%u:%g' "$shared")" = "$original" ]
+    if privileged test -e "$shared/octojoom"; then
+      printf 'Certificate setup changed an inaccessible existing directory.\n' >&2
+      exit 1
+    fi
+    privileged rm -rf "$fixture"
+    printf 'Certificate permission regression passed: restrictive umask, real ownership, preserved existing modes and inaccessible-directory refusal.\n'
+  )
+}
+verify_certificate_directory_permissions
+
 mkdir -p "$VDM_SRC_PATH" "$VDM_PROJECT_PATH" "$VDM_REPO_PATH/joomla/enabled"
 OS_NUMBER=1
 PROGRAM_NAME=Octojoom
