@@ -311,11 +311,11 @@ proxy_fixture_model() {
 
 @test "privileged local HTTPS creation sets every new ancestor mode and owns only the new leaf directory" {
   skip_on_windows 'Unix directory modes are not enforced by Git Bash'
-  local parent="$VDM_PROJECT_PATH/privileged proxy" conf="$VDM_PROJECT_PATH/privileged proxy/traefik/conf"
+  local permission_fixture_root="$VDM_PROJECT_PATH/privileged proxy" conf="$VDM_PROJECT_PATH/privileged proxy/traefik/conf"
   mkdir() {
     local target
     for target in "$@"; do :; done
-    [[ "$target" != "$parent" && "$target" != "$parent/"* ]] || return 1
+    [[ "$target" != "$permission_fixture_root" && "$target" != "$permission_fixture_root/"* ]] || return 1
     command mkdir "$@"
   }
   cliSudo() {
@@ -325,8 +325,8 @@ proxy_fixture_model() {
   prepare_private() { (umask 077; joomlaTLSPrepareDirectories "$conf"); }
   run prepare_private
   assert_success
-  assert_equal "$(file_mode "$parent")" 755
-  assert_equal "$(file_mode "$parent/traefik")" 755
+  assert_equal "$(file_mode "$permission_fixture_root")" 755
+  assert_equal "$(file_mode "$permission_fixture_root/traefik")" 755
   assert_equal "$(file_mode "$conf")" 755
   assert_equal "$(file_mode "$conf/octojoom")" 700
   [ "$(grep -c '^chown ' "$SANDBOX/privileged-directory.log")" -eq 1 ]
