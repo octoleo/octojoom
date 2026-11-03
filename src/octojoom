@@ -6945,14 +6945,18 @@ function joomlaTLSPrepareDirectories() {
   fi
   for ((index=${#missing[@]}-1; index>=0; index--)); do
     path="${missing[index]}"
-    mkdir -m 755 -- "$path" 2>/dev/null || cliSudo mkdir -m 755 -- "$path" || {
-      printf 'Cannot create certificate directory: %s\n' "$path" >&2; return 1;
-    }
+    # Git Bash can create a directory yet reject mkdir -m. Apply its mode
+    # separately, with the same privilege used to create this new directory.
+    if mkdir -- "$path" 2>/dev/null; then
+      chmod 755 "$path" || return 1
+    elif ! { cliSudo mkdir -- "$path" && cliSudo chmod 755 "$path"; }; then
+      printf 'Cannot create certificate directory: %s\n' "$path" >&2; return 1
+    fi
   done
   private="$conf/octojoom"
   if [ ! -d "$private" ]; then
-    if ! mkdir -m 700 -- "$private" 2>/dev/null; then
-      cliSudo mkdir -m 700 -- "$private" && cliSudo chown "$(id -u):$(id -g)" "$private" || return 1
+    if ! createPrivateDirectory -- "$private" 2>/dev/null; then
+      cliSudo mkdir -- "$private" && cliSudo chown "$(id -u):$(id -g)" "$private" && chmod 700 "$private" || return 1
     fi
   fi
   if [ ! -r "$private" ] || [ ! -w "$private" ] || [ ! -x "$private" ]; then
