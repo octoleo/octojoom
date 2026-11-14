@@ -375,16 +375,20 @@ SH
 
 @test "native staged validation accepts requested timeouts but rejects a later INI override" {
   command -v php >/dev/null || skip 'native PHP CLI is unavailable; Docker acceptance covers web values'
-  local native_php native_staged scan="$SANDBOX/php-scan" main="$SANDBOX/main.ini" staged
+  local native_php native_staged native_scan native_main scan="$SANDBOX/php-scan" main="$SANDBOX/main.ini" staged
   native_php=$(command -v php)
   mkdir -p "$scan"
   : > "$main"
   staged="$scan/10-octojoom.ini"
   printf 'max_execution_time = 180\nmax_input_time = 240\nmemory_limit = 512M\n' > "$staged"
+  native_scan=$(joomlaWebHostPath "$scan")
+  native_main=$(joomlaWebHostPath "$main")
   # Use the host SAPI's exact scanned path for the transport stand-in. Native
   # Windows PHP reports backslashes/drive letters while Bash uses POSIX paths;
   # production validation runs entirely inside the Linux container namespace.
-  native_staged=$(env PHP_INI_SCAN_DIR="$scan" "$native_php" -c "$main" -r '
+  # Its Docker call disables MSYS path conversion, so the native PHP stand-in
+  # must also receive explicit host paths for the scan directory and main INI.
+  native_staged=$(env PHP_INI_SCAN_DIR="$native_scan" "$native_php" -c "$native_main" -r '
     foreach (preg_split("/,\\s*/", trim((string) php_ini_scanned_files()), -1, PREG_SPLIT_NO_EMPTY) as $file) {
       if (basename($file) === "10-octojoom.ini") { echo $file; exit(0); }
     }
@@ -396,7 +400,7 @@ SH
     while [ "$1" != -r ]; do shift; done
     local code="$2"
     shift 4
-    env PHP_INI_SCAN_DIR="$scan" "$native_php" -c "$main" -r "$code" -- "$native_staged" "$@"
+    env PHP_INI_SCAN_DIR="$native_scan" "$native_php" -c "$native_main" -r "$code" -- "$native_staged" "$@"
   }
   run joomlaPHPValidateIni test/php "$staged" /php/conf.d/zz-octojoom.ini max_execution_time 180 max_input_time 240 memory_limit 512M
   assert_success
