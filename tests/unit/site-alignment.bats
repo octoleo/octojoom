@@ -309,6 +309,57 @@ EXTRA
   [ ! -e "$ALIGN_DIR/.octojoom-change.lock" ]
 }
 
+@test "publication: changed PHP files recreate existing stopped containers without starting them" {
+  local target="$VDM_PROJECT_PATH/php.ini"
+  printf 'max_execution_time = 124\n' > "$target"
+  printf 'max_execution_time = 300\n' > "$SANDBOX/php.ini"
+  siteWriteScopedEnv "$ALIGN_YML" "$ALIGN_ENV" ALPHA "$SANDBOX/candidate.env"
+  cp "$ALIGN_YML" "$SANDBOX/candidate.yml"
+  OCTOJOOM_SITE_PHP_FILE="$target"
+  OCTOJOOM_SITE_FILE_TARGETS=("$target")
+  OCTOJOOM_SITE_FILE_SOURCES=("$SANDBOX/php.ini")
+  migrationRunCompose() {
+    printf '%s\n' "$*" >> "$STUB_DIR/runtime-commands"
+    case " $* " in *' ps --all --services '*) printf 'joomlaalpha\nmariadbalpha\n' ;; esac
+    return 0
+  }
+  run sitePublishConfiguration alpha.example.test "$SANDBOX/candidate.yml" "$SANDBOX/candidate.env" joomlaalpha
+  assert_success
+  assert_file_contains "$target" 'max_execution_time = 300'
+  [ "$(grep -c ' up --no-start --no-deps --force-recreate joomlaalpha$' "$STUB_DIR/runtime-commands")" -eq 1 ]
+  run grep -E ' up -d | up .*mariadbalpha' "$STUB_DIR/runtime-commands"
+  assert_failure
+  run compgen -G "$ALIGN_DIR/.octojoom-recovery.*"
+  assert_failure
+}
+
+@test "publication: failed stopped PHP recreation restores its file and leaves the site stopped" {
+  local target="$VDM_PROJECT_PATH/php.ini"
+  printf 'max_execution_time = 124\n' > "$target"
+  printf 'max_execution_time = 300\n' > "$SANDBOX/php.ini"
+  siteWriteScopedEnv "$ALIGN_YML" "$ALIGN_ENV" ALPHA "$SANDBOX/candidate.env"
+  cp "$ALIGN_YML" "$SANDBOX/candidate.yml"
+  OCTOJOOM_SITE_PHP_FILE="$target"
+  OCTOJOOM_SITE_FILE_TARGETS=("$target")
+  OCTOJOOM_SITE_FILE_SOURCES=("$SANDBOX/php.ini")
+  migrationRunCompose() {
+    printf '%s\n' "$*" >> "$STUB_DIR/runtime-commands"
+    case " $* " in
+      *' ps --all --services '*) printf 'joomlaalpha\n' ;;
+      *' up --no-start '*) grep -q '300' "$VDM_PROJECT_PATH/php.ini" && return 1 ;;
+    esac
+    return 0
+  }
+  run sitePublishConfiguration alpha.example.test "$SANDBOX/candidate.yml" "$SANDBOX/candidate.env" joomlaalpha
+  assert_failure
+  assert_file_contains "$target" 'max_execution_time = 124'
+  [ "$(grep -c ' up --no-start --no-deps --force-recreate joomlaalpha$' "$STUB_DIR/runtime-commands")" -eq 2 ]
+  run grep -q ' up -d ' "$STUB_DIR/runtime-commands"
+  assert_failure
+  run compgen -G "$ALIGN_DIR/.octojoom-recovery.*"
+  assert_failure
+}
+
 @test "publication: copied enabled sites receive and recover the same configuration" {
   OS_NUMBER=3
   local enabled="$VDM_REPO_PATH/joomla/enabled/alpha.example.test"

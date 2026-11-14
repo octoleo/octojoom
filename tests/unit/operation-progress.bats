@@ -7,6 +7,7 @@ load ../helpers/common
 setup() {
   octojoom_setup
   octojoom_config
+  joomlaPHPEnsureSiteIni() { return 0; }
   make_joomla_container abc ABC abc
   PROGRESS_CALLS="$SANDBOX/progress.calls"
   : > "$PROGRESS_CALLS"

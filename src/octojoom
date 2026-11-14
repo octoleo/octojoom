@@ -1609,14 +1609,9 @@ function joomla__TRuST__setup() {
   VDM_PHP_PROJECT_PATH="${VDM_KEY}"
   export VDM_PHP_PROJECT_PATH
   local customization_status
-  if isExpert || [ "${VDM_CUSTOMIZE:-false}" = true ] || [ "${VDM_PHP_SETTINGS:-false}" = true ]; then
-    if setPHPSettings; then
-      VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini:${VDM_PHP_INI_TARGET:-/var/www/html/php.ini}\"")
-    else
-      customization_status=$?
-      [ "$customization_status" -eq 1 ] || return "$customization_status"
-    fi
-  fi
+  setPHPSettings || return $?
+  setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_PHP_CUSTOM=${VDM_PHP_CUSTOM}" || return $?
+  VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini:${VDM_PHP_INI_TARGET:-/var/www/html/php.ini}\"")
   # customize docker-entrypoint.sh
   VDM_ENTRY_PROJECT_PATH="${VDM_KEY}"
   export VDM_ENTRY_PROJECT_PATH
@@ -2904,18 +2899,10 @@ function joomla__TRuST__bulk() {
     setContainerUser "$(id -u)" || return $?
   fi
   # add PHP settings
-  set_php_settings=false
-  VDM_PHP_PROJECT_PATH="bulk"
-  export VDM_PHP_PROJECT_PATH
-  local customization_status
-  if isExpert || [ "${VDM_CUSTOMIZE:-false}" = true ] || [ "${VDM_PHP_SETTINGS:-false}" = true ]; then
-    if setPHPSettings; then
-      set_php_settings=true
-    else
-      customization_status=$?
-      [ "$customization_status" -eq 1 ] || return "$customization_status"
-    fi
-  fi
+  local customization_status php_template
+  php_template=$(mktemp "${VDM_PROJECT_PATH}/.php-bulk.XXXXXX") || return 1
+  trap 'rm -f "$php_template"' EXIT
+  setPHPSettings "$php_template" || return $?
   # customize docker-entrypoint.sh
   set_docker_entry_point=false
   VDM_ENTRY_PROJECT_PATH="bulk"
@@ -3062,9 +3049,12 @@ function joomla__TRuST__bulk() {
       reset_volume=false
     fi
     # add PHP settings
-    if $set_php_settings; then
-      VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini:${VDM_PHP_INI_TARGET:-/var/www/html/php.ini}\"")
-    fi
+    VDM_PHP_PROJECT_PATH="$VDM_KEY"
+    mkdir -p "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}" || return 1
+    cp "$php_template" "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini" &&
+      chmod 644 "${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini" || return 1
+    setContainerEnvVariable "VDM_${VDM_ENV_KEY^^}_PHP_CUSTOM=${VDM_PHP_CUSTOM}" || return $?
+    VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini:${VDM_PHP_INI_TARGET:-/var/www/html/php.ini}\"")
     # customize docker-entrypoint.sh
     if $set_docker_entry_point; then
       VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 "- \"\${VDM_PROJECT_PATH}/${VDM_ENTRY_PROJECT_PATH}/entrypoint.sh:/entrypoint.sh\"")
@@ -3711,6 +3701,7 @@ function joomla__TRuST__enable() {
   elif [ ${#VDM_CONTAINER} -ge 1 ]; then
     # this means we have a single already selected container to enable if it exists
     if [ -d "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${VDM_CONTAINER}" ]; then
+      joomlaPHPEnsureSiteIni "$VDM_CONTAINER" >/dev/null || return $?
       # create the folder as needed
       mkdir -p "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/" || return $?
       # create the soft link
@@ -3757,6 +3748,7 @@ function joomla__TRuST__enable() {
       for containered in "${vdm_enable_me_array[@]}"; do
         # remove the " from the string
         container="${containered//\"/}"
+        joomlaPHPEnsureSiteIni "$container" >/dev/null || return $?
         # create the soft link
         [ -e "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" ] || {
           ln -s "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/available/${container}" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/${container}" || return $?
@@ -4085,6 +4077,7 @@ function joomla__TRuST__up() {
     for yml in "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/enabled/"*/*.yml; do
       # get the vdm_container value
       vdm_container="${yml%/docker-compose.yml}"
+      joomlaPHPEnsureSiteIni "${vdm_container##*/}" >/dev/null || return $?
       # check if image has its own env file also
       evn_file=''
       # check if image has its own env file also
@@ -7873,9 +7866,9 @@ function sitePublishConfigurationAction() {
     local directory="${VDM_REPO_PATH}/joomla/available/$site" compose_file effective_env
     local recovery='' lock='' running='' service target source index changed=0 failed=false runtime_changed=false
     local callback="${OCTOJOOM_SITE_VALIDATE_FUNCTION:-}" rollback_failed=false own_lock=false keep_recovery=false
-    local enabled="${VDM_REPO_PATH}/joomla/enabled/$site" mirror='' count
+    local enabled="${VDM_REPO_PATH}/joomla/enabled/$site" mirror='' count existing=''
     local -a targets=("${OCTOJOOM_SITE_FILE_TARGETS[@]}") sources=("${OCTOJOOM_SITE_FILE_SOURCES[@]}")
-    local -a active=() stopped=() start_services=("${OCTOJOOM_SITE_START_SERVICES[@]}")
+    local -a active=() inactive=() stopped=() start_services=("${OCTOJOOM_SITE_START_SERVICES[@]}")
     local -a stop_services=("${OCTOJOOM_SITE_STOP_SERVICES[@]}") existed=()
     isValidDomain "$site" && [ -d "$directory" ] && ! migrationPathHasSymlink "$directory" || exit 1
     compose_file="$directory/docker-compose.yml"
@@ -7925,7 +7918,6 @@ function sitePublishConfigurationAction() {
       if "$own_lock"; then rmdir "$lock" 2>/dev/null || true; fi
     ' EXIT
     siteValidateCompose "$staged_compose" "$staged_env" "$directory" || exit 1
-    if [ -n "${OCTOJOOM_SITE_PHP_FILE:-}" ]; then mkdir -p -- "${OCTOJOOM_SITE_PHP_FILE%/*}" || exit 1; fi
     [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 15 'Checking which website services are running.'
     if [ "$#" -gt 0 ] || [ "${#stop_services[@]}" -gt 0 ]; then
       running=$(migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" ps --status running --services) || {
@@ -7935,6 +7927,12 @@ function sitePublishConfigurationAction() {
         [[ "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || exit 1
         if printf '%s\n' "$running" | grep -qxF "$service"; then active+=("$service"); fi
       done
+      if [ -n "${OCTOJOOM_SITE_PHP_FILE:-}" ] && [ "${#active[@]}" -eq 0 ]; then
+        existing=$(migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" ps --all --services) || exit 1
+        for service in "$@"; do
+          if printf '%s\n' "$existing" | grep -qxF "$service"; then inactive+=("$service"); fi
+        done
+      fi
       for service in "${stop_services[@]}"; do
         [[ "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || exit 1
         if printf '%s\n' "$running" | grep -qxF "$service"; then stopped+=("$service"); fi
@@ -7961,6 +7959,7 @@ function sitePublishConfigurationAction() {
     done
     # Interrupted writes flow through the same recovery path as command failures.
     trap 'failed=true' INT TERM HUP
+    if [ -n "${OCTOJOOM_SITE_PHP_FILE:-}" ]; then mkdir -p -- "${OCTOJOOM_SITE_PHP_FILE%/*}" || exit 1; fi
     keep_recovery=true
     if [ "${#stopped[@]}" -gt 0 ]; then
       runtime_changed=true
@@ -7987,6 +7986,12 @@ function sitePublishConfigurationAction() {
         fi
         changed=$((index+1))
       done
+    fi
+    if ! "$failed" && [ "${#inactive[@]}" -gt 0 ]; then
+      # A stopped container can still hold the old bind-file inode. Prepare its
+      # replacement now without starting it or any of its dependencies.
+      runtime_changed=true
+      migrationRunCompose "$directory/.env" "$compose_file" --project-directory "$directory" up --no-start --no-deps --force-recreate "${inactive[@]}" >&2 || failed=true
     fi
     if ! "$failed" && [ "${#active[@]}" -gt 0 ]; then
       [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 65 'Recreating the affected services and waiting for Docker readiness.'
@@ -8021,6 +8026,9 @@ function sitePublishConfigurationAction() {
         done
         if [ "${#restore[@]}" -gt 0 ]; then
           migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" up -d --no-deps --force-recreate --wait --wait-timeout 90 "${restore[@]}" >&2 || rollback_failed=true
+        fi
+        if [ "${#inactive[@]}" -gt 0 ]; then
+          migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" up --no-start --no-deps --force-recreate "${inactive[@]}" >&2 || rollback_failed=true
         fi
       fi
       if "$rollback_failed"; then
@@ -8933,6 +8941,7 @@ function joomlaBackupRestoreNewAction() {
     elif [ "$storage_type" != volume ]; then
       joomlaBackupError 'The archive database storage could not be resolved; no storage type was changed.'; exit 1
     fi
+    joomlaPHPEnsureSiteIni "$site" >/dev/null || exit $?
     joomlaSiteCompose "$site" config -q >/dev/null 2>&1 || exit 1
     joomlaSiteCompose "$site" up -d --no-deps "$database" >/dev/null || exit $?
     joomlaBackupWaitDatabase "$site" || exit 1
@@ -9610,7 +9619,7 @@ function showJoomlaBackupSelection() {
 # the env variable name suffixes a Joomla container reads through its env key (VDM_<ENV_KEY>_<suffix>)
 # returned as an extended regular expression alternation
 function getJoomlaEnvSuffixes() {
-  echo 'DB|DB_USER|DB_PASS|DB_ROOT|DB_ENGINE|DB_IMAGE|DATABASE_EXPORT_DIR|DATABASE_IMPORT_DIR|DATABASE_COMPRESSION|DATABASE_TIMESTAMP|PUID|PGID|JOOMLA_[A-Z_]+|EXTENSIONS_URLS|CLI_COMMANDS|IMAGE|IMAGE_SOURCE|IMAGE_TAG|AUTO_INSTALL|PHPMYADMIN|PHP_IMAGE|PHP_MAX_EXECUTION_TIME|PHP_MAX_INPUT_TIME|PHP_MAX_INPUT_VARS|PHP_ERROR_REPORTING|PHP_UPLOAD_MAX_FILESIZE|PHP_POST_MAX_SIZE|PHP_MEMORY_LIMIT|WEBSERVER|DOCROOT|NGINX_IMAGE|SMTP_HOST|SMTP_PORT|SMTP_USERNAME|SMTP_PASSWORD|SMTP_SECURITY|SMTP_AUTH|SMTP_FROM|SMTP_FROM_NAME|HOOKS_ENABLED|HOOK_PRE_START|HOOK_POST_START|HOOK_PRE_STOP|HOOK_POST_STOP|BACKUP_PATH|BACKUP_FORMAT|BACKUP_RETENTION|BACKUP_SCOPE|BACKUP_TIMESTAMP|BACKUP_TIMESTAMP_PATTERN|BACKUP_OVERWRITE|TLS_MODE|TLS_CHOICE|TOOLS_IMAGE|TOOLS_ENABLED'
+  echo 'DB|DB_USER|DB_PASS|DB_ROOT|DB_ENGINE|DB_IMAGE|DATABASE_EXPORT_DIR|DATABASE_IMPORT_DIR|DATABASE_COMPRESSION|DATABASE_TIMESTAMP|PUID|PGID|JOOMLA_[A-Z_]+|EXTENSIONS_URLS|CLI_COMMANDS|IMAGE|IMAGE_SOURCE|IMAGE_TAG|AUTO_INSTALL|PHPMYADMIN|PHP_CUSTOM|PHP_IMAGE|PHP_MAX_EXECUTION_TIME|PHP_MAX_INPUT_TIME|PHP_MAX_INPUT_VARS|PHP_ERROR_REPORTING|PHP_UPLOAD_MAX_FILESIZE|PHP_POST_MAX_SIZE|PHP_MEMORY_LIMIT|WEBSERVER|DOCROOT|NGINX_IMAGE|SMTP_HOST|SMTP_PORT|SMTP_USERNAME|SMTP_PASSWORD|SMTP_SECURITY|SMTP_AUTH|SMTP_FROM|SMTP_FROM_NAME|HOOKS_ENABLED|HOOK_PRE_START|HOOK_POST_START|HOOK_PRE_STOP|HOOK_POST_STOP|BACKUP_PATH|BACKUP_FORMAT|BACKUP_RETENTION|BACKUP_SCOPE|BACKUP_TIMESTAMP|BACKUP_TIMESTAMP_PATTERN|BACKUP_OVERWRITE|TLS_MODE|TLS_CHOICE|TOOLS_IMAGE|TOOLS_ENABLED'
 }
 
 # Read a generated database reference in list or ordinary block-map notation.
@@ -10866,17 +10875,30 @@ function joomla__TRuST__path() {
 }
 
 function joomlaSiteLifecycle() {
-  local site="${VDM_CONTAINER:-}" action="$1"
+  local site="${VDM_CONTAINER:-}" action="$1" recreated='' service services
+  local -a remaining=()
   case "$action" in start|stop|restart|redeploy) ;; *) return 17 ;; esac
   resolveJoomlaSite "$site" || return 1
   if [ "$(getJoomlaSiteEnabledState "$site")" != enabled ]; then
     printf 'Website %s is not enabled; enable it first before using %s.\n' "$site" "$action" >&2
     return 1
   fi
+  if [ "$action" != stop ]; then recreated=$(joomlaPHPEnsureSiteIni "$site") || return $?; fi
   case "$action" in
     start) joomlaSiteCompose "$site" up -d ;;
     stop) joomlaSiteCompose "$site" stop ;;
-    restart) joomlaSiteCompose "$site" restart ;;
+    restart)
+      if [ -n "$recreated" ]; then
+        services=$(joomlaSiteCompose "$site" config --services) || return $?
+        while IFS= read -r service; do
+          [ -z "$service" ] || [ "$service" = "$recreated" ] || remaining+=("$service")
+        done <<< "$services"
+        [ "${#remaining[@]}" -gt 0 ] || return 0
+        joomlaSiteCompose "$site" restart "${remaining[@]}"
+      else
+        joomlaSiteCompose "$site" restart
+      fi
+      ;;
     redeploy) joomlaSiteCompose "$site" up -d --force-recreate ;;
   esac
 }
@@ -13782,7 +13804,7 @@ function joomlaRuntimeSelectImageForFlavor() {
 function joomlaRuntimeIniTarget() {
   local probe directory
   probe=$(joomlaRuntimeProbeImage "$1") || return 1
-  directory=$(jq -r '.ini_dir // empty' <<< "$probe") || return 1
+  directory=$(joomlaSiteJSON -r '.ini_dir // empty' <<< "$probe") || return 1
   [[ "$directory" == /* && "$directory" != *:* && "$directory" != *$'\n'* && "$directory" != *'..'* ]] || {
     printf 'This image does not expose one supported PHP configuration scan directory.\n' >&2; return 1;
   }
@@ -13821,10 +13843,10 @@ function joomlaSetupPHPChoices() {
 # regenerated from resolved values (which would expose credentials).
 function joomlaPHPReplaceMount() {
   local source="$1" destination="$2" service="$3" old_target="$4" host_file="$5" target="$6"
-  [[ "$service" =~ ^[A-Za-z0-9_-]+$ && "$target" == /* && "$host_file" == /* ]] || return 1
+  [[ "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && "$target" == /* && ( "$host_file" == /* || "$host_file" =~ ^[A-Za-z]:/ ) ]] || return 1
   [[ "$host_file" != *$'\n'* && "$host_file" != *'"'* && "$host_file" != *\\* && "$host_file" != *'$'* ]] || return 1
   awk -v service="$service" -v old="$old_target" -v host="$host_file" -v target="$target" '
-    /^  [A-Za-z0-9_-]+: *$/ { inside=($0 == "  " service ":"); volumes=0 }
+    /^  [A-Za-z0-9_.-]+: *$/ { inside=($0 == "  " service ":"); volumes=0 }
     inside && /^    volumes: *$/ { volumes=1; print; if (old == "") { print "      - \"" host ":" target ":ro\""; changed++ }; next }
     inside && /^    [A-Za-z_]/ && !/^    volumes:/ { volumes=0 }
     inside && volumes && old != "" && index($0, ":" old) {
@@ -13836,6 +13858,141 @@ function joomlaPHPReplaceMount() {
   ' "$source" > "$destination" || { rm -f "$destination"; printf 'PHP mount editing requires one ordinary service volumes block; use the Compose editor for this layout.\n' >&2; return 1; }
 }
 
+# The original project directory owns a site's PHP configuration, including
+# sites whose Joomla files use a named volume. Do not depend on the current
+# host's project setting when this site has its own saved project base.
+function joomlaPHPProjectIni() {
+  local root="${VDM_PROJECT_PATH:-}" project="${VDM_SITE_KEY:-$1}" mounted relative
+  if [ -n "${VDM_SITE_ENV:-}" ]; then
+    migrationReadEnvValue "$VDM_SITE_ENV" VDM_PROJECT_PATH root || :
+  fi
+  root=$(joomlaBackupFilesystemPath "$root") || return 1
+  [[ "$root" == /* ]] && isSafeProjectName "$project" || return 1
+  if [ "${VDM_SITE_MOUNT_TYPE:-}" = bind ]; then
+    mounted=$(joomlaBackupFilesystemPath "$VDM_SITE_MOUNT_SOURCE") || return 1
+    if [[ "$mounted" == "$root/"*/joomla ]]; then
+      relative="${mounted#"$root/"}"; relative="${relative%/joomla}"
+      if isSafeProjectName "$relative"; then project="$relative"; fi
+    fi
+  fi
+  printf '%s/%s/php.ini\n' "${root%/}" "$project"
+}
+
+# Read ordinary bind references independently of unrelated service variables.
+# Used only when another site's full Compose model cannot be rendered, such as
+# a disabled site missing database credentials. Unknown mount syntax is refused.
+function joomlaPHPConfiguredSources() {
+  local site="$1" file="$VDM_REPO_PATH/joomla/available/$1/docker-compose.yml" env_file services service property line value source directory
+  env_file=$(getContainerEnvFile joomla "$site" available)
+  services=$(joomlaSourceServices "$file") || return 1
+  [ -n "$services" ] || return 1
+  while IFS= read -r service; do
+    property=$(joomlaServiceProperty "$file" "$service" volumes) || return 1
+    while IFS= read -r line; do
+      line="${line#"${line%%[!$' \t']*}"}"
+      case "$line" in
+        ''|\#*|volumes:|'- type: '*|type:*|target:*|read_only:*|bind:*|volume:*|tmpfs:*|create_host_path:*|propagation:*|nocopy:*|subpath:*) continue;;
+        '- source: '*) value="${line#- source: }";;
+        'source: '*) value="${line#source: }";;
+        '- '*)
+          decodeEnvValue "${line#- }" value || return 1
+          if [[ "$value" =~ ^(.+):(/[^:]+)(:[^:]+)?$ ]]; then value="${BASH_REMATCH[1]}"
+          elif [[ "$value" != *:* ]]; then continue
+          else return 1; fi;;
+        *) return 1;;
+      esac
+      decodeEnvValue "$value" value || return 1
+      source=$(joomlaExpandComposeValue "$value" "$env_file") || return 1
+      case "$source" in
+        ./*|../*)
+          directory=$(cd "${file%/*}/${source%/*}" 2>/dev/null && pwd -P) || return 1
+          source="$directory/${source##*/}";;
+        /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+        *) continue;;
+      esac
+      printf '%s\n' "$source"
+    done <<< "$property"
+  done <<< "$services"
+}
+
+# Return 0 for a shared file, 1 for an exclusive file, and 2 when its configured
+# consumers cannot be inspected. Never change another site's overrides.
+# shellcheck disable=SC2016 # jq variables belong to jq, not the shell.
+function joomlaPHPIniShared() {
+  local site="$1" source="$2" model="$3" other rows candidate
+  rows=$(joomlaSiteJSON -r --arg service "$VDM_SITE_SERVICE" '.services | to_entries[] | select(.key != $service) | .value.volumes[]? | select(.type == "bind") | .source' <<< "$model") || return 2
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    candidate=$(joomlaBackupFilesystemPath "$candidate") || return 2
+    if [ "$candidate" = "$source" ] || [ "$candidate" -ef "$source" ]; then return 0; fi
+  done <<< "$rows"
+  for other in "$VDM_REPO_PATH/joomla/available/"*/docker-compose.yml; do
+    [ -f "$other" ] || continue
+    other="${other%/*}"; other="${other##*/}"
+    [ "$other" != "$site" ] || continue
+    if model=$(joomlaSiteCompose "$other" config --format json 2>/dev/null); then
+      rows=$(joomlaSiteJSON -r '.services[].volumes[]? | select(.type == "bind") | .source' <<< "$model") || return 2
+    elif ! rows=$(joomlaPHPConfiguredSources "$other"); then
+      printf 'Cannot determine the PHP file references in %s; correct its volume paths before changing a possibly shared file.\n' "$other" >&2
+      return 2
+    fi
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      candidate=$(joomlaBackupFilesystemPath "$candidate") || return 2
+      if [ "$candidate" = "$source" ] || [ "$candidate" -ef "$source" ]; then return 0; fi
+    done <<< "$rows"
+  done
+  return 1
+}
+
+# Keep existing site-owned files. Move the earlier staging replacement back to
+# the project, and copy shared bulk overrides before editing only one website.
+function joomlaPHPIniDestination() {
+  local site="$1" source="$2" model="$3" destination root status
+  destination=$(joomlaPHPProjectIni "$site") || return 1
+  root="${destination%/*/*}"
+  if [ -n "$source" ] && [ "$source" != "$VDM_SITE_DIR/php.ini" ] && [ "$source" != "$root/bulk/php.ini" ]; then
+    if joomlaPHPIniShared "$site" "$source" "$model"; then
+      if [ "$destination" = "$source" ] || [ "$destination" -ef "$source" ]; then
+        printf 'This project PHP file is also used by another website; give the websites separate project directories before editing it.\n' >&2
+        return 1
+      fi
+    else
+      status=$?; [ "$status" -eq 1 ] || return "$status"
+      destination="$source"
+    fi
+  fi
+  if [ "$destination" != "$source" ]; then
+    if joomlaPHPIniShared "$site" "$destination" "$model"; then
+      printf 'The destination PHP file is used by another website: %s. Use separate project directories before changing it.\n' "$destination" >&2
+      return 1
+    else status=$?; [ "$status" -eq 1 ] || return "$status"; fi
+  fi
+  printf '%s\n' "$destination"
+}
+
+# These seven scalar settings allow optional surrounding INI quotes and
+# whitespace. Expressions remain text and are validated by PHP, never eval.
+function joomlaPHPNormalizeValue() {
+  local value="$1"
+  value="${value#"${value%%[!$' \t\r\n']*}"}"
+  value="${value%"${value##*[!$' \t\r\n']}"}"
+  if [ "${#value}" -ge 2 ] && [[ "$value" == \"*\" || "$value" == \'*\' ]]; then value="${value:1:${#value}-2}"; fi
+  printf '%s\n' "$value"
+}
+
+function joomlaPHPReadValue() {
+  local value
+  value=$(awk -v key="$2" '
+    /^[[:space:]]*\[/ { scoped=($0 ~ /^[[:space:]]*\[(HOST|PATH)[[:space:]]*=/) }
+    !scoped && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
+      sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]*;.*$/, ""); value=$0
+    }
+    END { print value }
+  ' "$1") || return 1
+  joomlaPHPNormalizeValue "$value"
+}
+
 function joomlaPHPValidateValue() {
   local setting="$1" value="$2"
   case "$setting" in
@@ -13843,7 +14000,7 @@ function joomlaPHPValidateValue() {
     max_input_time) [[ "$value" == -1 || "$value" =~ ^[0-9]{1,9}$ ]];;
     memory_limit) [[ "$value" == -1 || "$value" =~ ^[0-9]{1,9}[KMGkmg]?$ ]];;
     upload_max_filesize|post_max_size) [[ "$value" =~ ^[0-9]{1,9}[KMGkmg]?$ ]];;
-    error_reporting) [[ -n "$value" && "$value" != *[!A-Z0-9_\ \&\|\~\(\)]* ]];;
+    error_reporting) [[ "$value" == -1 || ( -n "$value" && "$value" != *[!A-Z0-9_\ \&\|\~\(\)]* ) ]];;
     *) return 1;;
   esac
 }
@@ -13928,7 +14085,8 @@ function joomlaPHPValidateIni() {
   local image="$1" file="$2" target="$3"
   shift 3
   [[ "$file" != *,* && "$target" != *,* && "$file" != *$'\n'* ]] || return 2
-  docker run --rm --network none --read-only --entrypoint php \
+  file=$(joomlaWebHostPath "$file") || return 1
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker run --rm --network none --read-only --entrypoint php \
     --mount "type=bind,source=$file,target=$target,readonly" "$image" -r "$(joomlaPHPConfigurationReader)"'
       if (!is_file($argv[1]) || @parse_ini_file($argv[1]) === false || strpos((string)php_ini_scanned_files(), $argv[1]) === false) {
         fwrite(STDERR,"PHP could not load the proposed override file.\n"); exit(1);
@@ -13943,14 +14101,14 @@ function joomlaPHPValidateIni() {
     ' -- "$target" "$@"
 }
 
-# The application credentials stay inside its container. HTTP and effective PHP
-# checks run only for a service which was already running before the change.
+# Settings edits verify PHP directly. The public route, TLS and database are
+# independent of a PHP configuration change, including local HTTPS websites.
 # PHP fragments below intentionally use literal PHP variable names.
 # shellcheck disable=SC2016
-function joomlaRuntimeValidatePublished() {
+function joomlaPHPValidatePublished() {
   local site="$1" actual setting value
   readJoomlaSiteFacts "$site" || return 1
-  actual=$(joomlaSiteCompose "$site" exec -T "$VDM_SITE_SERVICE" php -r 'echo PHP_VERSION;') || return 1
+  actual=$(joomlaSiteCompose "$site" exec --interactive=false -T "$VDM_SITE_SERVICE" php -r 'echo PHP_VERSION;') || return 1
   if [ -n "${OCTOJOOM_EXPECTED_PHP:-}" ] && [ "$actual" != "$OCTOJOOM_EXPECTED_PHP" ]; then
     printf 'The recreated service did not load the selected PHP runtime.\n' >&2; return 1
   fi
@@ -13958,7 +14116,7 @@ function joomlaRuntimeValidatePublished() {
     value="VDM_$setting"
     # Parse expressions natively, never eval. CLI overrides both timeouts, so
     # their configured values come from the actual loaded startup files.
-    joomlaSiteCompose "$site" exec -T "$VDM_SITE_SERVICE" php -r "$(joomlaPHPConfigurationReader)"'
+    joomlaSiteCompose "$site" exec --interactive=false -T "$VDM_SITE_SERVICE" php -r "$(joomlaPHPConfigurationReader)"'
       $expected = parse_ini_string($argv[1] . "=" . $argv[2]);
       $actual = octojoomConfiguredPHPValue($argv[1]);
       exit($expected !== false && isset($expected[$argv[1]]) && strcasecmp((string)$actual, (string)$expected[$argv[1]]) === 0 ? 0 : 1);
@@ -13966,6 +14124,12 @@ function joomlaRuntimeValidatePublished() {
       printf 'PHP did not load the requested %s value.\n' "$setting" >&2; return 1;
     }
   done
+}
+
+# Runtime image/webserver switches retain their broader application check.
+function joomlaRuntimeValidatePublished() {
+  local site="$1"
+  joomlaPHPValidatePublished "$site" || return 1
   joomlaDatabaseVerifyConnection "$site" || return 1
   [[ "$VDM_SITE_URL" == http://* || "$VDM_SITE_URL" == https://* ]] || { printf 'No HTTP route was identified for application verification.\n' >&2; return 1; }
   curl --fail --silent --show-error --location --max-redirs 5 --connect-timeout 5 --max-time 30 --output /dev/null "$VDM_SITE_URL"
@@ -13973,17 +14137,24 @@ function joomlaRuntimeValidatePublished() {
 
 # shellcheck disable=SC2016
 function joomlaPHPSettingsAction() {
-  local site="$1" stage="$2" model mounts source='' old_target='' ini_target setting variable saved default answer has_values=false
+  local site="$1" stage="$2" model mounts source='' old_target='' ini_target destination host_file image setting variable saved default answer status has_values=false
   local -a changes=()
   model=$(joomlaSiteCompose "$site" config --format json) || return 1
-  mounts=$(jq -c --arg service "$VDM_SITE_SERVICE" '[.services[$service].volumes[]? | select(.type == "bind" and ((.target | endswith("/php.ini")) or (.target | endswith("/zz-octojoom.ini"))))]' <<< "$model") || return 1
-  [ "$(jq 'length' <<< "$mounts")" -le 1 ] || { printf 'Several PHP override mounts exist; select the intended file in the Compose editor.\n' >&2; return 1; }
-  if [ "$(jq 'length' <<< "$mounts")" -eq 1 ]; then
-    source=$(jq -r '.[0].source' <<< "$mounts")
-    old_target=$(jq -r '.[0].target' <<< "$mounts")
+  mounts=$(joomlaSiteJSON -c --arg service "$VDM_SITE_SERVICE" '[.services[$service].volumes[]? | select(.type == "bind" and ((.target | endswith("/php.ini")) or (.target | endswith("/zz-octojoom.ini"))))]' <<< "$model") || return 1
+  [ "$(joomlaSiteJSON 'length' <<< "$mounts")" -le 1 ] || { printf 'Several PHP override mounts exist; select the intended file in the Compose editor.\n' >&2; return 1; }
+  if [ "$(joomlaSiteJSON 'length' <<< "$mounts")" -eq 1 ]; then
+    source=$(joomlaSiteJSON -r '.[0].source' <<< "$mounts") || return 1
+    source=$(joomlaBackupFilesystemPath "$source") || return 1
+    old_target=$(joomlaSiteJSON -r '.[0].target' <<< "$mounts") || return 1
     [[ -f "$source" && -r "$source" ]] || { printf 'The existing PHP overrides are not readable.\n' >&2; return 1; }
   fi
-  ini_target=$(joomlaRuntimeIniTarget "$VDM_SITE_IMAGE") || return 1
+  image="${VDM_SITE_IMAGE_DIGEST:-$VDM_SITE_IMAGE}"
+  ini_target=$(joomlaRuntimeIniTarget "$image") || return 1
+  destination=$(joomlaPHPIniDestination "$site" "$source" "$model") || return 1
+  if [ "$source" = "$VDM_SITE_DIR/php.ini" ] && [ "$source" != "$destination" ]; then
+    if joomlaPHPIniShared "$site" "$source" "$model"; then :
+    else status=$?; [ "$status" -eq 1 ] || return "$status"; OCTOJOOM_PHP_OLD_FILE="$source"; fi
+  fi
   OCTOJOOM_PHP_CHANGED_SETTINGS=''
   for setting in max_execution_time max_input_time max_input_vars error_reporting upload_max_filesize post_max_size memory_limit; do
     variable="VDM_$setting"
@@ -13993,14 +14164,11 @@ function joomlaPHPSettingsAction() {
     elif [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
       continue
     else
-      case "$setting" in
-        max_execution_time) default=124;; max_input_time) default=1500;; max_input_vars) default=3000;;
-        error_reporting) default='E_ALL & ~E_DEPRECATED & ~E_STRICT';; *) default=256M;;
-      esac
+      default=$(joomlaPHPDefaultValue "$setting") || return 1
       saved=''
-      [ -z "$source" ] || saved=$(awk -v key="$setting" '/^[[:space:]]*\[/ { scoped=($0 ~ /^[[:space:]]*\[(HOST|PATH)[[:space:]]*=/) } !scoped && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") { sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]*;.*$/, ""); value=$0 } END { print value }' "$source")
-      if [ -z "$saved" ] && [ "$VDM_SITE_RUNNING" = running ]; then
-        saved=$(joomlaSiteCompose "$site" exec -T "$VDM_SITE_SERVICE" php -r 'echo ini_get($argv[1]);' -- "$setting") || return 1
+      [ -z "$source" ] || saved=$(joomlaPHPReadValue "$source" "$setting") || return 1
+      if [ -z "$saved" ] && [[ "$VDM_SITE_RUNNING" = running || "$VDM_SITE_RUNNING" = partial ]]; then
+        saved=$(joomlaSiteCompose "$site" exec --interactive=false -T "$VDM_SITE_SERVICE" php -r "$(joomlaPHPConfigurationReader)"'echo octojoomConfiguredPHPValue($argv[1]);' -- "$setting") || return 1
       fi
       answer=$(joomlaPHPQuestion "$setting" "${saved:-$default}") || return $?
       has_values=true
@@ -14012,33 +14180,55 @@ function joomlaPHPSettingsAction() {
     writeEnvVariable "$stage/.env" "VDM_${VDM_SITE_ENV_KEY}_PHP_${setting^^}=$answer" true || return 1
   done
   "$has_values" || { printf 'Supply at least one PHP setting.\n' >&2; return 2; }
+  if [ -z "$source" ]; then
+    joomlaPHPWriteDefaults '' "$stage/php-defaults.ini" || return 1
+    source="$stage/php-defaults.ini"
+  fi
   joomlaPHPPatchIni "$source" "$stage/php.ini" "${changes[@]}" || return 1
-  joomlaPHPValidateIni "$VDM_SITE_IMAGE" "$stage/php.ini" "$ini_target" "${changes[@]}" || return 1
-  joomlaPHPReplaceMount "$VDM_SITE_COMPOSE" "$stage/docker-compose.yml" "$VDM_SITE_SERVICE" "$old_target" "$VDM_SITE_DIR/php.ini" "$ini_target" || return 1
-  OCTOJOOM_SITE_FILE_TARGETS=("$VDM_SITE_DIR/php.ini")
+  joomlaPHPValidateIni "$image" "$stage/php.ini" "$ini_target" "${changes[@]}" || return 1
+  host_file=$(joomlaWebHostPath "$destination") || return 1
+  joomlaPHPReplaceMount "$VDM_SITE_COMPOSE" "$stage/docker-compose.yml" "$VDM_SITE_SERVICE" "$old_target" "$host_file" "$ini_target" || return 1
+  writeEnvVariable "$stage/.env" "VDM_${VDM_SITE_ENV_KEY}_PHP_CUSTOM=true" true || return 1
+  OCTOJOOM_SITE_PHP_FILE="$destination"
+  OCTOJOOM_SITE_FILE_TARGETS=("$destination")
   OCTOJOOM_SITE_FILE_SOURCES=("$stage/php.ini")
 }
 
 # A PHP image switch retains existing overrides and relocates their mount to
 # the measured scan directory. Copy shared bulk files before changing one site.
+# shellcheck disable=SC2016
 function joomlaPHPStageExistingOverrides() {
-  local site="$1" stage="$2" candidate="$3" model mounts source old_target target
+  local site="$1" stage="$2" candidate="$3" model mounts source='' old_target='' target destination host_file status
   model=$(joomlaSiteCompose "$site" config --format json) || return 1
-  mounts=$(jq -c --arg service "$VDM_SITE_SERVICE" '[.services[$service].volumes[]? | select(.type == "bind" and ((.target | endswith("/php.ini")) or (.target | endswith("/zz-octojoom.ini"))))]' <<< "$model") || return 1
-  case "$(jq 'length' <<< "$mounts")" in
-    0) return 0;;
-    1) ;;
+  mounts=$(joomlaSiteJSON -c --arg service "$VDM_SITE_SERVICE" '[.services[$service].volumes[]? | select(.type == "bind" and ((.target | endswith("/php.ini")) or (.target | endswith("/zz-octojoom.ini"))))]' <<< "$model") || return 1
+  case "$(joomlaSiteJSON 'length' <<< "$mounts")" in
+    0) ;;
+    1)
+      source=$(joomlaSiteJSON -r '.[0].source' <<< "$mounts") || return 1
+      source=$(joomlaBackupFilesystemPath "$source") || return 1
+      old_target=$(joomlaSiteJSON -r '.[0].target' <<< "$mounts") || return 1
+      [[ -f "$source" && -r "$source" ]] || { printf 'Existing PHP overrides are not readable.\n' >&2; return 1; };;
     *) printf 'Several PHP override mounts exist; choose the intended file in the Compose editor.\n' >&2; return 1;;
   esac
-  source=$(jq -r '.[0].source' <<< "$mounts")
-  old_target=$(jq -r '.[0].target' <<< "$mounts")
-  [[ -f "$source" && -r "$source" ]] || { printf 'Existing PHP overrides are not readable.\n' >&2; return 1; }
+  destination=$(joomlaPHPIniDestination "$site" "$source" "$model") || return 1
+  if [ "$source" = "$VDM_SITE_DIR/php.ini" ] && [ "$source" != "$destination" ]; then
+    if joomlaPHPIniShared "$site" "$source" "$model"; then :
+    else status=$?; [ "$status" -eq 1 ] || return "$status"; OCTOJOOM_PHP_OLD_FILE="$source"; fi
+  fi
   target=$(joomlaRuntimeIniTarget "$candidate") || return 1
-  if ! cp "$source" "$stage/php.ini" || ! chmod 644 "$stage/php.ini"; then return 1; fi
+  if [ -z "$source" ]; then
+    joomlaPHPWriteDefaults '' "$stage/php.ini" || return 1
+    writeEnvVariable "$stage/.env" "VDM_${VDM_SITE_ENV_KEY}_PHP_CUSTOM=false" true || return 1
+  else
+    cp "$source" "$stage/php.ini" || return 1
+  fi
+  chmod 644 "$stage/php.ini" || return 1
   joomlaPHPValidateIni "$candidate" "$stage/php.ini" "$target" || return 1
-  joomlaPHPReplaceMount "$stage/docker-compose.yml" "$stage/compose.next" "$VDM_SITE_SERVICE" "$old_target" "$VDM_SITE_DIR/php.ini" "$target" || return 1
+  host_file=$(joomlaWebHostPath "$destination") || return 1
+  joomlaPHPReplaceMount "$stage/docker-compose.yml" "$stage/compose.next" "$VDM_SITE_SERVICE" "$old_target" "$host_file" "$target" || return 1
   mv "$stage/compose.next" "$stage/docker-compose.yml" || return 1
-  OCTOJOOM_SITE_FILE_TARGETS=("$VDM_SITE_DIR/php.ini")
+  OCTOJOOM_SITE_PHP_FILE="$destination"
+  OCTOJOOM_SITE_FILE_TARGETS=("$destination")
   OCTOJOOM_SITE_FILE_SOURCES=("$stage/php.ini")
 }
 
@@ -14046,13 +14236,14 @@ function joomlaPHPStageExistingOverrides() {
 # shellcheck disable=SC2034
 function joomla__TRuST__php() {
   (
-    local site="${VDM_CONTAINER:-}" action="${VDM_ACTION:-list}" repository version flavor tags tag stage candidate probe result=0
-    local OCTOJOOM_SITE_VALIDATE_FUNCTION=joomlaRuntimeValidatePublished OCTOJOOM_EXPECTED_PHP='' OCTOJOOM_PHP_CHANGED_SETTINGS=''
+    local site="${VDM_CONTAINER:-}" action="${VDM_ACTION:-list}" repository version flavor tags tag stage candidate probe result=0 was_running=false
+    local OCTOJOOM_SITE_VALIDATE_FUNCTION=joomlaRuntimeValidatePublished OCTOJOOM_EXPECTED_PHP='' OCTOJOOM_PHP_CHANGED_SETTINGS='' OCTOJOOM_SITE_PHP_FILE='' OCTOJOOM_PHP_OLD_FILE=''
     local -a OCTOJOOM_SITE_FILE_TARGETS=() OCTOJOOM_SITE_FILE_SOURCES=()
     [ -n "$site" ] || { printf 'Select a website with --container.\n' >&2; exit 2; }
     joomlaRuntimeRequireTools || exit 1
     readJoomlaSiteFacts "$site" || exit 1
     [[ -n "$VDM_SITE_SERVICE" && -n "$VDM_SITE_IMAGE" ]] || { printf 'The website PHP service could not be identified.\n' >&2; exit 1; }
+    if [ "$VDM_SITE_RUNNING" = running ] || [[ "${VDM_SITE_SERVICE_STATES:-}" == *"$VDM_SITE_SERVICE: running ("* ]]; then was_running=true; fi
     case "$action" in
       list)
         repository=$(joomlaRuntimeRepository "$VDM_SITE_IMAGE") || exit 1
@@ -14091,10 +14282,19 @@ function joomla__TRuST__php() {
       writeEnvVariable "$stage/.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE=$candidate" true || exit 1
       joomlaPHPStageExistingOverrides "$site" "$stage" "$candidate" || exit 1
     else
+      OCTOJOOM_SITE_VALIDATE_FUNCTION=joomlaPHPValidatePublished
+      if [[ "${VDM_SITE_PHP_VERSION:-}" =~ ^[0-9]+[.][0-9]+ ]]; then OCTOJOOM_EXPECTED_PHP="$VDM_SITE_PHP_VERSION"; fi
       joomlaPHPSettingsAction "$site" "$stage" || exit $?
     fi
     sitePublishConfiguration "$site" "$stage/docker-compose.yml" "$stage/.env" "$VDM_SITE_SERVICE" || exit $?
-    printf 'PHP %s saved for %s.\n' "$action" "$site"
+    if [ -n "$OCTOJOOM_PHP_OLD_FILE" ] && ! rm -f -- "$OCTOJOOM_PHP_OLD_FILE"; then
+      printf 'PHP settings were saved, but the unused former override could not be removed: %s\n' "$OCTOJOOM_PHP_OLD_FILE" >&2
+    fi
+    if "$was_running"; then
+      printf 'PHP %s applied to %s; the PHP service was restarted.\n' "$action" "$site"
+    else
+      printf 'PHP %s saved for %s; takes effect when the website starts.\n' "$action" "$site"
+    fi
   )
 }
 
@@ -14145,28 +14345,138 @@ function setPersistence() {
   return 1
 }
 
-# Optional customization contract: 0 configured, 1 explicitly declined,
-# >=2 failed or cancelled. Once selected, an ordinary command failure (1)
-# must never be confused with declining the customization.
-function setPHPSettings() {
-  local customization_status
-  case "${VDM_PHP_SETTINGS:-}" in
-    false) return 1;;
-    true) configurePHPSettings; customization_status=$?; [ "$customization_status" -ne 1 ] || customization_status=2; return "$customization_status";;
-  esac
-  # ask the question
-  if getInputYesNo "Would you like to set some PHP overrides for the Joomla container." \
-    "PHP.ini values" 9 112; then
-    if configurePHPSettings; then
-      return 0
-    else
-      customization_status=$?
-      [ "$customization_status" -gt 1 ] || customization_status=2
-      return "$customization_status"
-    fi
-  else
-    return $?
+# Read the editable host defaults without importing another site's environment.
+function joomlaPHPDefaultValue() {
+  local setting="$1" variable="VDM_$1" value problem=''
+  value="${!variable:-}"
+  if ! cliHasValue "$variable" && [ -f "${VDM_SRC_PATH}/.env" ] &&
+    grep -qE "^[[:space:]]*(export[[:space:]]+)?${variable}[[:space:]]*=" "${VDM_SRC_PATH}/.env"; then
+    migrationReadEnvValue "${VDM_SRC_PATH}/.env" "$variable" value problem || { printf '%s\n' "$problem" >&2; return 1; }
   fi
+  if [ -z "$value" ]; then
+    case "$setting" in
+      max_execution_time) value=124;; max_input_time) value=1500;; max_input_vars) value=3000;;
+      error_reporting) value='E_ALL & ~E_DEPRECATED & ~E_STRICT';;
+      upload_max_filesize|post_max_size|memory_limit) value=256M;;
+      *) return 1;;
+    esac
+  fi
+  joomlaPHPValidateValue "$setting" "$value" || { printf 'Invalid global PHP value for %s.\n' "$setting" >&2; return 2; }
+  printf '%s\n' "$value"
+}
+
+function joomlaPHPWriteDefaults() {
+  local source="$1" destination="$2" setting value
+  local -a changes=()
+  for setting in max_execution_time max_input_time max_input_vars error_reporting upload_max_filesize post_max_size memory_limit; do
+    value=$(joomlaPHPDefaultValue "$setting") || return $?
+    changes+=("$setting" "$value")
+  done
+  joomlaPHPPatchIni "$source" "$destination" "${changes[@]}"
+}
+
+# Prepare defaults before a site starts. Existing unmarked files are custom:
+# never replace older/manual overrides merely because they predate this flag.
+# Print only the name of an already-running PHP service recreated by this call.
+# shellcheck disable=SC2034,SC2016 # Caller-local values and literal jq variables.
+function joomlaPHPEnsureSiteIni() {
+  (
+    local site="$1" model mounts source='' old_target='' target destination mount_source custom='' stage setting variable value running
+    local OCTOJOOM_SITE_PHP_FILE='' OCTOJOOM_SITE_VALIDATE_FUNCTION=joomlaPHPValidatePublished
+    local OCTOJOOM_EXPECTED_PHP='' OCTOJOOM_PHP_CHANGED_SETTINGS=''
+    local -a OCTOJOOM_SITE_FILE_TARGETS=() OCTOJOOM_SITE_FILE_SOURCES=() changes=()
+    readJoomlaSiteFacts "$site" || exit 1
+    [[ -n "$VDM_SITE_SERVICE" && -n "$VDM_SITE_IMAGE" && "$VDM_SITE_ENV_KEY" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]] || {
+      printf 'Cannot identify the PHP configuration for %s.\n' "$site" >&2; exit 1;
+    }
+    model=$(joomlaSiteCompose "$site" config --format json) || exit 1
+    mounts=$(joomlaSiteJSON -ce --arg service "$VDM_SITE_SERVICE" \
+      '[.services[$service].volumes[]? | select(.type == "bind" and ((.target | endswith("/php.ini")) or (.target | endswith("/zz-octojoom.ini"))))]' <<< "$model") || exit 1
+    migrationReadEnvValue "$VDM_SITE_ENV" "VDM_${VDM_SITE_ENV_KEY}_PHP_CUSTOM" custom || custom=''
+    if [ "$(joomlaSiteJSON length <<< "$mounts")" -gt 1 ]; then
+      [ "$custom" != false ] || {
+        printf 'Several PHP override mounts exist for %s; select one file for the global defaults.\n' "$site" >&2; exit 1;
+      }
+      # A manually configured base INI plus another override is already complete.
+      # Starting that existing site must not demand that its layout be rewritten.
+      while IFS= read -r source; do
+        source=$(joomlaBackupFilesystemPath "$source") || exit 1
+        [ -f "$source" ] || { printf 'A custom PHP configuration file is missing: %s.\n' "$source" >&2; exit 1; }
+      done < <(joomlaSiteJSON -r '.[].source' <<< "$mounts")
+      exit 0
+    fi
+    if [ "$(joomlaSiteJSON length <<< "$mounts")" -eq 1 ]; then
+      source=$(joomlaSiteJSON -r '.[0].source' <<< "$mounts") || exit 1
+      source=$(joomlaBackupFilesystemPath "$source") || exit 1
+      old_target=$(joomlaSiteJSON -r '.[0].target' <<< "$mounts") || exit 1
+    fi
+    if [ -n "$source" ] && [ -f "$source" ]; then
+      [ "$custom" = false ] || exit 0
+    elif [ "$custom" = true ]; then
+      printf 'The custom PHP file for %s is missing: %s. Restore it before starting the site.\n' "$site" "$source" >&2
+      exit 1
+    elif [ -n "$source" ] && [ -e "$source" ]; then
+      printf 'The PHP override path is not a regular file: %s.\n' "$source" >&2; exit 1
+    fi
+    stage=$(mktemp -d "$VDM_SITE_DIR/.php-start.XXXXXX") || exit 1
+    trap 'rm -rf "$stage"' EXIT
+    [ -f "$source" ] || source=''
+    for setting in max_execution_time max_input_time max_input_vars error_reporting upload_max_filesize post_max_size memory_limit; do
+      variable="VDM_$setting"
+      value=$(joomlaPHPDefaultValue "$setting") || exit $?
+      local "$variable"
+      printf -v "$variable" '%s' "$value"
+      changes+=("$setting" "$value")
+      OCTOJOOM_PHP_CHANGED_SETTINGS+="$setting "
+    done
+    joomlaPHPPatchIni "$source" "$stage/php.ini" "${changes[@]}" || exit 1
+    if [ -n "$source" ] && [ "$source" != "$VDM_SITE_DIR/php.ini" ] && cmp -s "$source" "$stage/php.ini"; then exit 0; fi
+    destination=$(joomlaPHPIniDestination "$site" "$source" "$model") || exit 1
+    target="$old_target"
+    [ -n "$target" ] || target=$(joomlaRuntimeIniTarget "$VDM_SITE_IMAGE") || exit 1
+    joomlaPHPValidateIni "$VDM_SITE_IMAGE" "$stage/php.ini" "$target" "${changes[@]}" || exit 1
+    siteWriteScopedEnv "$VDM_SITE_COMPOSE" "$VDM_SITE_ENV" "$VDM_SITE_ENV_KEY" "$stage/.env" || exit 1
+    writeEnvVariable "$stage/.env" "VDM_${VDM_SITE_ENV_KEY}_PHP_CUSTOM=false" true || exit 1
+    mount_source=$(joomlaWebHostPath "$destination") || exit 1
+    joomlaPHPReplaceMount "$VDM_SITE_COMPOSE" "$stage/docker-compose.yml" "$VDM_SITE_SERVICE" "$old_target" "$mount_source" "$target" || exit 1
+    running=$(joomlaSiteCompose "$site" ps --status running --services) || exit 1
+    OCTOJOOM_SITE_PHP_FILE="$destination"
+    OCTOJOOM_SITE_FILE_TARGETS=("$destination")
+    OCTOJOOM_SITE_FILE_SOURCES=("$stage/php.ini")
+    sitePublishConfiguration "$site" "$stage/docker-compose.yml" "$stage/.env" "$VDM_SITE_SERVICE" >&2 || exit $?
+    if printf '%s\n' "$running" | grep -qxF "$VDM_SITE_SERVICE"; then
+      printf '%s\n' "$VDM_SITE_SERVICE"
+    fi
+    exit 0
+  )
+}
+
+# Every site gets an INI file. Declining customization selects the global values.
+function setPHPSettings() {
+  local customization_status custom=false destination="${1:-}"
+  case "${VDM_PHP_SETTINGS:-}" in
+    false) ;;
+    true) custom=true;;
+    *)
+    if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] &&
+      { isExpert || [ "${VDM_CUSTOMIZE:-}" != false ]; }; then
+      if getInputYesNo "Would you like to set custom PHP overrides for this Joomla container?\nChoose No to use your global PHP defaults." \
+        "PHP.ini values" 10 112; then
+        custom=true
+      else
+        customization_status=$?
+        [ "$customization_status" -eq 1 ] || return "$customization_status"
+      fi
+    fi
+    ;;
+  esac
+  if configurePHPSettings "$custom" "$destination"; then :
+  else
+    customization_status=$?
+    [ "$customization_status" -ne 1 ] || customization_status=2
+    return "$customization_status"
+  fi
+  VDM_PHP_CUSTOM="$custom"
 }
 
 # One question collector for new-site defaults and selected-site overrides.
@@ -14174,50 +14484,28 @@ function joomlaPHPQuestion() {
   local setting="$1" default="$2" answer variable="VDM_$1"
   if [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ]; then
     if cliHasValue "$variable"; then answer="${!variable}"; else answer="$default"; fi
+    answer=$(joomlaPHPNormalizeValue "$answer") || return 2
+    joomlaPHPValidateValue "$setting" "$answer" || { printf 'Invalid PHP value for %s.\n' "$setting" >&2; return 2; }
   else
-    answer=$(getInputNow "Enter ${setting//_/ }" "$default" "$setting") || return $?
+    default=$(joomlaPHPNormalizeValue "$default") || return 2
+    while true; do
+      answer=$(getInput "Enter ${setting//_/ }" "$default" "$setting") || return $?
+      answer=$(joomlaPHPNormalizeValue "$answer") || return 2
+      if joomlaPHPValidateValue "$setting" "$answer"; then break; fi
+      showError "Invalid value for ${setting//_/ }. Enter a valid PHP value." >&2
+    done
   fi
-  joomlaPHPValidateValue "$setting" "$answer" || { printf 'Invalid PHP value for %s.\n' "$setting" >&2; return 2; }
   printf '%s\n' "$answer"
 }
 
 function configurePHPSettings() {
-    local default_error_reporting edit_status ini_dir ini_file ini_source='' temporary status=0
-    # max_execution_time
-    VDM_max_execution_time=$(joomlaPHPQuestion max_execution_time "${VDM_max_execution_time:-124}") || return $?
-    # remember this for next time
-    setUniqueEnvVariable "VDM_max_execution_time=${VDM_max_execution_time}" || return $?
-
-    # max_input_time
-    VDM_max_input_time=$(joomlaPHPQuestion max_input_time "${VDM_max_input_time:-1500}") || return $?
-    # remember this for next time
-    setUniqueEnvVariable "VDM_max_input_time=${VDM_max_input_time}" || return $?
-
-    # max_input_vars
-    VDM_max_input_vars=$(joomlaPHPQuestion max_input_vars "${VDM_max_input_vars:-3000}") || return $?
-    # remember this for next time
-    setUniqueEnvVariable "VDM_max_input_vars=${VDM_max_input_vars}" || return $?
-
-    # error_reporting
-    default_error_reporting="E_ALL & ~E_DEPRECATED & ~E_STRICT"
-    VDM_error_reporting=$(joomlaPHPQuestion error_reporting "${VDM_error_reporting:-$default_error_reporting}") || return $?
-    # remember this for next time
-    setUniqueEnvVariable "VDM_error_reporting=\"${VDM_error_reporting}\"" || return $?
-
-    # upload_max_filesize
-    VDM_upload_max_filesize=$(joomlaPHPQuestion upload_max_filesize "${VDM_upload_max_filesize:-256M}") || return $?
-    # remember this for next time
-    setUniqueEnvVariable "VDM_upload_max_filesize=\"${VDM_upload_max_filesize}\"" || return $?
-
-    # post_max_size
-    VDM_post_max_size=$(joomlaPHPQuestion post_max_size "${VDM_post_max_size:-256M}") || return $?
-    # remember this for next time
-    setUniqueEnvVariable "VDM_post_max_size=\"${VDM_post_max_size}\"" || return $?
-
-    # memory_limit
-    VDM_memory_limit=$(joomlaPHPQuestion memory_limit "${VDM_memory_limit:-256M}") || return $?
-    # remember this for next time
-    setUniqueEnvVariable "VDM_memory_limit=\"${VDM_memory_limit}\"" || return $?
+    local custom="${1:-true}" edit_status ini_dir ini_file ini_source='' temporary status=0 setting value
+    local -a changes=()
+    for setting in max_execution_time max_input_time max_input_vars error_reporting upload_max_filesize post_max_size memory_limit; do
+      value=$(joomlaPHPDefaultValue "$setting") || return $?
+      if "$custom"; then value=$(joomlaPHPQuestion "$setting" "$value") || return $?; fi
+      changes+=("$setting" "$value")
+    done
 
     if [ -n "${VDM_J_REPO:-}" ] && [ -n "${VDM_JV:-}" ]; then
       joomlaRuntimeRequireTools || return 2
@@ -14228,20 +14516,17 @@ function configurePHPSettings() {
     # selected image's own user instead of requiring a host www-data account.
     # An adjacent temporary file permits replacement of an older read-only
     # override without changing its contents before validation succeeds.
-    ini_dir="${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}"
-    ini_file="${ini_dir}/php.ini"
+    ini_file="${2:-${VDM_PROJECT_PATH}/${VDM_PHP_PROJECT_PATH}/php.ini}"
+    ini_dir="${ini_file%/*}"
     mkdir -p "$ini_dir" || return $?
     temporary=$(mktemp "${ini_dir}/.php.ini.XXXXXX") || return $?
     [ ! -f "$ini_file" ] || ini_source="$ini_file"
-    if ! joomlaPHPPatchIni "$ini_source" "$temporary" \
-      max_execution_time "$VDM_max_execution_time" max_input_time "$VDM_max_input_time" \
-      max_input_vars "$VDM_max_input_vars" error_reporting "$VDM_error_reporting" \
-      upload_max_filesize "$VDM_upload_max_filesize" post_max_size "$VDM_post_max_size" memory_limit "$VDM_memory_limit"; then
+    if ! joomlaPHPPatchIni "$ini_source" "$temporary" "${changes[@]}"; then
       rm -f "$temporary"
       return 1
     fi
 
-    if isExpert; then
+    if "$custom" && isExpert; then
       if getInputYesNo "Would you like to set some more custom PHP overrides for this Joomla container" \
         "Edit PHP.ini" 8 112 "defaultno"; then
         showNotice "${USER^}, to save the changes you've made or to just close the file again press:\n\n[ctrl+x] with nano on ubuntu." 13

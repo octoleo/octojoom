@@ -7,6 +7,7 @@ setup() {
   octojoom_setup
   octojoom_config
   VDM_CONTAINER_TYPE=joomla
+  joomlaRuntimeIniTarget() { printf '%s\n' /usr/local/etc/php/conf.d/zz-octojoom.ini; }
 }
 
 # Real command startup has the same prompt policy; a reached question here is
@@ -56,6 +57,9 @@ headless_setup() {
   assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" 'image: joomla:latest'
   assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" '${VDM_PROJECT_PATH}/alpha/joomla:/var/www/html'
   assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" '${VDM_PROJECT_PATH}/alpha/db:/var/lib/mysql'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" '${VDM_PROJECT_PATH}/alpha/php.ini:/usr/local/etc/php/conf.d/zz-octojoom.ini'
+  assert_file_contains "${VDM_PROJECT_PATH}/alpha/php.ini" 'max_execution_time = 124'
+  assert_file_contains "$env_file" 'VDM_ALPHA_PHP_CUSTOM=false'
   refute_file_exists "${VDM_REPO_PATH}/joomla/enabled/alpha.example.test"
   assert_command '^docker compose .* config --quiet$'
   refute_command '^whiptail '
@@ -138,7 +142,37 @@ headless_setup() {
     getJoomlaComposeIdentity "$compose"
     assert_file_contains "$compose" '${VDM_PROJECT_PATH}/'"${VDM_SRC_KEY}"'/joomla:/var/www/html'
     assert_file_contains "$compose" '${VDM_PROJECT_PATH}/'"${VDM_SRC_KEY}"'/db:/var/lib/mysql'
+    assert_file_contains "$compose" '${VDM_PROJECT_PATH}/'"${VDM_SRC_KEY}"'/php.ini:/usr/local/etc/php/conf.d/zz-octojoom.ini'
+    assert_file_contains "${VDM_PROJECT_PATH}/${VDM_SRC_KEY}/php.ini" 'memory_limit = 256M'
   done
+}
+
+@test "setup: default PHP settings come from global config without changing it" {
+  headless_setup
+  octojoom_config 'VDM_max_execution_time=0' 'VDM_max_input_vars=7000' 'VDM_memory_limit="768M"'
+  local value
+  run joomla__TRuST__setup
+  assert_success
+  assert_file_contains "${VDM_PROJECT_PATH}/alpha/php.ini" 'max_execution_time = 0'
+  assert_file_contains "${VDM_PROJECT_PATH}/alpha/php.ini" 'max_input_vars = 7000'
+  assert_file_contains "${VDM_PROJECT_PATH}/alpha/php.ini" 'memory_limit = 768M'
+  migrationReadEnvValue "${VDM_SRC_PATH}/.env" VDM_max_execution_time value
+  assert_equal "$value" 0
+  migrationReadEnvValue "${VDM_SRC_PATH}/.env" VDM_memory_limit value
+  assert_equal "$value" 768M
+}
+
+@test "setup: explicit PHP customization is scoped and leaves future defaults intact" {
+  headless_setup
+  octojoom_config 'VDM_memory_limit="768M"'
+  local value
+  parseCLI --memory-limit 1G --non-interactive
+  run joomla__TRuST__setup
+  assert_success
+  assert_file_contains "${VDM_PROJECT_PATH}/alpha/php.ini" 'memory_limit = 1G'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/.env" 'VDM_ALPHA_PHP_CUSTOM=true'
+  migrationReadEnvValue "${VDM_SRC_PATH}/.env" VDM_memory_limit value
+  assert_equal "$value" 768M
 }
 
 @test "setup: explicit local-test storage opt-out remains available for single and bulk setup" {
@@ -335,7 +369,7 @@ saved_nginx_php_setup() {
   assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" 'image: custom/joomla:fpm-build'
 }
 
-@test "setup: bulk saved nginx defaults validate and mount the shared PHP override for FPM" {
+@test "setup: bulk saved nginx defaults validate once and mount a separate PHP file for each site" {
   saved_nginx_php_setup
   # BSD sed treats backslash-n inside a bracket expression as a literal n.
   # Exercise that portable behavior on Linux too, without relying on random keys.
@@ -350,8 +384,10 @@ saved_nginx_php_setup() {
   assert_success
   [ "$(wc -l < "$SANDBOX/php-validation")" -eq 1 ]
   assert_file_contains "$SANDBOX/php-validation" 'custom/joomla:fpm-build /opt/fpm/conf.d/zz-octojoom.ini'
-  assert_file_contains "${VDM_REPO_PATH}/joomla/available/website1.example.test/docker-compose.yml" '/bulk/php.ini:/opt/fpm/conf.d/zz-octojoom.ini'
-  assert_file_contains "${VDM_REPO_PATH}/joomla/available/website2.example.test/docker-compose.yml" '/bulk/php.ini:/opt/fpm/conf.d/zz-octojoom.ini'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/website1.example.test/docker-compose.yml" '/firstn/php.ini:/opt/fpm/conf.d/zz-octojoom.ini'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/website2.example.test/docker-compose.yml" '/second/php.ini:/opt/fpm/conf.d/zz-octojoom.ini'
+  assert_file_contains "${VDM_PROJECT_PATH}/firstn/php.ini" 'memory_limit = 512M'
+  assert_file_contains "${VDM_PROJECT_PATH}/second/php.ini" 'memory_limit = 512M'
   assert_file_contains "${VDM_REPO_PATH}/joomla/available/website1.example.test/docker-compose.yml" '${VDM_PROJECT_PATH}/firstn/joomla:/var/www/html:ro'
   assert_file_contains "${VDM_REPO_PATH}/joomla/available/website2.example.test/docker-compose.yml" '${VDM_PROJECT_PATH}/second/joomla:/var/www/html:ro'
 }

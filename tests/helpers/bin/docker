@@ -91,6 +91,11 @@ compose)
     if [ -n "${REAL_DOCKER:-}" ] && [ -x "${REAL_DOCKER}" ]; then
       exec "${REAL_DOCKER}" compose "$@"
     fi
+    if [[ " $* " == *' --format json '* ]] && [ -n "$file" ]; then
+      directory="${file%/*}"
+      fixture="$state/config/${directory##*/}.json"
+      [ ! -f "$fixture" ] || cat "$fixture"
+    fi
     ;;
   up | start | restart)
     while IFS= read -r name; do

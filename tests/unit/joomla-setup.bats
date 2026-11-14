@@ -18,6 +18,8 @@ setup() {
   VDM_PHP_INI_TARGET=/usr/local/etc/php/conf.d/zz-octojoom.ini
   joomlaRuntimeIniTarget() { printf '%s\n' '/usr/local/etc/php/conf.d/zz-octojoom.ini'; }
   joomlaSetupPHPChoices() { return 0; }
+  # Setup creates the INI here; startup preparation has separate acceptance tests.
+  joomlaPHPEnsureSiteIni() { return 0; }
 }
 
 # the joomengine image source offered in expert mode (a radiolist tag)
@@ -46,7 +48,7 @@ expert_bulk_answers() {
 
 fail_php_publication() {
   mv() {
-    [[ "${*: -1}" != */php.ini ]] || return 1
+    [[ "${*: -1}" != */php.ini && "${*: -1}" != */.php-bulk.* ]] || return 1
     command mv "$@"
   }
 }
@@ -201,7 +203,7 @@ fail_php_publication() {
   assert_success
   assert_answers_used
   assert_file_exists "$(compose_yml abc.vdm.dev)"
-  refute_file_exists "${VDM_PROJECT_PATH}/abc/php.ini"
+  assert_file_contains "${VDM_PROJECT_PATH}/abc/php.ini" 'max_execution_time = 124'
   refute_file_exists "${VDM_PROJECT_PATH}/abc/entrypoint.sh"
 }
 
@@ -381,13 +383,15 @@ fail_php_publication() {
 ###############################################################################
 # setPHPSettings
 
-@test "setPHPSettings: declined, nothing is written" {
-  octojoom_config
+@test "setPHPSettings: declining customization writes the global defaults" {
+  octojoom_config 'VDM_max_execution_time=210' 'VDM_memory_limit="640M"'
   VDM_PHP_PROJECT_PATH=abc
   answers no
   run setPHPSettings
-  assert_status 1
-  refute_file_exists "${VDM_PROJECT_PATH}/abc/php.ini"
+  assert_success
+  assert_file_contains "${VDM_PROJECT_PATH}/abc/php.ini" 'max_execution_time = 210'
+  assert_file_contains "${VDM_PROJECT_PATH}/abc/php.ini" 'memory_limit = 640M'
+  assert_answers_used
 }
 
 @test "optional customizations: cancellation at the initial prompts is a hard error" {
@@ -415,8 +419,9 @@ fail_php_publication() {
   refute_command '^sudo chmod'
 }
 
-@test "setPHPSettings: writes php.ini and remembers the values" {
-  octojoom_config
+@test "setPHPSettings: custom values belong to this site and do not replace global defaults" {
+  octojoom_config 'VDM_memory_limit="640M"'
+  cp "${VDM_SRC_PATH}/.env" "$SANDBOX/global.before"
   VDM_PHP_PROJECT_PATH=abc
   answers yes 300 2000 5000 E_ALL 128M 64M 1G
   run setPHPSettings
@@ -424,19 +429,20 @@ fail_php_publication() {
   local ini="${VDM_PROJECT_PATH}/abc/php.ini"
   assert_file_contains "${ini}" 'max_execution_time = 300'
   assert_file_contains "${ini}" 'memory_limit = 1G'
-  assert_file_contains "${VDM_SRC_PATH}/.env" 'VDM_memory_limit="1G"'
+  cmp "$SANDBOX/global.before" "${VDM_SRC_PATH}/.env"
   if [ "$OS_NUMBER" -ne 3 ]; then assert_equal "$(file_mode "$ini")" 644; fi
   refute_command '^sudo (chown|chmod)'
 }
 
-@test "setPHPSettings: failed config persistence stops before generating php.ini" {
+@test "setPHPSettings: a cancelled answer does not partially update global settings" {
   octojoom_config
+  cp "${VDM_SRC_PATH}/.env" "$SANDBOX/global.before"
   VDM_PHP_PROJECT_PATH=abc
-  setUniqueEnvVariable() { return 12; }
-  answers yes 300
+  answers yes 300 '<esc>'
   run setPHPSettings
-  assert_status 12
+  assert_status 255
   refute_file_exists "${VDM_PROJECT_PATH}/abc/php.ini"
+  cmp "$SANDBOX/global.before" "${VDM_SRC_PATH}/.env"
 }
 
 @test "setPHPSettings: publication failure preserves the previous override" {

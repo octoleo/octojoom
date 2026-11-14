@@ -10,7 +10,7 @@ setup() {
 }
 
 @test "headless: a selected lifecycle action never opens a dialog" {
-  make_joomla_container alpha ALPHA alpha
+  make_joomla_container_with_php alpha ALPHA alpha
   run_octojoom --container alpha.vdm.dev --non-interactive
   assert_success
   assert_file_exists "$VDM_REPO_PATH/joomla/enabled/alpha.vdm.dev"
@@ -19,7 +19,7 @@ setup() {
 }
 
 @test "headless: missing target fails before creating an enabled directory" {
-  make_joomla_container alpha ALPHA alpha
+  make_joomla_container_with_php alpha ALPHA alpha
   run_octojoom --type joomla --task enable --non-interactive
   assert_status 17
   refute_file_exists "$VDM_REPO_PATH/joomla/enabled"
@@ -94,7 +94,7 @@ JSON
 }
 
 @test "configuration: path and read honor a site's effective private environment" {
-  make_joomla_container alpha ALPHA alpha
+  make_joomla_container_with_php alpha ALPHA alpha
   printf 'VDM_ALPHA_DB="private"\n' >"$VDM_REPO_PATH/joomla/available/alpha.vdm.dev/.env"
   run_octojoom --type joomla --task config --container alpha.vdm.dev --config-kind env --action read --non-interactive
   assert_success
@@ -124,7 +124,7 @@ JSON
 }
 
 @test "completion: discovery reads local names without Docker, dialogs or config writes" {
-  make_joomla_container alpha ALPHA alpha
+  make_joomla_container_with_php alpha ALPHA alpha
   run_octojoom --complete --container a joomla
   assert_success
   assert_equal "$output" alpha.vdm.dev
@@ -205,7 +205,7 @@ JSON
 }
 
 @test "configuration: a changed Compose project name is refused before publication" {
-  make_joomla_container alpha ALPHA alpha
+  make_joomla_container_with_php alpha ALPHA alpha
   local original="$VDM_REPO_PATH/joomla/available/alpha.vdm.dev/docker-compose.yml"
   printf 'name: replacement-project\n' >"$SANDBOX/replacement.yml"
   cat "$original" >>"$SANDBOX/replacement.yml"
@@ -230,7 +230,7 @@ JSON
 }
 
 @test "configuration: an environment replacement cannot redirect Compose identity" {
-  make_joomla_container alpha ALPHA alpha
+  make_joomla_container_with_php alpha ALPHA alpha
   local directory="$VDM_REPO_PATH/joomla/available/alpha.vdm.dev"
   printf 'VDM_ALPHA_PROJECT=original\n' >"$directory/.env"
   printf 'VDM_ALPHA_PROJECT=changed\n' >"$SANDBOX/replacement.env"
@@ -251,7 +251,7 @@ JSON
 }
 
 @test "configuration: running services are discovered using only the original published files" {
-  make_joomla_container alpha ALPHA alpha
+  make_joomla_container_with_php alpha ALPHA alpha
   local directory="$VDM_REPO_PATH/joomla/available/alpha.vdm.dev" kind
   for kind in compose env; do
     VDM_CONTAINER_TYPE=joomla VDM_CONTAINER=alpha.vdm.dev VDM_ACTION=replace VDM_CONFIG_KIND="$kind"
@@ -294,7 +294,7 @@ JSON
 }
 
 @test "configuration: stopped sites stay stopped and failed running updates restore previous content" {
-  make_joomla_container alpha ALPHA alpha
+  make_joomla_container_with_php alpha ALPHA alpha
   local original="$VDM_REPO_PATH/joomla/available/alpha.vdm.dev/docker-compose.yml"
   cp "$original" "$SANDBOX/original.yml"
   cp "$original" "$SANDBOX/replacement.yml"

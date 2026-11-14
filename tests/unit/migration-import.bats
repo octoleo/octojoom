@@ -284,6 +284,9 @@ prepare_activation_fixture() {
   cp "$PACKAGE/compose/docker-compose.yml" "$destination/docker-compose.yml"
   cp "$PACKAGE/compose/.env" "$destination/.env"
   migrationDestinationReady() { return 0; }
+  # These fixtures exercise activation cleanup; PHP startup preparation has
+  # separate coverage and needs the real image/model absent from this fixture.
+  joomlaPHPEnsureSiteIni() { return 0; }
 }
 
 @test "migration startup failure shows one visible redacted error without hidden helper dialogs" {

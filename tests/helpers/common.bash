@@ -340,6 +340,26 @@ make_joomla_container() {
   } >>"${VDM_REPO_PATH}/joomla/.env"
 }
 
+# A prepared PHP mount for whole-script CLI tests. The JSON is the Docker
+# response fixture on hosts without Compose; Linux can resolve the real YAML.
+make_joomla_container_with_php() {
+  make_joomla_container "$@"
+  local key="$1" site="$3.${4:-vdm.dev}" directory
+  directory="${VDM_REPO_PATH}/joomla/available/${site}"
+  printf 'memory_limit = 256M\n' > "${VDM_PROJECT_PATH}/${key}/php.ini"
+  joomlaPHPReplaceMount "$directory/docker-compose.yml" "$directory/compose.php.yml" "joomla$key" '' \
+    "${VDM_PROJECT_PATH}/${key}/php.ini" /usr/local/etc/php/conf.d/zz-octojoom.ini || return 1
+  mv "$directory/compose.php.yml" "$directory/docker-compose.yml" || return 1
+  mkdir -p "$STUB_DIR/docker/config"
+  # shellcheck disable=SC2016 # jq variables belong to the JSON fixture.
+  jq -n --arg key "$key" --arg base "$VDM_PROJECT_PATH" '{services:{
+    ("mariadb"+$key):{image:"mariadb:latest"},
+    ("joomla"+$key):{image:"joomla:5.3",volumes:[
+      {type:"bind",source:($base+"/"+$key+"/joomla"),target:"/var/www/html"},
+      {type:"bind",source:($base+"/"+$key+"/php.ini"),target:"/usr/local/etc/php/conf.d/zz-octojoom.ini"}]},
+    ("phpmyadmin"+$key):{image:"phpmyadmin/phpmyadmin"}}}' > "$STUB_DIR/docker/config/$site.json"
+}
+
 # enable an available container the way Octojoom does (a link, or a copy where links are not supported)
 link_enabled() {
   local type="$1" container="$2"
