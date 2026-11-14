@@ -209,6 +209,8 @@ EXTRA
   [ "$(grep -c ' up ' "$STUB_DIR/runtime-commands")" -eq 2 ]
   [ "$(grep -c ' up .*--force-recreate' "$STUB_DIR/runtime-commands")" -eq 2 ]
   [ ! -e "$ALIGN_DIR/.octojoom-change.lock" ]
+  run compgen -G "$ALIGN_DIR/.octojoom-recovery.*"
+  assert_failure
 }
 
 @test "publication: companion-only changes recreate the running web service" {
@@ -227,6 +229,110 @@ EXTRA
   assert_equal "$(cat "$ALIGN_DIR/php.ini")" 'memory_limit = 512M'
   [ "$(grep -c ' up .*--force-recreate.*joomlaalpha' "$STUB_DIR/runtime-commands")" -eq 1 ]
   run grep -E ' up .*mariadbalpha' "$STUB_DIR/runtime-commands"
+  assert_failure
+  run compgen -G "$ALIGN_DIR/.octojoom-recovery.*"
+  assert_failure
+}
+
+@test "publication: project PHP overrides are updated in place and missing project folders are created" {
+  local target="$VDM_PROJECT_PATH/site config/php.ini"
+  printf 'max_execution_time = 300\n' > "$SANDBOX/php.ini"
+  siteWriteScopedEnv "$ALIGN_YML" "$ALIGN_ENV" ALPHA "$SANDBOX/candidate.env"
+  cp "$ALIGN_YML" "$SANDBOX/candidate.yml"
+  OCTOJOOM_SITE_PHP_FILE="$target"
+  OCTOJOOM_SITE_FILE_TARGETS=("$target")
+  OCTOJOOM_SITE_FILE_SOURCES=("$SANDBOX/php.ini")
+  migrationRunCompose() { return 0; }
+  run sitePublishConfiguration alpha.example.test "$SANDBOX/candidate.yml" "$SANDBOX/candidate.env" joomlaalpha
+  assert_success
+  assert_file_contains "$target" 'max_execution_time = 300'
+  refute_file_exists "$ALIGN_DIR/php.ini"
+  printf 'max_execution_time = 600\n' > "$SANDBOX/php.ini"
+  run sitePublishConfiguration alpha.example.test "$SANDBOX/candidate.yml" "$SANDBOX/candidate.env" joomlaalpha
+  assert_success
+  assert_file_contains "$target" 'max_execution_time = 600'
+  run compgen -G "$ALIGN_DIR/.octojoom-recovery.*"
+  assert_failure
+}
+
+@test "publication: an external companion must be the explicitly selected PHP file" {
+  printf 'old\n' > "$VDM_PROJECT_PATH/php.ini"
+  printf 'new\n' > "$SANDBOX/php.ini"
+  siteWriteScopedEnv "$ALIGN_YML" "$ALIGN_ENV" ALPHA "$SANDBOX/candidate.env"
+  cp "$ALIGN_YML" "$SANDBOX/candidate.yml"
+  OCTOJOOM_SITE_FILE_TARGETS=("$VDM_PROJECT_PATH/php.ini")
+  OCTOJOOM_SITE_FILE_SOURCES=("$SANDBOX/php.ini")
+  run sitePublishConfiguration alpha.example.test "$SANDBOX/candidate.yml" "$SANDBOX/candidate.env"
+  assert_failure
+  assert_equal "$(cat "$VDM_PROJECT_PATH/php.ini")" old
+}
+
+@test "publication: failed project PHP apply restores its file and removes completed recovery" {
+  local target="$VDM_PROJECT_PATH/php.ini"
+  printf 'max_execution_time = 124\n' > "$target"
+  printf 'max_execution_time = 300\n' > "$SANDBOX/php.ini"
+  siteWriteScopedEnv "$ALIGN_YML" "$ALIGN_ENV" ALPHA "$SANDBOX/candidate.env"
+  cp "$ALIGN_YML" "$SANDBOX/candidate.yml"
+  OCTOJOOM_SITE_PHP_FILE="$target"
+  OCTOJOOM_SITE_FILE_TARGETS=("$target")
+  OCTOJOOM_SITE_FILE_SOURCES=("$SANDBOX/php.ini")
+  OCTOJOOM_SITE_VALIDATE_FUNCTION=alignmentRejectRuntime
+  alignmentRejectRuntime() { return 1; }
+  migrationRunCompose() { case " $* " in *' ps '*) printf 'joomlaalpha\n' ;; esac; return 0; }
+  run sitePublishConfiguration alpha.example.test "$SANDBOX/candidate.yml" "$SANDBOX/candidate.env" joomlaalpha
+  assert_failure
+  assert_output_contains 'The previous configuration and service state were restored.'
+  assert_file_contains "$target" 'max_execution_time = 124'
+  run compgen -G "$ALIGN_DIR/.octojoom-recovery.*"
+  assert_failure
+}
+
+@test "publication: incomplete service recovery retains originals and reports their location" {
+  cp "$ALIGN_YML" "$SANDBOX/original"
+  siteWriteScopedEnv "$ALIGN_YML" "$ALIGN_ENV" ALPHA "$SANDBOX/candidate.env"
+  siteReplaceServiceScalar "$ALIGN_YML" "$SANDBOX/candidate.yml" joomlaalpha image candidate:tag
+  migrationRunCompose() {
+    case " $* " in
+      *' ps '*) printf 'joomlaalpha\n' ;;
+      *' up '*) return 1 ;;
+    esac
+    return 0
+  }
+  run sitePublishConfiguration alpha.example.test "$SANDBOX/candidate.yml" "$SANDBOX/candidate.env" joomlaalpha
+  assert_failure
+  assert_output_contains 'Automatic recovery is incomplete'
+  local recovery
+  recovery=$(compgen -G "$ALIGN_DIR/.octojoom-recovery.*")
+  assert_output_contains "$recovery"
+  cmp "$SANDBOX/original" "$recovery/1"
+  cmp "$SANDBOX/original" "$ALIGN_YML"
+  [ ! -e "$ALIGN_DIR/.octojoom-change.lock" ]
+}
+
+@test "publication: copied enabled sites receive and recover the same configuration" {
+  OS_NUMBER=3
+  local enabled="$VDM_REPO_PATH/joomla/enabled/alpha.example.test"
+  mkdir -p "${enabled%/*}"
+  cp -R "$ALIGN_DIR" "$enabled"
+  siteWriteScopedEnv "$ALIGN_YML" "$ALIGN_ENV" ALPHA "$SANDBOX/candidate.env"
+  siteReplaceServiceScalar "$ALIGN_YML" "$SANDBOX/candidate.yml" joomlaalpha image candidate:tag
+  migrationRunCompose() { case " $* " in *' ps '*) printf 'joomlaalpha\n' ;; esac; return 0; }
+  run sitePublishConfiguration alpha.example.test "$SANDBOX/candidate.yml" "$SANDBOX/candidate.env" joomlaalpha
+  assert_success
+  cmp "$ALIGN_YML" "$enabled/docker-compose.yml"
+  cmp "$ALIGN_DIR/.env" "$enabled/.env"
+  assert_equal "$(getJoomlaSiteEnabledState alpha.example.test)" enabled
+  cp "$ALIGN_YML" "$SANDBOX/previous"
+  siteReplaceServiceScalar "$ALIGN_YML" "$SANDBOX/candidate.yml" joomlaalpha image rejected:tag
+  OCTOJOOM_SITE_VALIDATE_FUNCTION=alignmentRejectRuntime
+  alignmentRejectRuntime() { return 1; }
+  run sitePublishConfiguration alpha.example.test "$SANDBOX/candidate.yml" "$SANDBOX/candidate.env" joomlaalpha
+  assert_failure
+  cmp "$SANDBOX/previous" "$ALIGN_YML"
+  cmp "$ALIGN_YML" "$enabled/docker-compose.yml"
+  cmp "$ALIGN_DIR/.env" "$enabled/.env"
+  assert_equal "$(getJoomlaSiteEnabledState alpha.example.test)" enabled
+  run compgen -G "$ALIGN_DIR/.octojoom-recovery.*"
   assert_failure
 }
 
