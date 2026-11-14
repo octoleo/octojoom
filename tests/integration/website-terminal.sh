@@ -15,7 +15,7 @@ WORK=$(mktemp -d)
 cleanup() {
   if [ -n "${OCTOJOOM_TTY_ARTIFACT_DIR:-}" ]; then
     mkdir -p "$OCTOJOOM_TTY_ARTIFACT_DIR"
-    cp "$WORK"/*.log "$WORK"/*.args "$WORK"/*.stderr "$OCTOJOOM_TTY_ARTIFACT_DIR/" 2>/dev/null || true
+    cp "$WORK"/*.log "$WORK"/*.args "$WORK"/*.stderr "$WORK"/*.status "$OCTOJOOM_TTY_ARTIFACT_DIR/" 2>/dev/null || true
   fi
   rm -rf "$WORK"
 }
@@ -30,7 +30,16 @@ printf '%s\n' "$@" >> "$OCTOJOOM_TTY_TEST_WORK/$OCTOJOOM_TTY_TEST_CASE.args"
 # A delayed launch must still accept normal input once its widget opens.
 [ "$OCTOJOOM_TTY_TEST_CASE" != menu-delayed ] || sleep 1
 printf 'ready\n' >> "$OCTOJOOM_TTY_TEST_WORK/ready"
-exec "$REAL_WHIPTAIL" "$@"
+if [ "$OCTOJOOM_TTY_TEST_CASE" != php-escape ]; then
+  exec "$REAL_WHIPTAIL" "$@"
+fi
+# Inputbox Escape can return a different status from menu Escape. Record the
+# real widget's result so the test verifies exact propagation through both
+# getInput and joomlaPHPQuestion instead of imposing a platform-specific code.
+"$REAL_WHIPTAIL" "$@"
+status=$?
+printf '%s\n' "$status" > "$OCTOJOOM_TTY_TEST_WORK/$OCTOJOOM_TTY_TEST_CASE.status"
+exit "$status"
 WRAPPER
 chmod +x "$WORK/bin/whiptail"
 export PATH="$WORK/bin:$PATH"
@@ -109,7 +118,11 @@ case "$OCTOJOOM_TTY_TEST_CASE" in
     ;;
   php-escape)
     result=$(joomlaPHPQuestion max_execution_time 124)
-    printf '\nPHP_ESCAPE_STATUS=%s VALUE=%s\n' "$?" "$result"
+    status=$?
+    native_status=$(cat "$OCTOJOOM_TTY_TEST_WORK/php-escape.status")
+    printf '\nPHP_ESCAPE_STATUS=%s NATIVE_STATUS=%s VALUE=%s\n' "$status" "$native_status" "$result"
+    [ "$native_status" -ne 0 ] && [ "$status" -eq "$native_status" ] && [ -z "$result" ] || exit 1
+    printf 'PHP_ESCAPE_PRESERVED\n'
     ;;
   progress-*)
     # Keep diagnostics separate for exact-once assertions while the real native
@@ -189,9 +202,13 @@ run_case() {
     cat "$WORK/$name.log" >&2
     return 1
   fi
-  grep -qF "$expected" "$WORK/$name.log"
-  grep -qF 'TERMINAL_RESTORED' "$WORK/$name.log"
-  grep -qxF -- "$widget" "$WORK/$name.args"
+  if ! grep -qF "$expected" "$WORK/$name.log" ||
+    ! grep -qF 'TERMINAL_RESTORED' "$WORK/$name.log" ||
+    ! grep -qxF -- "$widget" "$WORK/$name.args"; then
+    printf 'FAIL: %s expected %s, native %s, and terminal restoration\n' "$name" "$expected" "$widget" >&2
+    cat "$WORK/$name.log" >&2
+    return 1
+  fi
   if grep -Eq 'Bad file descriptor|ambiguous redirect|TERMINAL_NOT_RESTORED|duration unknown|\^\[\[5~' "$WORK/$name.log"; then
     cat "$WORK/$name.log" >&2
     return 1
@@ -226,7 +243,7 @@ run_case php-all '\r' 'PHP_QUESTIONS_COMPLETE' --inputbox
 grep -qF 'PHP_VALUE=max_execution_time:0' "$WORK/php-all.log"
 grep -qF 'PHP_VALUE=max_input_time:1' "$WORK/php-all.log"
 grep -qF 'PHP_VALUE=memory_limit:512M' "$WORK/php-all.log"
-run_case php-escape '\033' 'PHP_ESCAPE_STATUS=255 VALUE=' --inputbox
+run_case php-escape '\033' 'PHP_ESCAPE_PRESERVED' --inputbox
 run_case progress-0 '\033[5~' 'PROGRESS_STATUS=0' --gauge
 run_case progress-23 '' 'PROGRESS_STATUS=23' --gauge
 [ ! -s "$WORK/progress-0.stderr" ]
