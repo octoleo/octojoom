@@ -49,7 +49,9 @@ setup() {
   assert_success
   assert_file_contains "$PHP_SOURCE" 'max_execution_time = 300'
   assert_file_contains "$PHP_SOURCE" 'memory_limit = 768M'
-  assert_file_contains "$VDM_SITE_COMPOSE" "$PHP_SOURCE:/usr/local/etc/php/conf.d/zz-octojoom.ini:ro"
+  local compose_php_source
+  compose_php_source=$(joomlaWebHostPath "$PHP_SOURCE")
+  assert_file_contains "$VDM_SITE_COMPOSE" "$compose_php_source:/usr/local/etc/php/conf.d/zz-octojoom.ini:ro"
   assert_file_contains "$VDM_SITE_ENV" 'VDM_ALPHA_PHP_CUSTOM=false'
   refute_command '^whiptail '
 }
