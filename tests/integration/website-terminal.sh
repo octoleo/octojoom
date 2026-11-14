@@ -77,6 +77,40 @@ case "$OCTOJOOM_TTY_TEST_CASE" in
     showJoomlaWebsiteInformation first.example.test true
     printf '\nNAVIGATION_STATUS=%s\n' "$?"
     ;;
+  back-*)
+    # Real menus with harmless data providers. Enter must return immediately,
+    # even when a generated list is longer than the visible selection area.
+    listJoomlaSites() { printf 'site%s.example.test\n' {1..40}; }
+    getJoomlaSiteEnabledState() { printf 'disabled\n'; }
+    readJoomlaSiteFacts() { VDM_SITE_SERVICES=$(printf 'service%s\n' {1..40}); }
+    joomlaDatabaseContext() { VDM_DB_NAME=example VDM_DB_ENGINE=mariadb VDM_DB_SERVICE=database; }
+    joomlaBackupResolveOptions() { VDM_DESTINATION='/example/backups'; }
+    joomlaBackupList() { printf '2026-01-01\tfull\ttar.gz\t100\tExample\t/example/backup.tar.gz\n'; }
+    joomlaSiteCompose() { printf 'Unexpected log read\n' >> "$OCTOJOOM_TTY_TEST_WORK/back.actions"; return 1; }
+    joomla__TRuST__database() { printf 'Unexpected database operation\n' >> "$OCTOJOOM_TTY_TEST_WORK/back.actions"; }
+    joomla__TRuST__backup() { printf 'Unexpected backup operation\n' >> "$OCTOJOOM_TTY_TEST_WORK/back.actions"; }
+    case "$OCTOJOOM_TTY_TEST_CASE" in
+      back-websites) showJoomlaWebsiteInformation;;
+      back-logs) runJoomlaSiteAction first.example.test logs;;
+      back-database) showJoomlaDatabaseTools first.example.test;;
+      back-backups|back-archive) showJoomlaBackups first.example.test;;
+      back-batch) showJoomlaBackupSelection;;
+    esac
+    printf '\nBACK_STATUS=%s\n' "$?"
+    ;;
+  php-all)
+    settings=(max_execution_time max_input_time max_input_vars error_reporting upload_max_filesize post_max_size memory_limit)
+    defaults=(0 1 7000 E_ALL 256M 256M 512M)
+    for index in "${!settings[@]}"; do
+      result=$(joomlaPHPQuestion "${settings[index]}" "${defaults[index]}") || exit $?
+      printf '\nPHP_VALUE=%s:%s\n' "${settings[index]}" "$result"
+    done
+    printf 'PHP_QUESTIONS_COMPLETE\n'
+    ;;
+  php-escape)
+    result=$(joomlaPHPQuestion max_execution_time 124)
+    printf '\nPHP_ESCAPE_STATUS=%s VALUE=%s\n' "$?" "$result"
+    ;;
   progress-*)
     # Keep diagnostics separate for exact-once assertions while the real native
     # gauge still owns /dev/tty. No alternate renderer is substituted.
@@ -115,6 +149,18 @@ feed_keys() {
     printf '\033[B\033[B\033[B\r'
     wait_for_dialog 4 "$deadline" || return 1
     printf '\r'
+  elif [ "$OCTOJOOM_TTY_TEST_CASE" = back-archive ]; then
+    # Archive Back -> backup actions -> Back to the website.
+    wait_for_dialog 2 "$deadline" || return 1
+    printf '\r'
+    wait_for_dialog 3 "$deadline" || return 1
+    printf '\r'
+  elif [ "$OCTOJOOM_TTY_TEST_CASE" = php-all ]; then
+    local count
+    for count in {2..7}; do
+      wait_for_dialog "$count" "$deadline" || return 1
+      printf '\r'
+    done
   fi
   while [ ! -f "$WORK/done" ]; do
     [ "$SECONDS" -lt "$deadline" ] || return 1
@@ -169,6 +215,18 @@ run_case navigation '\033[B\033[B\r' 'NAVIGATION_STATUS=0' --menu
 grep -qxF -- '--textbox' "$WORK/navigation.args"
 [ "$(cat "$WORK/navigation.actions")" = logs ]
 [ "$(grep -cxF -- '--menu' "$WORK/navigation.args")" = 3 ]
+for menu in websites logs database backups batch; do
+  run_case "back-$menu" '\r' 'BACK_STATUS=0' --menu
+done
+run_case back-archive '\033[B\033[B\033[B\r' 'BACK_STATUS=0' --menu
+[ "$(grep -cxF -- '--menu' "$WORK/back-archive.args")" = 3 ]
+[ ! -e "$WORK/back.actions" ]
+run_case php-all '\r' 'PHP_QUESTIONS_COMPLETE' --inputbox
+[ "$(grep -cxF -- '--inputbox' "$WORK/php-all.args")" = 7 ]
+grep -qF 'PHP_VALUE=max_execution_time:0' "$WORK/php-all.log"
+grep -qF 'PHP_VALUE=max_input_time:1' "$WORK/php-all.log"
+grep -qF 'PHP_VALUE=memory_limit:512M' "$WORK/php-all.log"
+run_case php-escape '\033' 'PHP_ESCAPE_STATUS=255 VALUE=' --inputbox
 run_case progress-0 '\033[5~' 'PROGRESS_STATUS=0' --gauge
 run_case progress-23 '' 'PROGRESS_STATUS=23' --gauge
 [ ! -s "$WORK/progress-0.stderr" ]

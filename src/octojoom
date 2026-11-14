@@ -6705,8 +6705,8 @@ function showJoomlaDatabaseTools() {
     joomlaDatabaseContext "$site" || return 1
     action=$(whiptail --title 'Database tools' --backtitle "$BACK_TITLE" --menu \
       "Website: $site\nDatabase: $VDM_DB_NAME\nEngine: $VDM_DB_ENGINE\nService: $VDM_DB_SERVICE" 0 112 0 \
-      export 'Export database or selected tables' import 'Import a SQL file' tables 'Select database tables' \
-      console 'Open SQL console' execute 'Run SQL file' batch 'Export selected or all websites' change 'Change database engine or image' back 'Back to website information' 3>&1 1>&2 2>&3) || return 0
+      back 'Back to website information' export 'Export database or selected tables' import 'Import a SQL file' tables 'Select database tables' \
+      console 'Open SQL console' execute 'Run SQL file' batch 'Export selected or all websites' change 'Change database engine or image' 3>&1 1>&2 2>&3) || return 0
     VDM_ALL=false VDM_SITES=() VDM_DATABASE_OPTIONS_READY=false VDM_DATABASE_PATH_READY=false VDM_FILE=''
     status=0
     case "$action" in
@@ -7857,6 +7857,7 @@ function siteValidateCompose() {
 # Publish Compose, ENV and optional companion files as a recoverable sequence.
 # Companion pairs come from caller-local OCTOJOOM_SITE_FILE_TARGETS/_SOURCES
 # arrays. Optional START/STOP_SERVICES arrays cover a changed HTTP service role.
+# PHP callers may also name their exact project INI in OCTOJOOM_SITE_PHP_FILE.
 # Only already-running affected services are recreated; disabled/stopped sites
 # stay stopped. The caller verifies intended semantic changes before this call.
 function sitePublishConfiguration() {
@@ -7871,7 +7872,8 @@ function sitePublishConfigurationAction() {
     shift 3
     local directory="${VDM_REPO_PATH}/joomla/available/$site" compose_file effective_env
     local recovery='' lock='' running='' service target source index changed=0 failed=false runtime_changed=false
-    local callback="${OCTOJOOM_SITE_VALIDATE_FUNCTION:-}" rollback_failed=false
+    local callback="${OCTOJOOM_SITE_VALIDATE_FUNCTION:-}" rollback_failed=false own_lock=false keep_recovery=false
+    local enabled="${VDM_REPO_PATH}/joomla/enabled/$site" mirror='' count
     local -a targets=("${OCTOJOOM_SITE_FILE_TARGETS[@]}") sources=("${OCTOJOOM_SITE_FILE_SOURCES[@]}")
     local -a active=() stopped=() start_services=("${OCTOJOOM_SITE_START_SERVICES[@]}")
     local -a stop_services=("${OCTOJOOM_SITE_STOP_SERVICES[@]}") existed=()
@@ -7881,12 +7883,30 @@ function sitePublishConfigurationAction() {
     [ "${#targets[@]}" -eq "${#sources[@]}" ] || exit 1
     targets+=("$directory/.env" "$compose_file")
     sources+=("$staged_env" "$staged_compose")
+    # Git Bash can enable a site by copying its directory instead of linking it.
+    # Publish and restore that copy together with the available configuration.
+    if [ -d "$enabled" ] && [ ! -L "$enabled" ]; then
+      [ "$(getJoomlaSiteEnabledState "$site")" = enabled ] || {
+        printf 'The enabled website copy differs from its available configuration. Reconcile it before changing settings.\n' >&2; exit 1;
+      }
+      mirror="$enabled"
+      count=${#targets[@]}
+      for ((index=0; index<count; index++)); do
+        target="${targets[index]}"
+        if [[ "$target" == "$directory/"* ]]; then
+          targets+=("$mirror/${target#"$directory/"}")
+          sources+=("${sources[index]}")
+        fi
+      done
+    fi
     for index in "${!targets[@]}"; do
       target="${targets[index]}" source="${sources[index]}"
-      [[ "$target" == "$directory/"* && "$target" != *'/../'* && "$target" != *'/./'* && "$target" != *$'\n'* ]] || exit 1
+      [[ "$target" == "$directory/"* || ( -n "$mirror" && "$target" == "$mirror/"* ) ||
+        ( -n "${OCTOJOOM_SITE_PHP_FILE:-}" && "$target" = "$OCTOJOOM_SITE_PHP_FILE" ) ]] || exit 1
+      [[ "$target" == /* && "$target" != *'/../'* && "$target" != *'/./'* && "$target" != *$'\n'* ]] || exit 1
       [ -f "$source" ] && [ ! -L "$source" ] && ! migrationPathHasSymlink "$target" || exit 1
       [ "$target" != "$source" ] && [ ! "$target" -ef "$source" ] || exit 1
-      [ -d "${target%/*}" ] || exit 1
+      [ -d "${target%/*}" ] || [ "$target" = "${OCTOJOOM_SITE_PHP_FILE:-}" ] || exit 1
       # Duplicate destinations make rollback ambiguous.
       for ((changed=0; changed<index; changed++)); do [ "$target" != "${targets[changed]}" ] || exit 1; done
     done
@@ -7894,11 +7914,18 @@ function sitePublishConfigurationAction() {
     lock="$directory/.octojoom-change.lock"
     if [ "${OCTOJOOM_SITE_HELD_LOCK:-}" != "$lock" ]; then
       mkdir "$lock" 2>/dev/null || { printf 'Another configuration change is using %s.\n' "$site" >&2; exit 1; }
-      trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+      own_lock=true
     else
       [ -d "$lock" ] || exit 1
     fi
+    trap '
+      if ! "$keep_recovery" && [ -n "$recovery" ]; then
+        rm -rf -- "$recovery" || printf "Could not remove temporary recovery files: %s\n" "$recovery" >&2
+      fi
+      if "$own_lock"; then rmdir "$lock" 2>/dev/null || true; fi
+    ' EXIT
     siteValidateCompose "$staged_compose" "$staged_env" "$directory" || exit 1
+    if [ -n "${OCTOJOOM_SITE_PHP_FILE:-}" ]; then mkdir -p -- "${OCTOJOOM_SITE_PHP_FILE%/*}" || exit 1; fi
     [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 15 'Checking which website services are running.'
     if [ "$#" -gt 0 ] || [ "${#stop_services[@]}" -gt 0 ]; then
       running=$(migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" ps --status running --services) || {
@@ -7934,6 +7961,7 @@ function sitePublishConfigurationAction() {
     done
     # Interrupted writes flow through the same recovery path as command failures.
     trap 'failed=true' INT TERM HUP
+    keep_recovery=true
     if [ "${#stopped[@]}" -gt 0 ]; then
       runtime_changed=true
       migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" stop "${stopped[@]}" >&2 || failed=true
@@ -7950,7 +7978,8 @@ function sitePublishConfigurationAction() {
         if ! cp -p -- "${sources[index]}" "$source"; then
           rm -f -- "$source"; failed=true; break
         fi
-        if [ "$target" = "$directory/.env" ] || [ "$target" = "$compose_file" ]; then
+        if [ "$target" = "$directory/.env" ] || [ "$target" = "$compose_file" ] ||
+          { [ -n "$mirror" ] && { [ "$target" = "$mirror/.env" ] || [ "$target" = "$mirror/docker-compose.yml" ]; }; }; then
           chmod 600 "$source" || { rm -f -- "$source"; failed=true; break; }
         fi
         if ! mv -f -- "$source" "$target"; then
@@ -7994,12 +8023,16 @@ function sitePublishConfigurationAction() {
           migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" up -d --no-deps --force-recreate --wait --wait-timeout 90 "${restore[@]}" >&2 || rollback_failed=true
         fi
       fi
-      printf 'Configuration change failed for %s. Originals retained in %s.\n' "$site" "$recovery" >&2
-      if "$rollback_failed"; then printf 'Automatic recovery is incomplete; inspect the retained files and services before retrying.\n' >&2; fi
+      if "$rollback_failed"; then
+        printf 'Configuration change failed for %s. Originals retained in %s.\n' "$site" "$recovery" >&2
+        printf 'Automatic recovery is incomplete; inspect the retained files and services before retrying.\n' >&2
+      else
+        keep_recovery=false
+        printf 'Configuration change failed for %s. The previous configuration and service state were restored.\n' "$site" >&2
+      fi
       exit 1
     fi
-    printf 'Previous configuration retained in %s.\n' "$recovery" >&2
-    joomlaTLSReport "Previous website configuration: $recovery"
+    keep_recovery=false
     if [ "${#active[@]}" -gt 0 ]; then
       joomlaTLSReport "Website services recreated: ${active[*]}"
     else
@@ -9504,7 +9537,7 @@ function showJoomlaBackups() {
     joomlaBackupResolveOptions "$site" || return 1
     rows=$(joomlaBackupList "$site" "$VDM_DESTINATION") || return 1
     action=$(whiptail --menu "Backups for $site\nSaved destination: $VDM_DESTINATION\n${rows:-No restore points in this directory.}" 0 112 0 --title 'Backups and restore points' \
-      create 'Create a backup' restore 'Restore an archive' verify 'Verify a backup' delete 'Delete a backup' cleanup 'Retention cleanup' back '<-- Return to website' 3>&1 1>&2 2>&3) || return 0
+      back '<-- Return to website' create 'Create a backup' restore 'Restore an archive' verify 'Verify a backup' delete 'Delete a backup' cleanup 'Retention cleanup' 3>&1 1>&2 2>&3) || return 0
     case "$action" in
       back) return 0;;
       create) VDM_ACTION=create VDM_FILE='' VDM_INPUT_FILE=''; joomla__TRuST__backup || showError 'Backup did not complete.'; continue;;
@@ -9518,11 +9551,11 @@ function showJoomlaBackups() {
         fi
         continue;;
     esac
-    choices=()
+    choices=(back '<-- Back')
     while IFS=$'\t' read -r created scope format size label archive; do
       [ -z "$archive" ] || choices+=("$archive" "$label | $scope | $format | $size bytes")
     done <<< "$rows"
-    choices+=(manual 'Enter another archive path' back '<-- Back')
+    choices+=(manual 'Enter another archive path')
     choice=$(whiptail --menu 'Select the exact archive' 0 112 0 --title 'Backup Archive' "${choices[@]}" 3>&1 1>&2 2>&3) || continue
     [ "$choice" != back ] || continue
     if [ "$choice" = manual ]; then choice=$(getInput 'Archive path' '' 'Backup Archive') || continue; fi
@@ -9558,7 +9591,7 @@ function showJoomlaBackupSelection() {
   local -a choices=() VDM_SITES=()
   local VDM_FILE='' VDM_INPUT_FILE=''
   local VDM_ALL=false VDM_ACTION=create VDM_CONTAINER=''
-  action=$(whiptail --menu 'Choose websites to back up with shared options' 0 112 0 --title 'Back up websites' selected 'Select websites' all 'All configured websites' back '<-- Return to Joomla' 3>&1 1>&2 2>&3) || return 0
+  action=$(whiptail --menu 'Choose websites to back up with shared options' 0 112 0 --title 'Back up websites' back '<-- Return to Joomla' selected 'Select websites' all 'All configured websites' 3>&1 1>&2 2>&3) || return 0
   case "$action" in
     back) return 0;;
     all) VDM_ALL=true;;
@@ -11399,9 +11432,8 @@ function runJoomlaSiteAction() {
         "${EDITOR:-nano}" "$VDM_SITE_ENV"
         ;;
       logs)
-        local choice service options=(all 'All services')
+        local choice service options=(back '<-- Return to website details' all 'All services')
         while IFS= read -r service; do [ -z "$service" ] || options+=("$service" "$service"); done <<< "$VDM_SITE_SERVICES"
-        options+=(back '<-- Return to website details')
         choice=$(whiptail --menu 'Read the latest 100 log lines. Close the viewer to return.' 20 112 10 --title "Logs | ${site}" --backtitle "$BACK_TITLE" "${options[@]}" 3>&2 2>&1 1>&3) || exit 0
         [ "$choice" != back ] || exit 0
         local VDM_SERVICE='' VDM_FOLLOW=false log_file
@@ -11489,13 +11521,12 @@ function showJoomlaWebsiteInformation() {
       site="$initial_site"
       initial_site=''
     else
-      sites=()
+      sites=(back '<-- Return to Joomla menu')
       while IFS= read -r site; do
         hint=$(getJoomlaSiteEnabledState "$site")
         sites+=("$site" "$hint")
       done < <(listJoomlaSites)
-      if [ "${#sites[@]}" -eq 0 ]; then showNotice 'There are no websites configured yet.'; return 0; fi
-      sites+=(back '<-- Return to Joomla menu')
+      if [ "${#sites[@]}" -eq 2 ]; then showNotice 'There are no websites configured yet.'; return 0; fi
       site=$(whiptail --menu 'Select a website' 23 112 15 --title "Website Information | ${PROGRAM_NAME}" --backtitle "$BACK_TITLE" "${sites[@]}" 3>&2 2>&1 1>&3) || return 0
       [ "$site" != back ] || return 0
     fi
