@@ -2,14 +2,14 @@
 # Exercise real published PHP variants, effective INI changes and rollback with
 # Apache, MariaDB and a minimal installed-manifest/JConfig/SQL fixture. This is
 # runtime acceptance, not Joomla installer or extension compatibility coverage.
-# Requires Linux, Docker Compose v2, jq, curl and root/passwordless sudo.
+# Requires Linux, Docker Compose v2, jq, curl, openssl and root/passwordless sudo.
 # shellcheck disable=SC2034,SC2016
 set -E -e -o pipefail
 # Preserve actionable CI failures without printing commands or credentials.
 trap 'printf "PHP integration failed at line %s (exit %s).\\n" "$LINENO" "$?" >&2' ERR
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-for tool in docker jq curl sha256sum; do command -v "$tool" >/dev/null || { echo "Missing $tool" >&2; exit 1; }; done
+for tool in docker jq curl openssl sha256sum; do command -v "$tool" >/dev/null || { echo "Missing $tool" >&2; exit 1; }; done
 docker info >/dev/null
 docker compose version >/dev/null
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/octojoom-php.XXXXXXXX")
@@ -26,6 +26,8 @@ COMPOSE="$SITE/docker-compose.yml"
 ENV_FILE="$VDM_REPO_PATH/joomla/.env"
 WEB="joomla$RUN_ID"
 DB="mariadb$RUN_ID"
+TLS="octojoom-php-tls-$RUN_ID"
+PHP_INI="$VDM_PROJECT_PATH/$RUN_ID/php.ini"
 OCTOJOOM_NON_INTERACTIVE=true
 OCTOJOOM_OUTPUT=text
 OS_NUMBER=1
@@ -44,6 +46,7 @@ cleanup() {
     docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE" down -v --remove-orphans >/dev/null
   fi
   docker rm -fv "octojoom-seed-$RUN_ID" >/dev/null 2>&1
+  docker rm -fv "$TLS" >/dev/null 2>&1
   privileged rm -rf "$WORK"
   exit "$status"
 }
@@ -164,6 +167,70 @@ new_php=$(joomlaSiteCompose "$VDM_CONTAINER" exec -T "$WEB" php -r 'echo PHP_VER
 [ "$(docker inspect --format '{{.Id}}' "$DB")" = "$original_db" ]
 grep -q 'custom.label=preserved' "$COMPOSE"
 if grep -q must-not-copy "$SITE/.env"; then echo "Unrelated secret copied" >&2; exit 1; fi
+grep -q 'memory_limit = 128M' "$PHP_INI"
+[ ! -e "$SITE/php.ini" ]
+
+# Sites using defaults refresh the same project INI when started normally.
+# Waiting without recreation ensures the test cannot repair a stale bind mount.
+joomlaSiteCompose "$VDM_CONTAINER" stop "$WEB"
+printf 'VDM_memory_limit="192M"\n' > "$VDM_SRC_PATH/.env"
+OCTOJOOM_CLI_KEYS=()
+OCTOJOOM_CLI_VALUES=()
+joomlaSiteLifecycle start
+joomlaSiteCompose "$VDM_CONTAINER" up -d --no-recreate --wait "$WEB"
+grep -q 'memory_limit = 192M' "$PHP_INI"
+readJoomlaSiteFacts "$VDM_CONTAINER"
+curl --fail --silent --show-error "$VDM_SITE_URL/?runtime-settings=1" | jq -e '.memory_limit == "192M"' >/dev/null
+[ "$(docker inspect --format '{{.Id}}' "$DB")" = "$original_db" ]
+printf 'VDM_memory_limit="128M"\n' > "$VDM_SRC_PATH/.env"
+
+# Reproduce a local HTTPS route with a certificate that does not cover its
+# hostname. PHP edits must succeed independently of this real curl(60) error.
+mkdir -p "$WORK/tls" "$VDM_REPO_PATH/traefik"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -keyout "$WORK/tls/server.key" -out "$WORK/tls/server.crt" \
+  -subj '/CN=another-local.test' -addext 'subjectAltName=DNS:another-local.test' >/dev/null 2>&1
+cat > "$WORK/tls/nginx.conf" <<'NGINX'
+server {
+  listen 443 ssl;
+  ssl_certificate /certs/server.crt;
+  ssl_certificate_key /certs/server.key;
+  location / { return 200 "local HTTPS\n"; }
+}
+NGINX
+docker run -d --name "$TLS" --publish 127.0.0.1::443 \
+  --mount "type=bind,source=$WORK/tls,target=/certs,readonly" \
+  --mount "type=bind,source=$WORK/tls/nginx.conf,target=/etc/nginx/conf.d/default.conf,readonly" \
+  nginx:alpine >/dev/null
+tls_address=$(docker port "$TLS" 443/tcp)
+tls_port="${tls_address##*:}"
+cat > "$VDM_REPO_PATH/traefik/docker-compose.yml" <<YAML
+services:
+  proxy:
+    image: nginx:alpine
+    ports:
+      - "127.0.0.1:$tls_port:443"
+YAML
+awk '/custom.label=preserved/ {
+  print "      - \"traefik.http.routers.php.rule=Host(`127.0.0.1`)\""
+  print "      - \"traefik.http.routers.php.tls=true\""
+} {print}' "$COMPOSE" > "$COMPOSE.next"
+mv "$COMPOSE.next" "$COMPOSE"
+tls_status=0
+for attempt in {1..20}; do
+  if curl --silent --show-error --cacert "$WORK/tls/server.crt" --max-time 2 "https://$tls_address/" >/dev/null 2>"$WORK/tls/error"; then
+    echo 'The mismatched HTTPS fixture unexpectedly verified.' >&2; exit 1
+  else tls_status=$?; fi
+  [ "$tls_status" -ne 60 ] || break
+  sleep 1
+done
+[ "$tls_status" -eq 60 ]
+readJoomlaSiteFacts "$VDM_CONTAINER"
+[ "$VDM_SITE_URL" = "https://127.0.0.1:$tls_port" ]
+
+runtime_url() {
+  printf 'http://%s\n' "$(joomlaSiteCompose "$VDM_CONTAINER" port "$WEB" 80)"
+}
 
 VDM_ACTION=settings
 VDM_memory_limit=512M
@@ -171,10 +238,14 @@ VDM_max_execution_time=180
 VDM_max_input_time=240
 OCTOJOOM_CLI_KEYS=(VDM_memory_limit VDM_max_execution_time VDM_max_input_time)
 OCTOJOOM_CLI_VALUES=(512M 180 240)
-joomla__TRuST__php
+CURL_CA_BUNDLE="$WORK/tls/server.crt" joomla__TRuST__php
 [ "$(joomlaSiteCompose "$VDM_CONTAINER" exec -T "$WEB" php -r 'echo get_cfg_var("memory_limit");')" = 512M ]
 readJoomlaSiteFacts "$VDM_CONTAINER"
-curl --fail --silent --show-error "$VDM_SITE_URL/?runtime-settings=1" | jq -e '.memory_limit == "512M" and .max_execution_time == "180" and .max_input_time == "240"' >/dev/null
+curl --fail --silent --show-error "$(runtime_url)/?runtime-settings=1" | jq -e '.memory_limit == "512M" and .max_execution_time == "180" and .max_input_time == "240"' >/dev/null
+grep -q 'max_execution_time = 180' "$PHP_INI"
+grep -q 'VDM_'"${RUN_ID^^}"'_PHP_CUSTOM=true' "$SITE/.env"
+[ ! -e "$SITE/php.ini" ]
+[ -z "$(find "$SITE" -maxdepth 1 -name '.octojoom-recovery.*' -print)" ]
 grep -q 'VDM_memory_limit="128M"' "$VDM_SRC_PATH/.env"
 [ "$(docker exec "$DB" mariadb -uroot -ptest-root-password --batch --skip-column-names runtime -e 'SELECT message FROM runtime_marker')" = preserved-data ]
 
@@ -183,11 +254,42 @@ grep -q 'VDM_memory_limit="128M"' "$VDM_SRC_PATH/.env"
 VDM_memory_limit=768M
 OCTOJOOM_CLI_KEYS=(VDM_memory_limit)
 OCTOJOOM_CLI_VALUES=(768M)
-joomla__TRuST__php
+CURL_CA_BUNDLE="$WORK/tls/server.crt" joomla__TRuST__php
 [ "$(joomlaSiteCompose "$VDM_CONTAINER" exec -T "$WEB" php -r 'echo get_cfg_var("memory_limit");')" = 768M ]
 readJoomlaSiteFacts "$VDM_CONTAINER"
-curl --fail --silent --show-error "$VDM_SITE_URL/?runtime-settings=1" | jq -e '.memory_limit == "768M" and .max_execution_time == "180" and .max_input_time == "240"' >/dev/null
+curl --fail --silent --show-error "$(runtime_url)/?runtime-settings=1" | jq -e '.memory_limit == "768M" and .max_execution_time == "180" and .max_input_time == "240"' >/dev/null
+grep -q 'memory_limit = 768M' "$PHP_INI"
 [ "$(docker inspect --format '{{.Id}}' "$DB")" = "$original_db" ]
+
+# A stopped PHP service stays stopped, even when the database still runs.
+# Starting it later reads the same project file that the settings editor saved.
+joomlaSiteCompose "$VDM_CONTAINER" stop "$WEB"
+VDM_max_execution_time=300
+OCTOJOOM_CLI_KEYS=(VDM_max_execution_time)
+OCTOJOOM_CLI_VALUES=(300)
+joomla__TRuST__php > "$WORK/stopped-result"
+grep -q 'takes effect when the website starts' "$WORK/stopped-result"
+[ "$(docker inspect --format '{{.State.Running}}' "$WEB")" = false ]
+grep -q 'max_execution_time = 300' "$PHP_INI"
+joomlaSiteCompose "$VDM_CONTAINER" start --wait "$WEB"
+curl --fail --silent --show-error "$(runtime_url)/?runtime-settings=1" | jq -e '.memory_limit == "768M" and .max_execution_time == "300"' >/dev/null
+
+# Repair sites already moved by the earlier staging implementation. Keep the
+# saved 300 from the mounted replacement instead of reviving the stale 124.
+cp "$PHP_INI" "$SITE/php.ini"
+printf 'max_execution_time = 124\n' > "$PHP_INI"
+joomlaPHPReplaceMount "$COMPOSE" "$COMPOSE.next" "$WEB" /usr/local/etc/php/conf.d/zz-octojoom.ini "$SITE/php.ini" /usr/local/etc/php/conf.d/zz-octojoom.ini
+mv "$COMPOSE.next" "$COMPOSE"
+joomlaSiteCompose "$VDM_CONTAINER" up -d --no-deps --force-recreate --wait "$WEB"
+VDM_memory_limit=512M
+OCTOJOOM_CLI_KEYS=(VDM_memory_limit)
+OCTOJOOM_CLI_VALUES=(512M)
+joomla__TRuST__php
+grep -q 'max_execution_time = 300' "$PHP_INI"
+grep -q 'memory_limit = 512M' "$PHP_INI"
+[ ! -e "$SITE/php.ini" ]
+curl --fail --silent --show-error "$(runtime_url)/?runtime-settings=1" | jq -e '.memory_limit == "512M" and .max_execution_time == "300"' >/dev/null
+[ -z "$(find "$SITE" -maxdepth 1 -name '.octojoom-recovery.*' -print)" ]
 
 # An invalid proposed image leaves every published configuration untouched.
 previous=$(sha256sum "$COMPOSE" "$SITE/.env")

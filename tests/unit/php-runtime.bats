@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# shellcheck disable=SC2034,SC2317,SC2016
+# Each Bats case recreates its own PHP fixture and variable scope.
+# shellcheck disable=SC2030,SC2031,SC2034,SC2317,SC2016
 load ../helpers/common
 
 setup() {
@@ -162,19 +163,21 @@ SH
   VDM_memory_limit=512M
   OCTOJOOM_TEST_REQUEST=VDM_memory_limit
   printf 'VDM_memory_limit="128M"\n' > "$VDM_SRC_PATH/.env"
-  printf 'memory_limit = 128M\ndate.timezone = UTC\n' > "$SANDBOX/shared.ini"
-  printf 'services:\n  web:\n    volumes:\n      - "%s:/var/www/html/php.ini"\n' "$SANDBOX/shared.ini" > "$VDM_SITE_COMPOSE"
+  mkdir -p "$VDM_PROJECT_PATH/bulk"
+  printf 'memory_limit = 128M\ndate.timezone = UTC\n' > "$VDM_PROJECT_PATH/bulk/php.ini"
+  printf 'services:\n  web:\n    volumes:\n      - "%s:/var/www/html/php.ini"\n' "$VDM_PROJECT_PATH/bulk/php.ini" > "$VDM_SITE_COMPOSE"
   : > "$stage/.env"
   joomlaRuntimeIniTarget() { echo /php/conf.d/zz-octojoom.ini; }
-  joomlaSiteCompose() { printf '{"services":{"web":{"volumes":[{"type":"bind","source":"%s/shared.ini","target":"/var/www/html/php.ini"}]}}}\n' "$SANDBOX"; }
+  joomlaSiteCompose() { printf '{"services":{"web":{"volumes":[{"type":"bind","source":"%s/bulk/php.ini","target":"/var/www/html/php.ini"}]}}}\n' "$VDM_PROJECT_PATH"; }
   run joomlaPHPSettingsAction "$site" "$stage"
   assert_success
   assert_file_contains "$VDM_SRC_PATH/.env" 'VDM_memory_limit="128M"'
-  assert_file_contains "$SANDBOX/shared.ini" 'memory_limit = 128M'
+  assert_file_contains "$VDM_PROJECT_PATH/bulk/php.ini" 'memory_limit = 128M'
   assert_file_contains "$stage/php.ini" 'memory_limit = 512M'
   assert_file_contains "$stage/php.ini" 'date.timezone = UTC'
   assert_file_contains "$stage/.env" 'VDM_EXAMPLE_PHP_MEMORY_LIMIT=512M'
-  assert_file_contains "$stage/docker-compose.yml" "$VDM_SITE_DIR/php.ini:/php/conf.d/zz-octojoom.ini:ro"
+  assert_file_contains "$stage/docker-compose.yml" "$(joomlaWebHostPath "$VDM_PROJECT_PATH/example.test/php.ini"):/php/conf.d/zz-octojoom.ini:ro"
+  assert_file_contains "$stage/.env" 'VDM_EXAMPLE_PHP_CUSTOM=true'
 }
 
 @test "PHP installed-version inspection never creates an unknown named volume" {
@@ -250,19 +253,19 @@ SH
 }
 
 @test "PHP switches preserve bulk overrides while moving only this site's scan mount" {
-  local stage="$SANDBOX/stage" shared="$SANDBOX/shared.ini"
-  mkdir -p "$stage" "$SANDBOX/site"
+  local stage="$SANDBOX/stage" shared="$VDM_PROJECT_PATH/bulk/php.ini"
+  mkdir -p "$stage" "$SANDBOX/site" "${shared%/*}"
   VDM_SITE_DIR="$SANDBOX/site"
   VDM_SITE_SERVICE=web
   printf 'memory_limit = 512M\ndate.timezone = Africa/Windhoek\n' > "$shared"
   printf 'services:\n  web:\n    image: custom/php:new\n    volumes:\n      - "%s:/var/www/html/php.ini"\n' "$shared" > "$stage/docker-compose.yml"
-  joomlaSiteCompose() { printf '{"services":{"web":{"volumes":[{"type":"bind","source":"%s/shared.ini","target":"/var/www/html/php.ini"}]}}}\n' "$SANDBOX"; }
+  joomlaSiteCompose() { printf '{"services":{"web":{"volumes":[{"type":"bind","source":"%s","target":"/var/www/html/php.ini"}]}}}\n' "$shared"; }
   joomlaRuntimeIniTarget() { echo /new/php/conf.d/zz-octojoom.ini; }
   joomlaPHPValidateIni() { return 0; }
   run joomlaPHPStageExistingOverrides example.test "$stage" custom/php:new
   assert_success
   assert_file_contains "$stage/docker-compose.yml" 'image: custom/php:new'
-  assert_file_contains "$stage/docker-compose.yml" "$VDM_SITE_DIR/php.ini:/new/php/conf.d/zz-octojoom.ini:ro"
+  assert_file_contains "$stage/docker-compose.yml" "$(joomlaWebHostPath "$VDM_PROJECT_PATH/example.test/php.ini"):/new/php/conf.d/zz-octojoom.ini:ro"
   assert_equal "$(cat "$shared")" "$(cat "$stage/php.ini")"
 }
 
@@ -405,4 +408,274 @@ SH
   run joomlaPHPValidateIni test/php "$staged" /php/conf.d/zz-octojoom.ini max_execution_time 180
   assert_failure
   assert_output_contains 'A loaded PHP configuration file could not be parsed.'
+}
+
+php_settings_fixture() {
+  PHP_TEST_STAGE="$SANDBOX/php-stage"
+  VDM_SITE_DIR="$VDM_REPO_PATH/joomla/available/example.test"
+  VDM_SITE_COMPOSE="$VDM_SITE_DIR/docker-compose.yml"
+  VDM_SITE_ENV="$VDM_SITE_DIR/.env"
+  VDM_SITE_KEY=example
+  VDM_SITE_ENV_KEY=EXAMPLE
+  VDM_SITE_SERVICE=web
+  VDM_SITE_IMAGE=custom/php:current
+  VDM_SITE_IMAGE_DIGEST=''
+  VDM_SITE_RUNNING=stopped
+  PHP_TEST_SOURCE="$VDM_PROJECT_PATH/example/php.ini"
+  mkdir -p "$PHP_TEST_STAGE" "$VDM_SITE_DIR" "${PHP_TEST_SOURCE%/*}"
+  printf 'VDM_PROJECT_PATH="%s"\n' "$VDM_PROJECT_PATH" > "$VDM_SITE_ENV"
+  cp "$VDM_SITE_ENV" "$PHP_TEST_STAGE/.env"
+  cat > "$PHP_TEST_SOURCE" <<'INI'
+max_execution_time = "120"
+max_input_time = 1500
+max_input_vars = 3000
+error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
+upload_max_filesize = 256M
+post_max_size = 256M
+memory_limit = "256M"
+date.timezone = Africa/Windhoek
+INI
+  printf 'max_input_time = 1500   \n' >> "$PHP_TEST_SOURCE"
+  printf 'services:\n  web:\n    image: custom/php:current\n    volumes:\n      - "%s:/usr/local/etc/php/conf.d/zz-octojoom.ini:ro"\n' "$PHP_TEST_SOURCE" > "$VDM_SITE_COMPOSE"
+  joomlaRuntimeIniTarget() { printf '/usr/local/etc/php/conf.d/zz-octojoom.ini\n'; }
+  joomlaPHPValidateIni() { return 0; }
+  joomlaSiteCompose() {
+    if [ "$2" = config ]; then
+      joomlaSiteJSON -cn --arg source "$PHP_TEST_SOURCE" '{services:{web:{volumes:[{type:"bind",source:$source,target:"/usr/local/etc/php/conf.d/zz-octojoom.ini"}]}}}'
+    else return 99; fi
+  }
+}
+
+@test "interactive PHP questions accept single digits and retry invalid answers" {
+  OCTOJOOM_NON_INTERACTIVE=false
+  answers 0 invalid 1
+  run joomlaPHPQuestion max_execution_time 124
+  assert_success
+  assert_equal "$output" 0
+  run joomlaPHPQuestion max_input_vars 3000
+  assert_success
+  assert_equal "$output" 1
+  assert_answers_used
+  assert_equal "$(grep -c '^--inputbox' "$STUB_DIR/dialogs.log")" 3
+}
+
+@test "INI defaults accept quoted values and whitespace through all seven questions" {
+  php_settings_fixture
+  OCTOJOOM_NON_INTERACTIVE=false
+  getInput() { printf '%s\n' "$3" >> "$SANDBOX/questions"; printf '%s\n' "$2"; }
+  run joomlaPHPSettingsAction example.test "$PHP_TEST_STAGE"
+  assert_success
+  assert_equal "$(wc -l < "$SANDBOX/questions" | tr -d ' ')" 7
+  assert_file_contains "$PHP_TEST_STAGE/php.ini" 'max_execution_time = 120'
+  assert_file_contains "$PHP_TEST_STAGE/php.ini" 'max_input_time = 1500'
+  assert_file_contains "$PHP_TEST_STAGE/php.ini" 'memory_limit = 256M'
+  assert_file_contains "$PHP_TEST_STAGE/docker-compose.yml" "$(joomlaWebHostPath "$PHP_TEST_SOURCE"):/usr/local/etc/php/conf.d/zz-octojoom.ini:ro"
+  assert_file_contains "$PHP_TEST_SOURCE" 'max_execution_time = "120"'
+  refute_file_exists "$VDM_SITE_DIR/php.ini"
+}
+
+@test "cancelling a later PHP question publishes nothing and retains the original" {
+  php_settings_fixture
+  OCTOJOOM_NON_INTERACTIVE=false
+  answers 300 '<esc>'
+  run joomlaPHPSettingsAction example.test "$PHP_TEST_STAGE"
+  assert_status 255
+  assert_answers_used
+  refute_file_exists "$PHP_TEST_STAGE/php.ini"
+  refute_file_exists "$PHP_TEST_STAGE/docker-compose.yml"
+  assert_file_contains "$PHP_TEST_SOURCE" 'max_execution_time = "120"'
+}
+
+@test "existing site-owned PHP files remain the published destination" {
+  php_settings_fixture
+  OCTOJOOM_TEST_REQUEST=VDM_max_execution_time
+  VDM_max_execution_time=300
+  joomlaPHPSettingsAction example.test "$PHP_TEST_STAGE"
+  assert_equal "$OCTOJOOM_SITE_PHP_FILE" "$PHP_TEST_SOURCE"
+  assert_equal "${OCTOJOOM_SITE_FILE_TARGETS[0]}" "$PHP_TEST_SOURCE"
+  assert_file_contains "$PHP_TEST_STAGE/php.ini" 'max_execution_time = 300'
+  assert_file_contains "$PHP_TEST_STAGE/php.ini" 'date.timezone = Africa/Windhoek'
+  assert_file_contains "$VDM_SRC_PATH/.env" "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
+  refute_file_exists "$VDM_SITE_DIR/php.ini"
+}
+
+@test "earlier staging relocation retains saved values while restoring the project path" {
+  php_settings_fixture
+  printf 'max_execution_time = 124\n' > "$PHP_TEST_SOURCE"
+  PHP_TEST_SOURCE="$VDM_SITE_DIR/php.ini"
+  printf 'max_execution_time = 300\nmemory_limit = 512M\ndate.timezone = Africa/Windhoek\n' > "$PHP_TEST_SOURCE"
+  OCTOJOOM_TEST_REQUEST=VDM_memory_limit
+  VDM_memory_limit=768M
+  joomlaPHPSettingsAction example.test "$PHP_TEST_STAGE"
+  assert_equal "$OCTOJOOM_SITE_PHP_FILE" "$VDM_PROJECT_PATH/example/php.ini"
+  assert_equal "$OCTOJOOM_PHP_OLD_FILE" "$VDM_SITE_DIR/php.ini"
+  assert_file_contains "$PHP_TEST_STAGE/php.ini" 'max_execution_time = 300'
+  assert_file_contains "$PHP_TEST_STAGE/php.ini" 'memory_limit = 768M'
+  assert_file_contains "$VDM_PROJECT_PATH/example/php.ini" 'max_execution_time = 124'
+  assert_file_contains "$VDM_SITE_DIR/php.ini" 'max_execution_time = 300'
+}
+
+@test "an INI consumed by another site is isolated without changing the shared source" {
+  php_settings_fixture
+  PHP_TEST_SOURCE="$SANDBOX/company.ini"
+  printf 'memory_limit = 128M\n' > "$PHP_TEST_SOURCE"
+  mkdir -p "$VDM_REPO_PATH/joomla/available/second.test"
+  cp "$VDM_SITE_COMPOSE" "$VDM_REPO_PATH/joomla/available/second.test/docker-compose.yml"
+  OCTOJOOM_TEST_REQUEST=VDM_memory_limit
+  VDM_memory_limit=512M
+  joomlaPHPSettingsAction example.test "$PHP_TEST_STAGE"
+  assert_equal "$OCTOJOOM_SITE_PHP_FILE" "$VDM_PROJECT_PATH/example/php.ini"
+  assert_file_contains "$PHP_TEST_STAGE/php.ini" 'memory_limit = 512M'
+  assert_file_contains "$PHP_TEST_SOURCE" 'memory_limit = 128M'
+}
+
+@test "restoring an earlier staging path never overwrites another site's destination INI" {
+  php_settings_fixture
+  PHP_TEST_SOURCE="$VDM_SITE_DIR/php.ini"
+  printf 'max_execution_time = 300\n' > "$PHP_TEST_SOURCE"
+  mkdir -p "$VDM_REPO_PATH/joomla/available/second.test"
+  cp "$VDM_SITE_COMPOSE" "$VDM_REPO_PATH/joomla/available/second.test/docker-compose.yml"
+  joomlaSiteCompose() {
+    local bind="$PHP_TEST_SOURCE"
+    [ "$1" != second.test ] || bind="$VDM_PROJECT_PATH/example/php.ini"
+    joomlaSiteJSON -cn --arg source "$bind" '{services:{web:{volumes:[{type:"bind",source:$source,target:"/usr/local/etc/php/conf.d/zz-octojoom.ini"}]}}}'
+  }
+  OCTOJOOM_TEST_REQUEST=VDM_memory_limit
+  VDM_memory_limit=512M
+  run joomlaPHPSettingsAction example.test "$PHP_TEST_STAGE"
+  assert_failure
+  assert_output_contains 'destination PHP file is used by another website'
+  refute_file_exists "$PHP_TEST_STAGE/php.ini"
+  assert_file_contains "$PHP_TEST_SOURCE" 'max_execution_time = 300'
+  assert_file_contains "$VDM_PROJECT_PATH/example/php.ini" 'max_execution_time = "120"'
+}
+
+@test "an unrelated disabled site's missing database variables do not block PHP edits" {
+  php_settings_fixture
+  local other="$VDM_REPO_PATH/joomla/available/second.test"
+  mkdir -p "$other"
+  printf 'VDM_PROJECT_PATH="%s"\n' "$VDM_PROJECT_PATH" > "$other/.env"
+  cat > "$other/docker-compose.yml" <<'YAML'
+services:
+  second:
+    environment:
+      - JOOMLA_DB_PASSWORD=${VDM_SECOND_DB_PASS:?missing}
+    volumes:
+      - "${VDM_PROJECT_PATH}/second/php.ini:/php.ini:ro"
+YAML
+  joomlaSiteCompose() {
+    [ "$1" != second.test ] || return 1
+    joomlaSiteJSON -cn --arg source "$PHP_TEST_SOURCE" '{services:{web:{volumes:[{type:"bind",source:$source,target:"/usr/local/etc/php/conf.d/zz-octojoom.ini"}]}}}'
+  }
+  OCTOJOOM_TEST_REQUEST=VDM_memory_limit
+  VDM_memory_limit=512M
+  run joomlaPHPSettingsAction example.test "$PHP_TEST_STAGE"
+  assert_success
+  assert_file_contains "$PHP_TEST_STAGE/php.ini" 'memory_limit = 512M'
+  assert_file_contains "$PHP_TEST_STAGE/docker-compose.yml" "$(joomlaWebHostPath "$PHP_TEST_SOURCE"):/usr/local/etc/php/conf.d/zz-octojoom.ini:ro"
+  # A broken service is still a real consumer when its known mount is shared.
+  sed -i.bak 's@/second/php.ini@/example/php.ini@' "$other/docker-compose.yml"
+  run joomlaPHPSettingsAction example.test "$PHP_TEST_STAGE"
+  assert_failure
+  assert_output_contains 'also used by another website'
+  assert_file_contains "$PHP_TEST_SOURCE" 'memory_limit = "256M"'
+}
+
+@test "a partial first PHP edit also writes every global default" {
+  php_settings_fixture
+  printf 'VDM_max_execution_time=222\nVDM_max_input_vars=7000\n' >> "$VDM_SRC_PATH/.env"
+  joomlaSiteCompose() { printf '{"services":{"web":{"volumes":[]}}}\n'; }
+  printf 'services:\n  web:\n    volumes:\n      - "website:/var/www/html"\n' > "$VDM_SITE_COMPOSE"
+  OCTOJOOM_TEST_REQUEST=VDM_memory_limit
+  VDM_memory_limit=512M
+  run joomlaPHPSettingsAction example.test "$PHP_TEST_STAGE"
+  assert_success
+  assert_file_contains "$PHP_TEST_STAGE/php.ini" 'max_execution_time = 222'
+  assert_file_contains "$PHP_TEST_STAGE/php.ini" 'max_input_vars = 7000'
+  assert_file_contains "$PHP_TEST_STAGE/php.ini" 'memory_limit = 512M'
+  assert_equal "$(grep -c ' = ' "$PHP_TEST_STAGE/php.ini")" 7
+}
+
+@test "PHP project paths use the selected site's saved base and persistent folder" {
+  php_settings_fixture
+  printf 'VDM_PROJECT_PATH="%s/old-projects"\n' "$SANDBOX" > "$VDM_SITE_ENV"
+  VDM_SITE_MOUNT_TYPE=bind
+  VDM_SITE_MOUNT_SOURCE="$SANDBOX/old-projects/renamed-project/joomla"
+  run joomlaPHPProjectIni example.test
+  assert_success
+  assert_equal "$output" "$SANDBOX/old-projects/renamed-project/php.ini"
+}
+
+@test "Windows native backslashes do not break detection of a shared PHP source" {
+  OS_NUMBER=3
+  VDM_SITE_SERVICE=web
+  cygpath() { local path="${*: -1}"; printf '/c/%s\n' "${path:3}"; }
+  local model
+  model='{"services":{"web":{"volumes":[]},"sibling":{"volumes":[{"type":"bind","source":"C:\\Users\\dev\\php.ini","target":"/php.ini"}]}}}'
+  run joomlaPHPIniShared example.test /c/Users/dev/php.ini "$model"
+  assert_success
+}
+
+@test "PHP apply validation is independent of local HTTPS and database availability" {
+  VDM_max_execution_time=300
+  OCTOJOOM_EXPECTED_PHP=8.4.1
+  OCTOJOOM_PHP_CHANGED_SETTINGS='max_execution_time '
+  readJoomlaSiteFacts() { VDM_SITE_SERVICE=web; VDM_SITE_URL=https://wrong-certificate.localhost; }
+  joomlaSiteCompose() {
+    printf '%s\n' "$*" >> "$SANDBOX/validation-calls"
+    [[ " $* " == *' --interactive=false '* ]] || return 98
+    if [[ "$*" == *'echo PHP_VERSION;'* ]]; then printf '8.4.1'; fi
+  }
+  joomlaDatabaseVerifyConnection() { touch "$SANDBOX/database-check"; return 99; }
+  curl() { touch "$SANDBOX/http-check"; return 60; }
+  run joomlaPHPValidatePublished example.test
+  assert_success
+  refute_file_exists "$SANDBOX/database-check"
+  refute_file_exists "$SANDBOX/http-check"
+  assert_file_contains "$SANDBOX/validation-calls" 'max_execution_time 300'
+}
+
+@test "PHP apply still rejects a mismatched value or a changed PHP version" {
+  VDM_memory_limit=512M
+  OCTOJOOM_EXPECTED_PHP=8.4.1
+  OCTOJOOM_PHP_CHANGED_SETTINGS='memory_limit '
+  readJoomlaSiteFacts() { VDM_SITE_SERVICE=web; }
+  joomlaSiteCompose() {
+    if [[ "$*" == *'echo PHP_VERSION;'* ]]; then printf '8.4.1'; else return 1; fi
+  }
+  run joomlaPHPValidatePublished example.test
+  assert_failure
+  assert_output_contains 'PHP did not load the requested memory_limit value.'
+  joomlaSiteCompose() { printf '8.5.0'; }
+  run joomlaPHPValidatePublished example.test
+  assert_failure
+  assert_output_contains 'did not load the selected PHP runtime'
+}
+
+@test "the PHP handler retains the previous managed file on failure and removes it after publication" {
+  php_settings_fixture
+  VDM_CONTAINER=example.test
+  VDM_ACTION=settings
+  PHP_TEST_SOURCE="$VDM_SITE_DIR/php.ini"
+  printf 'max_execution_time = 300\nmemory_limit = 256M\n' > "$PHP_TEST_SOURCE"
+  OCTOJOOM_TEST_REQUEST=VDM_memory_limit
+  VDM_memory_limit=512M
+  readJoomlaSiteFacts() { return 0; }
+  sitePublishConfiguration() { return 1; }
+  run joomla__TRuST__php
+  assert_failure
+  assert_file_contains "$PHP_TEST_SOURCE" 'max_execution_time = 300'
+  assert_file_contains "$VDM_PROJECT_PATH/example/php.ini" 'max_execution_time = "120"'
+  sitePublishConfiguration() {
+    [ "$OCTOJOOM_SITE_VALIDATE_FUNCTION" = joomlaPHPValidatePublished ] || return 99
+    cp "${OCTOJOOM_SITE_FILE_SOURCES[0]}" "${OCTOJOOM_SITE_FILE_TARGETS[0]}" || return 1
+    cp "$2" "$VDM_SITE_COMPOSE" || return 1
+    cp "$3" "$VDM_SITE_ENV"
+  }
+  run joomla__TRuST__php
+  assert_success
+  assert_output_contains 'takes effect when the website starts'
+  assert_file_contains "$VDM_PROJECT_PATH/example/php.ini" 'max_execution_time = 300'
+  assert_file_contains "$VDM_PROJECT_PATH/example/php.ini" 'memory_limit = 512M'
+  refute_file_exists "$PHP_TEST_SOURCE"
 }

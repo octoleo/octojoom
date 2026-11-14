@@ -3,6 +3,9 @@
 Use **Joomla Containers → Website Information → website → Change PHP version**
 or **Change PHP settings**. The action returns to the selected website's refreshed
 information. New-site customization uses the existing setup questionnaire.
+Every new site gets a `php.ini` in its project directory. Answering No to custom
+PHP overrides uses the global PHP values in `~/.config/octojoom/.env`; answering
+Yes collects custom values for that site without changing the global defaults.
 
 ```bash
 octojoom --type joomla --task php --container example.test --action list
@@ -50,9 +53,12 @@ Settings accept these flags:
 
 An existing site's questions use its own file/runtime values. Only supplied flags
 are changed in noninteractive mode, including explicit zero. Existing custom INI
-directives are preserved. A bulk-shared INI is copied into the selected Compose
-directory and only that site's mount changes. The new file mounts into the
-selected image's measured PHP scan directory as `zz-octojoom.ini`; unsupported
+directives are preserved. An existing site-owned INI is updated in place. A
+bulk-shared INI is copied into the selected site's project directory and only
+that site's mount changes. Files relocated into the Compose directory by earlier
+staging versions return to the project directory with their saved values intact.
+The file mounts into the selected image's measured PHP scan directory as
+`zz-octojoom.ini`; unsupported
 multiple/absent scan directories are reported before publication. The file is
 readable by the container user and contains configuration, not credentials.
 
@@ -60,21 +66,27 @@ Choices persist as `VDM_<ENVKEY>_IMAGE` and
 `VDM_<ENVKEY>_PHP_<UPPERCASE_SETTING>` in the site's effective ENV. When a site
 previously used the shared ENV, its new ENV retains every referenced assignment
 and recognized setting in that site's scope. Unrelated sites' secrets are not
-copied. Changing an existing site never changes the host's new-site defaults.
+copied. `VDM_<ENVKEY>_PHP_CUSTOM=false` refreshes global PHP defaults in the site's
+file when it starts. Custom setup or a site-specific settings edit sets this to
+`true`, preserving that site's custom values on subsequent starts. Changing an
+existing site never changes the host's global defaults.
 
-Configuration changes are staged and validated before publication. Recoverable
-originals are retained by the shared configuration publisher. Only affected
-services that were running are recreated. A prepared/stopped site stays stopped,
-and enabled symlinks are unchanged. A running site's successful apply checks the
-selected PHP version, requested startup configuration, Joomla's database
-connection and its actual HTTP route. PHP startup configuration uses
+Configuration changes are staged and validated before publication. The running
+PHP service is automatically recreated to apply its changed settings. Existing
+stopped PHP containers are prepared with the updated configuration without
+starting them; disabled websites remain disabled. A running PHP settings edit
+checks the PHP version and requested startup configuration without requiring a
+database connection or HTTP/TLS validation. PHP image and webserver switches
+retain their broader database and HTTP checks. PHP startup configuration uses
 `get_cfg_var` for ordinary values. PHP CLI forcibly overrides both timeout
 settings, so their configured web values are read with PHP's native INI parser
 from the actual loaded/scanned startup files in order, excluding HOST/PATH
 scopes. Malformed scan files fail validation. The Docker acceptance test also
 checks both timeout values through an actual HTTP request.
 Failure restores the prior files/runtime through the same publication helper and
-reports any recovery problem.
+reports any recovery problem. Temporary recovery copies are removed after a
+successful change or complete rollback. If recovery is incomplete, the originals
+are retained and their location is reported.
 
 The portable tests cover source retention, invalid candidates, required
 extensions, architecture mismatches, targeted edits, custom directives and

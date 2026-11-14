@@ -33,7 +33,7 @@ record_calls() {
 }
 
 @test "cli: an option given as -s x, -s=x and --sub-domain=x reaches the task" {
-  make_joomla_container jcb JCB jcb
+  make_joomla_container_with_php jcb JCB jcb
   local enabled="${VDM_REPO_PATH}/joomla/enabled/jcb.vdm.dev"
   local form
   for form in "-s jcb" "-s=jcb" "--sub-domain=jcb"; do
@@ -98,7 +98,7 @@ record_calls() {
 }
 
 @test "cli: an explicit domain overrides the saved global domain" {
-  make_joomla_container jcb JCB jcb custom.dev
+  make_joomla_container_with_php jcb JCB jcb custom.dev
   run_octojoom --type joomla --task enable --domain custom.dev --sub-domain jcb
   assert_success
   assert_file_exists "${VDM_REPO_PATH}/joomla/enabled/jcb.custom.dev"
@@ -106,7 +106,7 @@ record_calls() {
 }
 
 @test "cli: a subdomain target uses the saved domain without interactive selection" {
-  make_joomla_container jcb JCB jcb
+  make_joomla_container_with_php jcb JCB jcb
   run_octojoom --type joomla --task enable --sub-domain jcb
   assert_success
   assert_file_exists "${VDM_REPO_PATH}/joomla/enabled/jcb.vdm.dev"
@@ -132,7 +132,7 @@ record_calls() {
 }
 
 @test "cli: saved config cannot replace internal action or path state" {
-  make_joomla_container jcb JCB jcb
+  make_joomla_container_with_php jcb JCB jcb
   link_enabled joomla jcb.vdm.dev
   printf '%s\n' 'VDM_CLI_ACTION=uninstall' 'VDM_CLI_KEYS=ignored' \
     'VDM_CLI_VALUES=ignored' "VDM_SRC_PATH=\"${SANDBOX}/redirected\"" \
@@ -145,7 +145,7 @@ record_calls() {
 }
 
 @test "cli: --type joomla --task up brings the enabled containers up" {
-  make_joomla_container jcb JCB jcb
+  make_joomla_container_with_php jcb JCB jcb
   link_enabled joomla jcb.vdm.dev
   run_octojoom --type joomla --task up
   assert_success
@@ -153,7 +153,7 @@ record_calls() {
 }
 
 @test "cli: --container <name> enables that container" {
-  make_joomla_container jcb JCB jcb
+  make_joomla_container_with_php jcb JCB jcb
   run_octojoom --container jcb.vdm.dev
   assert_success
   [ -e "${VDM_REPO_PATH}/joomla/enabled/jcb.vdm.dev" ]
@@ -161,7 +161,7 @@ record_calls() {
 }
 
 @test "cli: --container with an unknown name fails without enabling anything" {
-  make_joomla_container jcb JCB jcb
+  make_joomla_container_with_php jcb JCB jcb
   run_octojoom --container nothere.vdm.dev
   assert_failure
   refute_file_exists "${VDM_REPO_PATH}/joomla/enabled/nothere.vdm.dev"
@@ -241,7 +241,7 @@ record_calls() {
 }
 
 @test "showJoomla: up runs the Joomla up task" {
-  make_joomla_container jcb JCB jcb
+  make_joomla_container_with_php jcb JCB jcb
   link_enabled joomla jcb.vdm.dev
   record_calls joomla__TRuST__up
   answers up back
@@ -268,7 +268,7 @@ record_calls() {
 }
 
 @test "showJoomla: pending update count refreshes after applying existing configurations" {
-  make_joomla_container jcb JCB jcb
+  make_joomla_container_with_php jcb JCB jcb
   # Called by the application functions loaded through the test harness.
   # shellcheck disable=SC2317
   whiptail() {
@@ -289,7 +289,7 @@ record_calls() {
 }
 
 @test "mainMenu: existing-site updates belong to the Joomla menu" {
-  make_joomla_container jcb JCB jcb
+  make_joomla_container_with_php jcb JCB jcb
   # Called by the application functions loaded through the test harness.
   # shellcheck disable=SC2317
   whiptail() {

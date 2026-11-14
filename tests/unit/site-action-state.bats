@@ -7,6 +7,7 @@ setup() {
   REAL_DOCKER=''
   export REAL_DOCKER
   VDM_CONTAINER=first.vdm.dev
+  joomlaPHPEnsureSiteIni() { return 0; }
 }
 
 @test "disabled websites reject every service lifecycle command before invoking Compose" {

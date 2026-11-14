@@ -15,6 +15,8 @@ load ../helpers/common
 setup() {
   octojoom_setup
   VDM_CONTAINER_TYPE='joomla'
+  # PHP preparation is covered by php-defaults.bats and Docker acceptance.
+  joomlaPHPEnsureSiteIni() { return 0; }
   unset VDM_CONTAINER VDM_PUID VDM_PGID
 }
 

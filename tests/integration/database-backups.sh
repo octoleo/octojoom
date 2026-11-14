@@ -435,6 +435,13 @@ for archive in "$ARCHIVES/full.tar.gz" "$ARCHIVES/full.zip" "$ARCHIVES/website.t
     --key "$target_key" --domain "$DOMAIN" --sub-domain "restore$suffix" --enable true --secure false
   assert_application "$target"
   assert_state "$target"
+  # Older archives may have no PHP override; all new destinations must start
+  # with the project file mounted, including named-volume website restores.
+  [ -f "$VDM_PROJECT_PATH/$target_key/php.ini" ]
+  readJoomlaSiteFacts "$target"
+  restored_php_id=$(joomlaSiteCompose "$target" ps -q "$VDM_SITE_SERVICE")
+  docker inspect "$restored_php_id" | jq -e --arg source "$VDM_PROJECT_PATH/$target_key/php.ini" \
+    '.[0].Mounts | any(.Type == "bind" and .Source == $source and (.Destination | endswith("/zz-octojoom.ini")))' >/dev/null
   [ -z "$(joomlaSiteCompose "$SOURCE" ps --status running --services)" ]
   [ -z "$(joomlaSiteCompose "$VOLUME_SITE" ps --status running --services)" ]
   printf "UPDATE octojoom_marker SET label='destination changed' WHERE id=1;\n" > "$WORK/change.sql"

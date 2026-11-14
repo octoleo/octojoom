@@ -151,7 +151,7 @@ HOOK
 }
 
 @test "site lifecycle preserves Compose failure status and enabled state" {
-  make_joomla_container alpha ALPHA first
+  make_joomla_container_with_php alpha ALPHA first
   link_enabled joomla first.vdm.dev
   VDM_CONTAINER=first.vdm.dev
   fail_command docker-compose-up 27

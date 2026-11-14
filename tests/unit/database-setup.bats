@@ -8,6 +8,7 @@ setup() {
   octojoom_setup
   octojoom_config
   VDM_CONTAINER_TYPE=joomla
+  joomlaRuntimeIniTarget() { printf '%s\n' /usr/local/etc/php/conf.d/zz-octojoom.ini; }
 }
 
 database_headless() {
@@ -32,7 +33,7 @@ database_capabilities() {
   }
 }
 
-@test "database setup: default MariaDB retains original credentials, storage and no image probing" {
+@test "database setup: default MariaDB retains original credentials and storage without database probing" {
   database_headless
   joomlaDatabaseImageFacts() { return 90; }
   joomlaDatabaseJoomlaCapability() { return 91; }

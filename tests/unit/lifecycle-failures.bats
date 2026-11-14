@@ -9,6 +9,8 @@ setup() {
   octojoom_setup
   octojoom_config
   VDM_CONTAINER_TYPE='joomla'
+  # These cases inject failure at the lifecycle operation after PHP preparation.
+  joomlaPHPEnsureSiteIni() { return 0; }
   unset VDM_CONTAINER VDM_PUID VDM_PGID
 }
 
