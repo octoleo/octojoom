@@ -42,10 +42,30 @@ class JConfig {
         files["site/media/preview.txt"] = b"First website asset"
         files["site/media/Preview.txt"] = b"Second website asset"
     sql = b"CREATE TABLE demo_items (id INTEGER);\n"
+    statements = json.dumps(sql.decode().rstrip(";\n")).encode() + b"\n"
+    if variant == "mysql-values":
+        native_statements = [
+            "CREATE TABLE `demo_items` (\n  `bytes` varbinary(16),\n  `qty` int,\n"
+            "  `bits` bit(8),\n  `price` decimal(7,2),\n  `note` varchar(120),\n"
+            "  `settings` json,\n  `shape` geometry\n"
+            ") COMMENT='Preserve text including X''30'' and semicolons ; here'",
+            "/* Preserve this SQL example: INSERT INTO `demo_items` (`qty`) VALUES (X'30') */",
+            "SET @example = 'Keep the text X''31''; and X''32'''",
+            "INSERT INTO `demo_items` (`qty`,`price`,`bytes`,`bits`,`note`,`settings`,`shape`) VALUES "
+            "(X'30',X'2D322E3530',X'00FF',X'80',X'456C656D656E74',X'7B7D',NULL),"
+            "(X'3130',NULL,X'30',X'00',X'',NULL,ST_GeomFromWKB(X'010100000000000000000000000000000000000000',4326))",
+        ]
+        sql = (
+            "-- Joomla portable database export\n"
+            "-- Import into an empty database selected by your database client.\n"
+            "-- Browser login sessions are intentionally excluded.\n"
+            + "".join(statement + ";\n" for statement in native_statements)
+        ).encode()
+        statements = b"".join(json.dumps(statement).encode() + b"\n" for statement in native_statements)
     payload = {
         **files,
         "database.sql": sql,
-        "database.ndjson": json.dumps(sql.decode().strip()).encode() + b"\n",
+        "database.ndjson": statements,
     }
     if variant == "missing-sql":
         del payload["database.sql"]
@@ -109,6 +129,8 @@ class JConfig {
             "format": "mysql", "statements": "database.ndjson",
         },
     }
+    if variant == "mysql-values":
+        metadata["database"]["rows"] = 2
     if variant == "legacy":
         del config["contentHash"]
     elif variant == "wrong-hash":

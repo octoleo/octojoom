@@ -99,8 +99,11 @@ done
 donor exec -T web php -r '
   require "configuration.php"; $c = new JConfig;
   $db = new mysqli($c->host, $c->user, $c->password, $c->db);
-  $db->query("CREATE TABLE demo_fixture_marker (value INT NOT NULL)");
-  $db->query("INSERT INTO demo_fixture_marker VALUES (4381)");
+  $db->query("CREATE TABLE demo_fixture_marker (
+    value INT NOT NULL, price DECIMAL(7,2), flags BIT(8), payload BLOB, optional_qty INT,
+    customer_type ENUM(\"retail\",\"wholesale\"), tags SET(\"a\",\"b\"), model_year YEAR
+  )");
+  $db->query("INSERT INTO demo_fixture_marker VALUES (4381,-2.50,128,0x00FF31,NULL,\"wholesale\",\"a,b\",2024)");
 '
 export_revision=1dd95451f8a0c3fda51802f8cbf0a1e72d0fb079
 curl --fail --silent --show-error --location --retry 3 \
@@ -169,7 +172,10 @@ check_site() {
     if ($c->sitename !== $argv[1] || $c->dbprefix !== "demo_" || hash("sha256",$c->secret) !== $argv[5]) exit(1);
     if ($c->tmp_path !== getcwd()."/tmp" || $c->log_path !== getcwd()."/administrator/logs") exit(4);
     $db = new mysqli(explode(":",$c->host)[0],$c->user,$c->password,$c->db);
-    if ((int)$db->query("SELECT value FROM demo_fixture_marker")->fetch_row()[0] !== 4381) exit(2);
+    $marker = $db->query("SELECT CAST(value AS CHAR), CAST(price AS CHAR), HEX(flags), HEX(payload),
+                                 optional_qty, customer_type, tags, CAST(model_year AS CHAR)
+                            FROM demo_fixture_marker")->fetch_row();
+    if ($marker !== ["4381","-2.50","80","00FF31",null,"wholesale","a,b","2024"]) exit(2);
     $st = $db->prepare("SELECT name,email,password FROM demo_users WHERE username=?");
     $st->bind_param("s",$argv[2]); $st->execute(); $user=$st->get_result()->fetch_row();
     if (!$user || $user[0] !== $argv[3] || $user[1] !== $argv[4] || !password_verify(stream_get_contents(STDIN),$user[2])) exit(3);

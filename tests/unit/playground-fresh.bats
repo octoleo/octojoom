@@ -16,7 +16,7 @@ setup() {
   write_playground_fixture "$package" fresh
 }
 
-@test "fresh preparation stages only installed files and SQL with private metadata" {
+@test "fresh preparation stages installed files and keeps database exports and metadata private" {
   local digest
   digest=$(joomlaPlaygroundInspectPackage "$package" json | joomlaSiteJSON -er .archiveSha256)
   run joomlaPlaygroundPreparePackage "$package" "$prepared" "$digest"
@@ -27,16 +27,53 @@ setup() {
   assert_file_contains "$prepared/database.sql" 'CREATE TABLE demo_items'
   assert_file_exists "$prepared/site/configuration.php"
   refute_file_exists "$prepared/site/database.sql"
+  refute_file_exists "$prepared/site/database.ndjson"
   refute_file_exists "$prepared/site/metadata.json"
   refute_file_exists "$prepared/export.json"
-  refute_file_exists "$prepared/database.ndjson"
+  assert_file_contains "$prepared/database.ndjson" 'CREATE TABLE demo_items'
   joomlaSiteJSON -e '.admin.username=="fixture-admin" and .admin.password=="private-fixture-password" and
     .databaseName=="joomla" and .databasePrefix=="demo_" and .phpSettings.memory_limit=="512M"' < "$prepared/metadata.json"
   if ! is_windows; then
     assert_equal "$(file_mode "$prepared")" 700
     assert_equal "$(file_mode "$prepared/metadata.json")" 600
     assert_equal "$(file_mode "$prepared/database.sql")" 600
+    assert_equal "$(file_mode "$prepared/database.ndjson")" 600
   fi
+  refute_command '^docker '
+}
+
+@test "MySQL native import preserves binary values, SQL comments and quoted text while restoring numeric and JSON values" {
+  write_playground_fixture "$package" mysql-values
+  local digest
+  digest=$(joomlaPlaygroundInspectPackage "$package" json | joomlaSiteJSON -er .archiveSha256)
+  joomlaPlaygroundPreparePackage "$package" "$prepared" "$digest" >/dev/null
+  cp "$prepared/database.sql" "$SANDBOX/input.sql"
+  cp "$prepared/database.ndjson" "$SANDBOX/input.ndjson"
+  joomlaPlaygroundMySQLImportStream "$prepared/database.sql" > "$SANDBOX/import.sql"
+  local rows
+  rows=$(sed -n '/^INSERT INTO /p' "$SANDBOX/import.sql")
+  [[ "$rows" == *"(UNHEX('30'),UNHEX('2D322E3530'),X'00FF',X'80',X'456C656D656E74',CONVERT(UNHEX('7B7D') USING utf8mb4),NULL),"* ]]
+  [[ "$rows" == *"(UNHEX('3130'),NULL,X'30',X'00',X'',NULL,ST_GeomFromWKB(X'010100000000000000000000000000000000000000',4326));"* ]]
+  sed '/^INSERT INTO /d' "$SANDBOX/input.sql" > "$SANDBOX/non-row-before"
+  sed '/^INSERT INTO /d' "$SANDBOX/import.sql" > "$SANDBOX/non-row-after"
+  cmp "$SANDBOX/non-row-before" "$SANDBOX/non-row-after"
+  cmp "$SANDBOX/input.sql" "$prepared/database.sql"
+  cmp "$SANDBOX/input.ndjson" "$prepared/database.ndjson"
+  assert_equal "$(joomlaPlaygroundInspectPackage "$package" json | joomlaSiteJSON -er .archiveSha256)" "$digest"
+  refute_command '^docker '
+}
+
+@test "MySQL native import refuses disagreements between the verified SQL and its statement stream" {
+  write_playground_fixture "$package" mysql-values
+  joomlaPlaygroundPreparePackage "$package" "$prepared" >/dev/null
+  cp "$prepared/database.ndjson" "$SANDBOX/native-statements"
+  printf '%s\n' '"SELECT 123"' >> "$prepared/database.ndjson"
+  run joomlaPlaygroundMySQLImportStream "$prepared/database.sql"
+  assert_failure
+  mv "$SANDBOX/native-statements" "$prepared/database.ndjson"
+  printf '%s\n' 'SELECT 123;' >> "$prepared/database.sql"
+  run joomlaPlaygroundMySQLImportStream "$prepared/database.sql"
+  assert_failure
   refute_command '^docker '
 }
 
