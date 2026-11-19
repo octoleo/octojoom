@@ -11967,9 +11967,9 @@ function joomlaPlaygroundTargetPreflight() {
       printf 'Target storage inspection requires a local Docker daemon. Run this check on the destination host.\n' >&2; exit 1;;
     esac
     web=$(joomlaSiteJSON -c .web <<< "$target") && db=$(joomlaSiteJSON -c .db <<< "$target") || exit 1
-    web_path=$(joomlaPlaygroundStoragePath "$web") && db_path=$(joomlaPlaygroundStoragePath "$db") || {
+    if ! web_path=$(joomlaPlaygroundStoragePath "$web") || ! db_path=$(joomlaPlaygroundStoragePath "$db"); then
       printf 'The target website or database storage could not be resolved as supported local storage.\n' >&2; exit 1;
-    }
+    fi
     if [[ "$web_path/" == "$db_path/"* || "$db_path/" == "$web_path/"* ]]; then
       printf 'Website and database storage overlap. Separate the mounts before deployment.\n' >&2; exit 1
     fi
