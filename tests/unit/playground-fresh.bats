@@ -276,7 +276,7 @@ fresh_command() {
   cp "$VDM_REPO_PATH/joomla/.env" "$SANDBOX/sites-before"
   parseCLI --key shop --env-key SHOP --domain example.test --sub-domain shop --image-source joomla \
     --db-name shopdata --db-user shopuser --db-password fixture-db-password --db-root-password fixture-db-root \
-    --customize false --enable true --phpmyadmin false --mailcatcher false
+    --customize false --enable true --phpmyadmin false --mailcatcher false --php-settings false
   answers "$package" new 'Reviewed store' 'fixture-admin' 'private-fixture-name' 'private-fixture@example.test' '' no
   run showJoomlaPlayground
   assert_success
@@ -332,4 +332,25 @@ fresh_command() {
   run joomlaPlaygroundCleanupFresh "$prepared" "$site"
   assert_success
   assert_equal "$(cat "$SANDBOX/removed")" shop_database
+}
+
+@test "the staging Compose model isolates services and preserves literal dollars from the rendered configuration" {
+  cat > "$SANDBOX/model.json" <<'MODEL'
+{"name":"shop","services":{
+  "joomlashop":{"image":"joomla","ports":[{"published":"80"}],"container_name":"shop",
+    "labels":{"traefik.enable":"true"},"environment":{"EXAMPLE":"$$HOME / $$$$"}},
+  "mariadbshop":{"image":"mariadb","healthcheck":{"test":["CMD-SHELL","echo $$MYSQL_USER"]}},
+  "viewer":{"image":"phpmyadmin"}},"networks":{"proxy":{"external":true}},
+  "volumes":{"db":{"name":"shop_database","driver":"local"}}}
+MODEL
+  run joomlaPlaygroundCandidateModel isolated joomlashop mariadbshop nginxshop < "$SANDBOX/model.json"
+  assert_success
+  # shellcheck disable=SC2016 # These are the literal strings Compose serializes.
+  joomlaSiteJSON -e '.name=="isolated" and (.services|keys)==["joomlashop","mariadbshop"] and
+    (.services.joomlashop|(has("ports") or has("container_name"))|not) and
+    all(.services[]; .labels=={"traefik.enable":"false"} and .networks=={"default":{}}) and
+    .networks=={"default":{"internal":true}} and .volumes.db=={"name":"shop_database","external":true} and
+    .services.joomlashop.environment.EXAMPLE=="$$HOME / $$$$" and
+    .services.mariadbshop.healthcheck.test[1]=="echo $$MYSQL_USER"' <<< "$output"
+  refute_command '^docker '
 }
