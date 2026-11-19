@@ -288,8 +288,9 @@ neighbor_ids=$(destination stopped ps --status running -q | sort)
 assert_original() {
   cmp "$sites/new.$domain/.env" "$work/before/.env"
   cmp "$sites/new.$domain/docker-compose.yml" "$work/before/docker-compose.yml"
+  destination new exec -T "joomla$first" curl -fsS --retry 20 --retry-all-errors --retry-delay 1 \
+    --max-time 5 http://127.0.0.1/ >/dev/null
   replacement_state new "$first" original
-  destination new exec -T "joomla$first" curl -fsS --max-time 10 http://127.0.0.1/ >/dev/null
   [ "$(destination stopped ps --status running -q | sort)" = "$neighbor_ids" ]
 }
 
@@ -302,6 +303,17 @@ if replace_site new "$work/failing.zip" "${without_backup[@]}" 2>"$work/bad-repl
 fi
 jq -e '.success==false' "$work/result" >/dev/null
 grep -q 'database sql failed' "$work/bad-replacement.log" || { echo 'Replacement did not reach the native import.' >&2; exit 1; }
+assert_original
+
+# Make the selected backup destination unusable. The default backup policy
+# must stop publication even after the replacement candidate is ready.
+touch "$work/blocked-backup"
+writeEnvVariable "$sites/new.$domain/.env" "VDM_${first^^}_BACKUP_PATH=$work/blocked-backup" true
+cp -p "$sites/new.$domain/.env" "$work/before/blocked.env"
+if replace_site new "$package"; then echo 'A failed required backup allowed replacement.' >&2; exit 1; fi
+jq -e '.success==false and .data.stage=="backup" and .data.backup==null' "$work/result" >/dev/null
+cmp "$sites/new.$domain/.env" "$work/before/blocked.env"
+cp -p "$work/before/.env" "$sites/new.$domain/.env"
 assert_original
 
 # Fail one public Compose activation. The unpublished deployment and all
@@ -371,8 +383,19 @@ old_volumes=$(named_mounts "joomla$second" /var/www/html && named_mounts "mariad
 destination stopped down >/dev/null
 new_neighbor_ids=$(destination new ps --status running -q | sort)
 backup_listing=$(find "${backup%/*}" -maxdepth 1 -name '*.sha256' -print | sort)
+python3 - "$work/request.json" "$work/replace-request.json" <<'PY'
+import json, secrets, sys
+with open(sys.argv[1]) as source:
+    request = json.load(source)
+request["options"].update({
+    "db-name": "pg_replaced", "db-user": "pg_replacer",
+    "db-password": secrets.token_hex(18) + "'\"$literal!",
+})
+with open(sys.argv[2], "w") as output:
+    json.dump(request, output)
+PY
 started_after=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
-replace_site stopped "$package" "${without_backup[@]}" --input-json "$work/request.json"
+replace_site stopped "$package" "${without_backup[@]}" --input-json "$work/replace-request.json"
 jq -e '.success and .data.target=="current" and .data.backup==null and .data.running==false' "$work/result" >/dev/null
 # Docker's event log also includes containers removed when returning to the
 # stopped state. Capture it before the manual persistence check starts them.
@@ -393,5 +416,20 @@ destination stopped up -d --wait --wait-timeout 240 >/dev/null
 check_site stopped "$second" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD" \
   "/var/www/html/$nginx_docroot" "nginx$second"
 replacement_state stopped "$second" replaced "/var/www/html/$nginx_docroot"
+# Read the protected request locally and pass it to PHP over stdin so the
+# changed database credentials never appear in subprocess arguments or logs.
+for setting in DB:db-name DB_USER:db-user DB_PASS:db-password; do
+  desired=$(jq -er --arg key "${setting#*:}" '.options[$key]' "$work/replace-request.json")
+  migrationReadEnvValue "$sites/stopped.$domain/.env" "VDM_${second^^}_${setting%:*}" observed
+  [ "$observed" = "$desired" ]
+done
+destination stopped exec -T --workdir "/var/www/html/$nginx_docroot" "joomla$second" php -r '
+  require "configuration.php"; $c = new JConfig();
+  $values = json_decode(stream_get_contents(STDIN),true,512,JSON_THROW_ON_ERROR)["options"];
+  if ($c->db !== $values["db-name"] || $c->user !== $values["db-user"] || $c->password !== $values["db-password"]) exit(1);
+  $connection = new mysqli(explode(":",$c->host)[0],$c->user,$c->password,$c->db);
+  [$name,$account] = $connection->query("SELECT DATABASE(),CURRENT_USER()")->fetch_row();
+  if ($name !== $c->db || explode("@",$account)[0] !== $c->user) exit(2);
+' < "$work/replace-request.json"
 [ "$(destination new ps --status running -q | sort)" = "$new_neighbor_ids" ]
 echo 'Existing-site replacement passed for backup, opt-out, bind and named storage, SQL failure, publication rollback and restart.'
