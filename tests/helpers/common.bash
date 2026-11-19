@@ -288,6 +288,15 @@ refute_command() {
 ###############################################################################
 # fixtures
 
+# Write a small complete ZIP, including Windows-native paths for the Python interpreter.
+write_playground_fixture() {
+  local script="$HELPERS_DIR/playground-fixture.py" destination="$1"
+  if is_windows; then
+    script=$(cygpath -am -- "$script") && destination=$(cygpath -am -- "$destination") || return 1
+  fi
+  python3 "$script" "$destination" "${2:-valid}"
+}
+
 # the docker-compose.yml joomla__TRuST__setup writes, for the common option sets
 # gen_joomla_compose <key> <env key> <sub-domain> <domain> [secure] [mailcatcher]
 gen_joomla_compose() {

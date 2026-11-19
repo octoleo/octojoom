@@ -149,6 +149,15 @@ jobs:
       - name: Verify Joomla Apache and Nginx routing and document roots
         run: timeout --signal=TERM --kill-after=30s 22m bash tests/integration/web-runtime.sh
 
+  playground-deploy-integration:
+    name: Docker Playground fresh deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Export an installed Joomla site and deploy it through Octojoom
+        run: timeout --signal=TERM --kill-after=30s 22m bash tests/integration/playground-deploy.sh
+
   database-backup-integration:
     name: Docker database and backups (${{ matrix.engine }})
     runs-on: ubuntu-latest
