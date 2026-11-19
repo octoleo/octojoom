@@ -2,9 +2,9 @@
 
 Open **Joomla → Deploy Joomengine Playground packages** and enter the full path
 to a complete Playground ZIP on the computer running Octojoom. The entry is
-available on an empty installation. Review the package summary, then choose
-**Launch a fresh Joomla site** to open setup, or **Back** to finish inspection.
-A fresh deployment requires a new project key and hostname.
+available on an empty installation. Review the package summary to launch a new
+site, replace a managed site, or return to the Joomla menu. A fresh deployment
+requires a new project key and hostname.
 
 ## Inspect a package
 
@@ -85,6 +85,51 @@ available and leaves its containers stopped. Both project-directory storage
 and Docker named volumes retain the imported data between starts. Setup
 refuses an occupied destination. If provisioning fails, it cleans up the
 new site's resources and reports when any private recovery files remain.
+
+## Replace an existing site
+
+Choose the existing-site option, select the website by its hostname, and
+confirm that its Joomla files and database tables should be replaced with the
+package contents. The backup question defaults to **Yes**. With that choice,
+Octojoom creates and verifies a full backup of the old website before switching
+over. If the backup fails, the replacement stops.
+
+Choosing **No** at the backup question opens a second warning that the old
+website files and database data will be lost. **Yes** at the warning authorizes
+replacement without a backup. **No** at the warning returns to the backup
+question, with **Yes** selected again.
+
+For an unattended replacement with the default full backup, specify one
+managed hostname and explicitly confirm the replacement.
+
+```bash
+octojoom --type joomla --task playground --action deploy --target current \
+  --container shop.example.test --file '/home/user/Downloads/Clothing Store.zip' \
+  --confirm yes --non-interactive --output json
+```
+
+To deliberately skip the backup, add both `--pre-backup no` and
+`--confirm-no-backup yes` to the same command. The general `--yes` switch
+cannot approve skipping the backup.
+
+The replacement keeps the target hostname, routing and storage arrangement.
+The target's Joomla configuration supplies its hosting and mail settings.
+The imported application supplies its secret and database table prefix. The
+confirmed site and administrator details are written to the site's private
+`.env` and applied to Joomla. Octojoom imports the files and database into
+separate storage, so tables and files that existed only on the old site are
+removed from the active installation.
+
+After the switch, Octojoom starts the published services and checks that Joomla
+connects to its database and serves its home page. A previously running website
+returns to service. A deliberately stopped website returns to its stopped
+state after this check. The website keeps its enabled or disabled registration.
+
+If a switch fails, Octojoom restores the previous files, database, configuration
+and running services. If recovery requires manual intervention, the error gives
+the private recovery location. On success, the result identifies the full
+backup when one was selected. Completing a replacement without a backup
+discards the old data held temporarily for rollback.
 
 ## Inspect an existing host
 
