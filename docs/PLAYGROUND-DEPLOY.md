@@ -70,9 +70,10 @@ Octojoom checks the selected image against the installed Joomla version,
 webserver, PHP requirements and database driver. By default it uses the
 package's preferred PHP series and imports the supported PHP settings. The
 site's SQL is imported into a fresh MariaDB or MySQL database with the
-original table prefix. MariaDB accepts the exported SQL directly. On MySQL,
-Octojoom adapts the exporter's hexadecimal representation of numeric values
-to preserve IDs, flags and quantities. Joomla keeps its exported secret. Its database
+original table prefix. Octojoom uses the exporter's statement index to identify
+row values that need conversion for the selected database. This preserves
+numeric IDs and flags on MySQL and accented text in older character sets on
+both engines. Joomla keeps its exported secret. Its database
 connection, log and temporary paths, mail and site settings are adapted to
 the destination. The complete website already contains Joomla and its
 extensions, so deployment skips installation.
