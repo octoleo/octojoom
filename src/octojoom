@@ -45,13 +45,20 @@ fi
 # A supplied task with no input terminal is automation even when the caller
 # omits --non-interactive. An argument-free invocation retains the normal menu.
 octojoom_headless_task=false
-if [ ! -t 0 ] && [ "${1:-}" != --complete ]; then
+if [ "${1:-}" != --complete ]; then
+  octojoom_previous=''
   for octojoom_argument in "$@"; do
-    case "$octojoom_argument" in --) break;; --type|--type=*|--task|--task=*|--container|--container=*) octojoom_headless_task=true;; esac
+    case "$octojoom_argument" in
+      --) break;;
+      --task=playground) octojoom_headless_task=true;;
+      --type|--type=*|--task|--task=*|--container|--container=*) [ -t 0 ] || octojoom_headless_task=true;;
+      playground) [ "$octojoom_previous" != --task ] || octojoom_headless_task=true;;
+    esac
+    octojoom_previous="$octojoom_argument"
   done
 fi
 if [ "$octojoom_headless_task" = true ]; then set -- --non-interactive "$@"; fi
-unset octojoom_headless_task
+unset octojoom_headless_task octojoom_previous
 for octojoom_argument in "$@"; do
   case "$octojoom_argument" in
     --complete|--non-interactive|--input-json|--input-json=*|--output|--output=*|-h|--help)
@@ -11602,6 +11609,458 @@ function showJoomlaWebsiteInformation() {
   done
 }
 
+# Inspect a complete local export as data. The standalone executable embeds the
+# reader so installations using only src/octojoom have the same validator.
+function joomlaPlaygroundInspectPackage() {
+  command -v python3 >/dev/null 2>&1 || { echo 'Playground inspection requires Python 3.' >&2; return 1; }
+  python3 -I -B -Werror - "${1:-}" "${2:-json}" <<'PYTHON'
+import hashlib
+import json
+import os
+import re
+import stat
+import struct
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+import zlib
+
+MIB = 1024 * 1024
+MAX_ENTRIES = 100000
+CHUNK = MIB
+MANIFEST = "site/administrator/manifests/files/joomla.xml"
+REQUIRED = ("export.json", "database.sql", "database.ndjson", "DEPLOYMENT.md",
+            "site/configuration.php", "site/index.php", "site/administrator/index.php",
+            "site/libraries/vendor/autoload.php", MANIFEST)
+
+
+class InvalidPackage(Exception):
+    pass
+
+
+def require(condition, message):
+    if not condition:
+        raise InvalidPackage(message)
+
+
+def unique_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, "Duplicate field in the Playground export metadata.")
+        result[key] = value
+    return result
+
+
+def matches(pattern, value):
+    return isinstance(value, str) and re.fullmatch(pattern, value, flags=re.ASCII) is not None
+
+
+def index_members(archive):
+    entries = archive.infolist()
+    require(len(entries) <= MAX_ENTRIES, "Too many entries in the Playground ZIP.")
+    expanded = sum(entry.file_size for entry in entries)
+    require(expanded <= 4096 * MIB, "Expanded Playground ZIP exceeds 4 GiB.")
+    files = {}
+    directories = set()
+    paths = set()
+    for entry in entries:
+        name = entry.orig_filename
+        path = name[:-1] if name.endswith("/") else name
+        parts = path.split("/")
+        require(name == entry.filename and len(name.encode("utf-8")) <= 4096
+                and name.isprintable() and "\\" not in name and ":" not in name
+                and all(part not in ("", ".", "..") for part in parts),
+                "Unsafe path in the Playground ZIP.")
+        require(path not in paths, "Duplicate path in the Playground ZIP.")
+        paths.add(path)
+        require(not (entry.flag_bits & 1), "Encrypted Playground ZIP entries are unsupported.")
+        require(entry.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED),
+                "Unsupported Playground ZIP compression.")
+        kind = stat.S_IFMT(entry.external_attr >> 16)
+        if entry.is_dir():
+            require(kind in (0, stat.S_IFDIR) and entry.file_size == 0,
+                    "Invalid directory entry in the Playground ZIP.")
+            directories.add(path)
+        else:
+            require(kind in (0, stat.S_IFREG) and not (entry.external_attr & 0x10),
+                    "Links and special files are unsupported in Playground ZIPs.")
+            files[path] = entry
+        parent = path.rpartition("/")[0]
+        while parent and parent not in directories:
+            directories.add(parent)
+            parent = parent.rpartition("/")[0]
+    require(not directories.intersection(files), "Conflicting file and directory in the Playground ZIP.")
+    require("site/installation" not in directories and "site/installation" not in files,
+            "Choose an installed Joomla export without an installation directory.")
+    require(all(name in files and files[name].file_size > 0 for name in REQUIRED)
+            and {"site/components", "site/media"}.issubset(directories),
+            "Choose a complete JoomEngine Playground export containing the installed site and database.")
+    return files, expanded
+
+
+def read_metadata(archive, files):
+    require(max(files[name].file_size for name in ("export.json", MANIFEST)) <= MIB,
+            "Playground or Joomla metadata exceeds 1 MiB.")
+    metadata = json.loads(archive.read("export.json").decode("utf-8-sig"), object_pairs_hook=unique_keys)
+    require(isinstance(metadata, dict) and metadata.get("format") == "joomengine-playground-export"
+            and type(metadata.get("schemaVersion")) is int and metadata["schemaVersion"] == 1,
+            "Choose a complete schema version 1 JoomEngine Playground export.")
+    layout = metadata.get("archiveLayout")
+    require(isinstance(layout, dict) and layout.get("files") == "site/" and layout.get("database") == "database.sql",
+            "Unsupported Playground export layout. Choose the complete site ZIP.")
+    playground = metadata.get("playground", {})
+    require(isinstance(playground, dict), "Invalid Playground configuration metadata.")
+    configuration = playground.get("configuration", {})
+    if "playground" in metadata:
+        require(type(playground.get("schemaVersion")) is int and playground["schemaVersion"] == 1
+                and isinstance(playground.get("configuration"), dict), "Invalid Playground configuration metadata.")
+    joomla = metadata.get("joomlaVersion")
+    require(matches(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?", joomla), "Invalid Joomla version.")
+    xml = archive.read(MANIFEST).decode("utf-8-sig")
+    require("<!DOCTYPE" not in xml.upper() and "\0" not in xml, "Unsupported Joomla manifest.")
+    manifest = ET.fromstring(xml)
+    require(manifest.tag == "extension" and len(manifest.findall("version")) == 1
+            and (manifest.findtext("version") or "").strip() == joomla,
+            "The Joomla version in export.json does not match the installed Joomla files.")
+    minimum = manifest.findtext("php_minimum")
+    if minimum is not None:
+        minimum = minimum.strip()
+        require(matches(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", minimum), "Invalid minimum PHP version in the Joomla manifest.")
+    php = metadata.get("phpVersion")
+    require(matches(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:[-A-Za-z][0-9A-Za-z.+-]*)?", php), "Invalid exported PHP version.")
+    preferred = configuration.get("phpVersion", ".".join(php.split(".")[:2]))
+    require(matches(r"[0-9]+\.[0-9]+", preferred), "Invalid preferred PHP series.")
+    title = metadata.get("siteName") or configuration.get("siteName") or "Imported Joomla site"
+    require(isinstance(title, str) and title.isprintable() and len(title) <= 512, "Invalid Joomla site name.")
+    admin = configuration.get("admin")
+    username = admin.get("username") if isinstance(admin, dict) else None
+    if not isinstance(username, str) or not username.isprintable() or len(username) > 150:
+        username = None
+    database = metadata.get("database")
+    require(isinstance(database, dict) and database.get("format") == "mysql", "Unsupported Playground database format.")
+    prefix, tables = database.get("tablePrefix"), database.get("tables")
+    require(matches(r"[A-Za-z][A-Za-z0-9_]{0,63}", prefix), "Invalid Joomla database table prefix.")
+    require(isinstance(tables, list) and tables and all(isinstance(t, str) and t for t in tables)
+            and len(set(tables)) == len(tables), "Invalid Playground database table inventory.")
+    count = sum(name.startswith("site/") for name in files)
+    file_bytes = sum(entry.file_size for name, entry in files.items() if name.startswith("site/"))
+    inventory = metadata.get("files")
+    require(isinstance(inventory, dict) and type(inventory.get("count")) is int and inventory["count"] == count
+            and type(inventory.get("bytes")) is int and inventory["bytes"] == file_bytes,
+            "Website file inventory does not match the Playground ZIP.")
+    result = dict(format=metadata["format"], schemaVersion=1, siteName=title, joomlaVersion=joomla,
+                  phpVersion=php, preferredPhpVersion=preferred, minimumPhpVersion=minimum,
+                  administratorUsername=username, databasePrefix=prefix,
+                  tableCount=len(tables), fileCount=count, fileBytes=file_bytes, databaseBytes=files["database.sql"].file_size)
+    expected = None
+    if "contentHash" in playground:
+        checksum = playground["contentHash"]
+        require(isinstance(checksum, dict) and checksum.get("algorithm") == "sha256"
+                and checksum.get("format") == "joomengine-site-payload-v1"
+                and matches(r"[0-9a-f]{64}", checksum.get("value")), "Invalid Playground payload checksum.")
+        expected = checksum["value"]
+    return result, expected
+
+
+def verify_payload(archive, expected):
+    # The exporter sorts UTF-8 path bytes, hashes website files and both SQL
+    # representations, and excludes directory records, metadata and instructions.
+    canonical = hashlib.sha256()
+    sql_content = False
+    for entry in sorted(archive.infolist(), key=lambda item: item.filename.encode("utf-8")):
+        name = entry.filename
+        hashed = expected and not entry.is_dir() and (name.startswith("site/") or name in ("database.sql", "database.ndjson"))
+        digest = hashlib.sha256() if hashed else None
+        read_bytes = 0
+        with archive.open(entry) as source:
+            for block in iter(lambda: source.read(CHUNK), b""):
+                read_bytes += len(block)
+                if digest is not None:
+                    digest.update(block)
+                if name == "database.sql" and not sql_content:
+                    sql_content = not block.isspace()
+        require(read_bytes == entry.file_size, "A Playground ZIP entry has an inconsistent size.")
+        if digest is not None:
+            encoded = name.encode("utf-8")
+            record = (str(len(encoded)).encode() + b":" + encoded + b":" + str(entry.file_size).encode()
+                      + b":" + digest.hexdigest().encode() + b"\n")
+            canonical.update(record)
+    require(sql_content, "The Playground database SQL is empty.")
+    require(expected is None or expected == canonical.hexdigest(), "Playground payload checksum mismatch.")
+    return "verified" if expected else "absent"
+
+
+def inspect(path):
+    require(os.path.isabs(path), "Enter the full absolute path to the Playground ZIP.")
+    require(os.path.isfile(path), "The selected ZIP file does not exist or cannot be read.")
+    with open(path, "rb") as source:
+        initial = os.fstat(source.fileno())
+        require(stat.S_ISREG(initial.st_mode), "The Playground ZIP must be a regular file.")
+        require(initial.st_size <= 2048 * MIB, "The Playground ZIP exceeds 2 GiB.")
+        # zipfile's own ZIP/ZIP64 end record lets us bound its central-directory
+        # allocation before ZipFile constructs the list of members.
+        end = zipfile._EndRecData(source)
+        require(end and end[zipfile._ECD_ENTRIES_TOTAL] <= MAX_ENTRIES and end[zipfile._ECD_SIZE] <= 32 * MIB,
+                "Invalid or oversized Playground ZIP directory.")
+        source.seek(0)
+        with zipfile.ZipFile(source) as archive:
+            files, expanded = index_members(archive)
+            result, expected = read_metadata(archive, files)
+            result["payloadChecksum"] = verify_payload(archive, expected)
+        source.seek(0)
+        digest = hashlib.sha256()
+        for block in iter(lambda: source.read(CHUNK), b""):
+            digest.update(block)
+        final = os.fstat(source.fileno())
+        require((initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns) ==
+                (final.st_size, final.st_mtime_ns, final.st_ctime_ns), "The Playground ZIP changed during inspection.")
+        result.update(expandedBytes=expanded, archiveBytes=initial.st_size, archiveSha256=digest.hexdigest())
+        return result
+
+
+try:
+    path, output = sys.argv[1:]
+    require(output in ("text", "json"), "Choose text or JSON output.")
+    summary = inspect(path)
+    if output == "json":
+        print(json.dumps(summary, separators=(",", ":")))
+    else:
+        for label, field in (("Website", "siteName"), ("Installed Joomla", "joomlaVersion"), ("Exported PHP", "phpVersion"),
+                             ("Preferred PHP", "preferredPhpVersion"), ("Minimum PHP", "minimumPhpVersion"),
+                             ("Administrator username", "administratorUsername"), ("Database prefix", "databasePrefix"),
+                             ("Database tables", "tableCount"), ("Website files", "fileCount"),
+                             ("Payload checksum", "payloadChecksum"), ("ZIP SHA-256", "archiveSha256")):
+            if summary[field] is not None:
+                print("{}: {}".format(label, summary[field]))
+except InvalidPackage as error:
+    sys.exit(str(error))
+except (OSError, ValueError, OverflowError, RecursionError, RuntimeError, NotImplementedError,
+        EOFError, LookupError, Warning, ET.ParseError, struct.error, zipfile.BadZipFile, zlib.error):
+    sys.exit("The Playground ZIP is unreadable, damaged, or contains invalid metadata.")
+PYTHON
+}
+
+# Read only the target's effective Compose configuration and local/registry
+# metadata. Starting an image or allocating candidate storage belongs to deploy.
+function joomlaPlaygroundRuntimeCandidate() {
+  local image="$1" version="$2" php="$3" flavor="$4" repository tag catalog base reference
+  repository=$(joomlaRuntimeRepository "$image") || return 1
+  tag="${version}-php${php}-${flavor}"
+  # JoomEngine's leading version is JCB. Check its upstream Joomla base
+  # label before accepting a rolling or JCB-only tag.
+  case "${repository#docker.io/}" in
+    octoleo/joomengine)
+      for reference in "$image" "$repository:${version%%.*}-php${php}-${flavor}"; do
+        base=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.base.name"}}' "$reference" 2>/dev/null) || base=''
+        case "${base#docker.io/library/}" in
+          "joomla:$tag"|"joomla:$tag-alpine") printf '%s\n' "$reference"; return 0;;
+        esac
+      done
+      ;;
+    *)
+      if docker image inspect "$repository:$tag" >/dev/null 2>&1; then
+        printf '%s\n' "$repository:$tag"; return 0
+      fi
+      ;;
+  esac
+  # Discover published tags in an operation-local cache. Never update the
+  # operator's completion cache or run the existing image pull/probe workflow.
+  catalog=$(mktemp -d "${TMPDIR:-/tmp}/octojoom-playground-tags.XXXXXXXX") || return 1
+  (
+    trap 'rm -rf -- "$catalog"' EXIT
+    local VDM_SRC_PATH="$catalog" tags
+    tags=$(joomlaRuntimeTags "$repository" 2>/dev/null) || exit 1
+    local published
+    while IFS= read -r published; do
+      case "${repository#docker.io/}" in
+        octoleo/joomengine) [[ "$published" == *"-joomla$tag" || "$published" == *"-joomla$tag-alpine" ]] || continue;;
+        *) [[ "$published" == "$tag" || "$published" == "$tag-alpine" ]] || continue;;
+      esac
+      printf '%s\n' "$repository:$published"; exit 0
+    done <<< "$tags"
+    exit 1
+  )
+}
+
+# Compose's volume model and Docker's actual volume must both represent
+# ordinary, local storage. A daemon's mountpoint may be inside a desktop VM.
+# Return the host path privately to the caller, never in the package summary.
+# shellcheck disable=SC2016
+function joomlaPlaygroundStoragePath() {
+  local mount="$1" kind source path details
+  kind=$(joomlaSiteJSON -er .type <<< "$mount") && source=$(joomlaSiteJSON -er .source <<< "$mount") || return 1
+  case "$kind" in
+    bind)
+      path=$(joomlaBackupFilesystemPath "$source") || return 1
+      [ "$path" != / ] && [[ "$path" == /* ]] && ! migrationPathHasSymlink "$path" && [ -d "$path" ] || return 1
+      ;;
+    volume)
+      details=$(docker volume inspect "$source" 2>/dev/null) || return 1
+      path=$(joomlaSiteJSON -er '.[0] | select(.Driver=="local" and (.Scope//"local")=="local" and ((.Options//{})|length)==0) | .Mountpoint | select(type=="string" and startswith("/"))' <<< "$details") || return 1
+      ;;
+    *) return 1;;
+  esac
+  printf '%s\n' "$path"
+}
+
+# POSIX df is available in the supported shells, including Git Bash. Docker
+# Desktop may keep named volumes inside its VM, outside the host filesystem.
+function joomlaPlaygroundFreeBytes() {
+  local path="$1" available
+  if [ -d "$path" ]; then
+    available=$(df -Pk "$path" 2>/dev/null | awk 'END {print $4}')
+    if [[ "$available" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$((available * 1024))"
+      return 0
+    fi
+  fi
+  printf 'null\n'
+}
+
+# shellcheck disable=SC2016
+function joomlaPlaygroundTargetPreflight() {
+  (
+    set +x
+    local site="$1" summary="$2" format="${3:-json}" model target flavor version php candidate
+    local web db web_path db_path web_free db_free file_bytes result endpoint
+    local key root=. docroot=/var/www/html image minimum runtime_status
+    joomlaRuntimeRequireTools || exit 1
+    resolveJoomlaSite "$site" || exit 1
+    model=$(joomlaSiteCompose "$site" config --format json 2>/dev/null) || {
+      printf 'Could not read the selected site\047s effective Compose configuration.\n' >&2; exit 1;
+    }
+    key=$(getJoomlaComposeEnvKey "$VDM_SITE_COMPOSE") || key=''
+    if [ -n "$key" ]; then migrationReadEnvValue "$VDM_SITE_ENV" "VDM_${key}_DOCROOT" root || root=.; fi
+    joomlaValidateDocumentRoot "$root" || { printf 'Unsupported target document root.\n' >&2; exit 1; }
+    [ "$root" = . ] || docroot+="/$root"
+    # Keep Compose credentials out of argv, diagnostics, and returned JSON.
+    target=$(joomlaSiteJSON -ec --arg docroot "$docroot" '
+      def exactly: if length==1 then .[0] else error("ambiguous") end;
+      def mount($model; $service; $path):
+        [$service.volumes[]? | select(.target==$path)] | exactly |
+        select((.read_only//false)==false) |
+        if .type=="bind" then {type,source}
+        elif .type=="volume" then .source as $key | $model.volumes[$key] |
+          select(.!=null and (.external//false)==false and (.driver//"local")=="local" and ((.driver_opts//{})|length)==0) |
+          {type:"volume",source:.name}
+        else empty end | select(.source|type=="string" and length>0);
+      . as $model |
+      [.services[] | select(.environment.JOOMLA_DB_HOST? != null)] | exactly as $app |
+      ($app.environment.JOOMLA_DB_HOST | sub(":[0-9]+$";"")) as $host |
+      [$model.services|to_entries[]|select(.key==$host or .value.container_name==$host or any(.value.networks[]?.aliases[]?; .==$host))|.value] | exactly as $db |
+      ($db.image | capture("(^|/)(?<engine>mariadb|mysql)(:|@|$)").engine) as $engine |
+      mount($model;$app;"/var/www/html") as $web |
+      select(all($app.volumes[]?; .target as $p | $p=="/var/www/html" or
+        ((($p|startswith("/var/www/html/")) and
+          ($p==$docroot or ($p|startswith($docroot+"/")) or ($docroot|startswith($p+"/"))))|not))) |
+      mount($model;$db;"/var/lib/mysql") as $data |
+      select($web!=$data) |
+      {image:$app.image, engine:$engine, web:$web, db:$data}
+    ' <<< "$model" 2>/dev/null) || {
+      printf 'The target needs one Joomla service connected to a managed MariaDB or MySQL service, both with writable bind mounts or ordinary local volumes and no overlapping document-root mounts.\n' >&2; exit 1;
+    }
+    endpoint=${DOCKER_HOST:-}
+    if [ -n "${DOCKER_CONTEXT:-}" ] || [ -z "$endpoint" ]; then
+      endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || endpoint=''
+    fi
+    case "$endpoint" in unix://*|npipe://*) ;; *)
+      printf 'Target storage inspection requires a local Docker daemon. Run this check on the destination host.\n' >&2; exit 1;;
+    esac
+    web=$(joomlaSiteJSON -c .web <<< "$target") && db=$(joomlaSiteJSON -c .db <<< "$target") || exit 1
+    web_path=$(joomlaPlaygroundStoragePath "$web") && db_path=$(joomlaPlaygroundStoragePath "$db") || {
+      printf 'The target website or database storage could not be resolved as supported local storage.\n' >&2; exit 1;
+    }
+    if [[ "$web_path/" == "$db_path/"* || "$db_path/" == "$web_path/"* ]]; then
+      printf 'Website and database storage overlap. Separate the mounts before deployment.\n' >&2; exit 1
+    fi
+    if [ "$root" != . ] && [ "$(joomlaSiteJSON -r .type <<< "$web")" = bind ]; then
+      web_path+="/$root"
+      if migrationPathHasSymlink "$web_path" || [ ! -d "$web_path" ]; then
+        printf 'The configured document root is unavailable within the website bind mount.\n' >&2; exit 1
+      fi
+    fi
+    web_free=$(joomlaPlaygroundFreeBytes "$web_path") && db_free=$(joomlaPlaygroundFreeBytes "$db_path") || exit 1
+    file_bytes=$(joomlaSiteJSON -er .fileBytes <<< "$summary") || exit 1
+    if [ "$web_free" != null ] && ((web_free < file_bytes)); then
+      printf 'The target website filesystem has insufficient space for the imported website files.\n' >&2; exit 1
+    fi
+    image=$(joomlaSiteJSON -er .image <<< "$target") || exit 1
+    flavor=''
+    if [ -n "$key" ]; then migrationReadEnvValue "$VDM_SITE_ENV" "VDM_${key}_WEBSERVER" flavor || flavor=''; fi
+    case "$flavor" in
+      nginx|fpm) flavor=fpm;;
+      apache) ;;
+      *) case "$image" in *-apache*|*:apache*) flavor=apache;; *-fpm*|*:fpm*) flavor=fpm;;
+           *) flavor=unknown;; esac;;
+    esac
+    version=$(joomlaSiteJSON -er .joomlaVersion <<< "$summary") && php=$(joomlaSiteJSON -er .preferredPhpVersion <<< "$summary") || exit 1
+    minimum=$(joomlaSiteJSON -r '.minimumPhpVersion // empty' <<< "$summary") || exit 1
+    candidate=''
+    if [ -n "$minimum" ] && ! joomlaSiteJSON -en --arg min "$minimum" --arg php "$php" \
+      '($php | split(".") | map(tonumber)) >= ($min | split(".")[:2] | map(tonumber))' >/dev/null; then
+      runtime_status="requested PHP series is below the installed Joomla minimum"
+    elif [ "$flavor" = unknown ]; then runtime_status="target webserver flavor could not be identified"
+    elif candidate=$(joomlaPlaygroundRuntimeCandidate "$image" "$version" "$php" "$flavor"); then runtime_status="candidate identified"
+    else runtime_status="no matching candidate could be confirmed"; fi
+    result=$(joomlaSiteJSON -c --arg site "$site" --arg candidate "$candidate" --arg runtime "$runtime_status" --argjson target "$target" \
+      --argjson web "$web_free" --argjson db "$db_free" '
+      .targetPreflight={site:$site,databaseEngine:$target.engine,runtimeCandidate:(if $candidate=="" then null else $candidate end),runtimeCheck:$runtime,
+        websiteStorage:$target.web.type,databaseStorage:$target.db.type,
+        websiteAvailableBytes:$web,databaseAvailableBytes:$db,
+        spaceCheck:(if $web==null then "website capacity unavailable on host" else "website payload fits" end),
+        deploymentSpaceCheck:"pending database allocation and backup choice"}
+    ' <<< "$summary") || exit 1
+    case "$format" in
+      json) printf '%s\n' "$result";;
+      text)
+        joomlaSiteJSON -r '"Website: \(.siteName)\nJoomla: \(.joomlaVersion)\nPreferred PHP: \(.preferredPhpVersion)\nDatabase prefix: \(.databasePrefix)\nDatabase tables: \(.tableCount)\nWebsite files: \(.fileCount)\nPayload checksum: \(.payloadChecksum)\nTarget: \(.targetPreflight.site)\nRuntime candidate: \(.targetPreflight.runtimeCandidate // .targetPreflight.runtimeCheck)\nDatabase engine: \(.targetPreflight.databaseEngine)\nWebsite storage: \(.targetPreflight.websiteStorage)\nDatabase storage: \(.targetPreflight.databaseStorage)\nSpace check: \(.targetPreflight.spaceCheck)\nDatabase and backup capacity depend on the final deployment plan."' <<< "$result";;
+      *) return 2;;
+    esac
+  )
+}
+
+function joomla__TRuST__playground() {
+  local summary format="${OCTOJOOM_OUTPUT:-text}"
+  if [ "${VDM_ACTION:-}" != inspect ] || [ -z "${VDM_INPUT_FILE:-}" ]; then
+    printf '%s\n' 'Playground inspection requires --action inspect and --file with the full local ZIP path.' >&2
+    return 17
+  fi
+  if cliHasValue VDM_TARGET || [ "${VDM_ALL:-false}" = true ]; then
+    printf '%s\n' 'For an optional host check, select one existing website with --container HOSTNAME.' >&2
+    return 17
+  fi
+  if cliHasValue VDM_CONTAINER; then
+    isValidDomain "$VDM_CONTAINER" || { printf '%s\n' 'Choose an existing website hostname with --container.' >&2; return 17; }
+    summary=$(joomlaPlaygroundInspectPackage "$VDM_INPUT_FILE" json) || return $?
+    joomlaPlaygroundTargetPreflight "$VDM_CONTAINER" "$summary" "$format"
+  else
+    joomlaPlaygroundInspectPackage "$VDM_INPUT_FILE" "$format"
+  fi
+}
+
+function showJoomlaPlayground() {
+  local path='' summary status
+  local prompt='Enter the full path to a complete Joomengine Playground ZIP package.
+
+Example:
+/home/user/Downloads/joomla-component-builder-playground-bundle-2026-11-18-081039Z.zip
+
+The path must exist on the computer where Octojoom is running.'
+  while true; do
+    path=$(whiptail --title 'Deploy Joomengine Playground packages' --backtitle "$BACK_TITLE" \
+      --inputbox "$prompt" 16 112 "$path" 3>&1 1>&2 2>&3) || return 0
+    if summary=$(joomlaPlaygroundInspectPackage "$path" text 2>&1); then
+      whiptail --title 'Playground package verified' --backtitle "$BACK_TITLE" --scrolltext \
+        --msgbox "$summary" 18 112
+      return 0
+    else
+      status=$?
+      [ "$status" -lt 128 ] || return "$status"
+      showError "$summary"
+    fi
+  done
+}
+
 # show Joomla menu
 function showJoomla() {
   local CHOICE pending_alignment alignment_label
@@ -11614,6 +12073,7 @@ function showJoomla() {
     menu_options+=("setup" "Setup new container")
     # Inspect original available sites without requiring enrollment.
     menu_options+=("information" "Website Information")
+    menu_options+=("playground" "Deploy Joomengine Playground packages")
     hasDirectories 'joomla/available' && menu_options+=("ssl" "Enable local HTTPS for websites")
     # enable existing container
     hasDirectories 'joomla/available' &&
@@ -11680,6 +12140,9 @@ function showJoomla() {
     "information")
       showJoomlaWebsiteInformation
       ;;
+    "playground")
+      showJoomlaPlayground
+      ;;
     "setup")
       setupContainer 'joomla'
       ;;
@@ -11730,7 +12193,7 @@ function showJoomla() {
 
     # menu loop
     case $CHOICE in
-    "information" | "setup" | "edit" | "enable" | "disable" | "down" | "up" | "fix" | "clonefiles" | "clone" | "delete" | "reset" | "joomla_env" | "bulk" | "align" | "backup")
+    "information" | "playground" | "setup" | "edit" | "enable" | "disable" | "down" | "up" | "fix" | "clonefiles" | "clone" | "delete" | "reset" | "joomla_env" | "bulk" | "align" | "backup")
       continue
       ;;
     *) return 0 ;;
@@ -16030,6 +16493,10 @@ Credentials: --db-name, --db-user, --db-password, --db-root-password, --db-prefi
 OpenSSH: --username/-u, --port/-p, --uid, --gid, --ssh-keys,
        --mount-base, --mount-dirs, --ssh-dir, --time-zone/-t, --sudo.
 
+Playground: --type joomla --task playground --action inspect --file ABSOLUTE_ZIP_PATH
+       Inspect a complete local Joomengine Playground export. Requires Python 3.
+       Add --container HOSTNAME to check an existing site's hosting environment.
+
 Database: --task database --action change|export|import|tables|console|execute
        --engine mariadb|mysql|postgres --database-image PUBLISHED_IMAGE
        --data-mode preserve|clone|fresh --confirm yes for engine changes.
@@ -17974,6 +18441,7 @@ function cliComplete() {
     --action)
       case "$type/$task" in
         joomla/persistence) printf '%s\n' status set;;
+        joomla/playground) printf '%s\n' inspect;;
         joomla/ssl) printf '%s\n' status set renew;;
         joomla/database) printf '%s\n' change export import tables console execute;;
         joomla/backup) printf '%s\n' create list verify restore delete cleanup;;
@@ -18186,6 +18654,12 @@ function cliStart() {
   fi
   parseCLI "$@" || { cliFailure $?; return $?; }
   [ "$OCTOJOOM_CLI_ACTION" != help ] || { showHelp; return; }
+  # Standalone package inspection needs neither an Octojoom installation nor a site.
+  if [ -z "$OCTOJOOM_CLI_ACTION" ] && [ "${VDM_CONTAINER_TYPE:-}/${VDM_TASK:-}" = joomla/playground ] && ! cliHasValue VDM_CONTAINER; then
+    local VDM_CONTAINER=''
+    cliExecute
+    return $?
+  fi
   cliResolvePaths || { cliFailure $?; return $?; }
   cliResolveTarget
   if [ "${OCTOJOOM_NON_INTERACTIVE}" = true ]; then
