@@ -26,7 +26,6 @@ setup() {
   docker() {
     printf '%s\n' "$*" >> "$SANDBOX/docker-calls"
     case "$1 $2" in
-      'context show') echo default;;
       'context inspect') echo 'unix:///var/run/docker.sock';;
       'volume inspect') echo '[{"Name":"existing","Driver":"local","Scope":"local","Options":{},"Mountpoint":"/inaccessible-docker-vm/octojoom"}]';;
       'image inspect') [ "$3" = vendor/runtime:6.2.0-php8.4-apache ];;
@@ -44,7 +43,7 @@ modify_model() {
   assert_success
   joomlaSiteJSON -e '.targetPreflight | .databaseEngine=="mariadb" and .runtimeCandidate=="vendor/runtime:6.2.0-php8.4-apache" and .websiteStorage=="bind" and .websiteAvailableBytes >= 1024' <<< "$output"
   [[ "$output" != *private-marker* ]]
-  assert_equal "$(wc -l < "$SANDBOX/docker-calls" | tr -d ' ')" 3
+  assert_equal "$(awk '{print $1, $2}' "$SANDBOX/docker-calls")" $'context inspect\nimage inspect'
 }
 
 @test "Playground target preflight rejects external database services, PostgreSQL and unsupported mounts" {
