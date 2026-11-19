@@ -12252,7 +12252,7 @@ function joomlaPlaygroundTargetPreflight() {
           select(.!=null and (.external//false)==false and (.driver//"local")=="local" and ((.driver_opts//{})|length)==0) |
           {type:"volume",source:.name}
         else empty end | select(.source|type=="string" and length>0);
-      . as $model |
+      walk(if type=="string" then gsub("\\$\\$"; "$") else . end) | . as $model |
       [.services[] | select(.environment.JOOMLA_DB_HOST? != null)] | exactly as $app |
       ($app.environment.JOOMLA_DB_HOST | sub(":[0-9]+$";"")) as $host |
       [$model.services|to_entries[]|select(.key==$host or .value.container_name==$host or any(.value.networks[]?.aliases[]?; .==$host))|.value] | exactly as $db |
@@ -12282,7 +12282,7 @@ function joomlaPlaygroundTargetPreflight() {
     if [ -n "$legacy_ini" ]; then
       # Older Octojoom projects mount php.ini in the webroot. Replacement
       # moves that one file to the new PHP image's INI scan directory.
-      legacy_ini=$(joomlaBackupFilesystemPath "${legacy_ini//\$\$/\$}") || exit 1
+      legacy_ini=$(joomlaBackupFilesystemPath "$legacy_ini") || exit 1
       if [ ! -f "$legacy_ini" ] || migrationPathHasSymlink "$legacy_ini"; then
         printf 'The legacy website PHP INI mount must be a regular file in this site.\n' >&2; exit 1
       fi
@@ -12291,7 +12291,6 @@ function joomlaPlaygroundTargetPreflight() {
         if getJoomlaComposeIdentity "$VDM_SITE_COMPOSE"; then VDM_SITE_KEY="$VDM_SRC_KEY"; fi
         VDM_SITE_MOUNT_TYPE=$(joomlaSiteJSON -er .type <<< "$web") &&
           VDM_SITE_MOUNT_SOURCE=$(joomlaSiteJSON -er .source <<< "$web") || exit 1
-        VDM_SITE_MOUNT_SOURCE="${VDM_SITE_MOUNT_SOURCE//\$\$/\$}"
         project_ini=$(joomlaPHPProjectIni "$site") || exit 1
         [[ "$legacy_ini" == "${project_ini%/*}/"* ]] || {
           printf 'The legacy website PHP INI mount is outside the selected site.\n' >&2; exit 1;
@@ -13227,7 +13226,9 @@ function joomlaPlaygroundReplacementModel() {
   while IFS= read -r file; do
     [ -n "$file" ] || continue
     file=$(joomlaBackupFilesystemPath "$file") || return 1
-    [ -f "$file" ] && ! migrationPathHasSymlink "$file" || { printf 'A required site configuration file is unavailable.\n' >&2; return 1; }
+    if [ ! -f "$file" ] || migrationPathHasSymlink "$file"; then
+      printf 'A required site configuration file is unavailable.\n' >&2; return 1
+    fi
   done <<< "$files"
 }
 

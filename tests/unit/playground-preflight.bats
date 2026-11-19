@@ -132,10 +132,10 @@ modify_model() {
   assert_success
 
   mkdir -p "$VDM_PROJECT_PATH/store"
-  printf 'memory_limit=256M\n' > "$VDM_PROJECT_PATH/store/php.ini"
+  printf 'memory_limit=256M\n' > "$VDM_PROJECT_PATH/store/custom\$php.ini"
   getJoomlaComposeEnvKey() { echo STORE; }
-  ini=$(joomlaWebHostPath "$VDM_PROJECT_PATH/store/php.ini")
-  joomlaSiteJSON --arg ini "$ini" '.services.app.volumes[-1].source=$ini' < "$SANDBOX/legacy" > "$SANDBOX/model"
+  ini=$(joomlaWebHostPath "$VDM_PROJECT_PATH/store/custom\$php.ini")
+  joomlaSiteJSON --arg ini "$ini" '.services.app.volumes[-1].source=($ini|gsub("\\$"; "$$"))' < "$SANDBOX/legacy" > "$SANDBOX/model"
   run joomlaPlaygroundTargetPreflight "$site" "$summary"
   assert_success
 
