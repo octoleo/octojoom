@@ -150,13 +150,13 @@ jobs:
         run: timeout --signal=TERM --kill-after=30s 22m bash tests/integration/web-runtime.sh
 
   playground-deploy-integration:
-    name: Docker Playground fresh deployment
+    name: Docker Playground deployment and replacement
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - name: Export an installed Joomla site and deploy it through Octojoom
-        run: timeout --signal=TERM --kill-after=30s 22m bash tests/integration/playground-deploy.sh
+      - name: Export, deploy and replace installed Joomla sites through Octojoom
+        run: timeout --signal=TERM --kill-after=30s 37m bash tests/integration/playground-deploy.sh
 
   database-backup-integration:
     name: Docker database and backups (${{ matrix.engine }})
