@@ -1396,7 +1396,7 @@ function joomlaPlaygroundFinishSetup() {
         fi
       fi
       for directory in "$fresh_available" "$fresh_project"; do
-        [ -n "$directory" ] && [ -n "$fresh_marker" ] && [ ! -L "$directory" ] && [ -f "$directory/$fresh_marker" ] || continue
+        if [ -z "$directory" ] || [ -z "$fresh_marker" ] || [ -L "$directory" ] || [ ! -f "$directory/$fresh_marker" ]; then continue; fi
         rm -rf -- "$directory" 2>/dev/null || runPrivileged rm -rf -- "$directory" || touch "$prepared/keep-recovery"
       done
     fi
@@ -1485,7 +1485,7 @@ function joomla__TRuST__setup() {
   local vdm_env_pass
   local vdm_key_root
   local vdm_env_root
-  local vdm_middlewares customization_status
+  local vdm_middlewares customization_status minimum_database_value=2
   local vdm_database_name="${vdm_database_name:-}" vdm_database_user="${vdm_database_user:-}"
   local vdm_database_pass="${vdm_database_pass:-}" vdm_database_rootpass="${vdm_database_rootpass:-}"
   # get the Joomla image source
@@ -1564,6 +1564,7 @@ function joomla__TRuST__setup() {
   vdm_env_root="${!vdm_key_root}"
   if [ -n "$prepared" ]; then
     vdm_env_db='' vdm_env_user='' vdm_env_pass='' vdm_env_root=''
+    minimum_database_value=1
   fi
   # now we check if its has been set
   vdm_database_name="${vdm_database_name:-$vdm_env_db}"
@@ -1587,7 +1588,7 @@ function joomla__TRuST__setup() {
   # shellcheck disable=SC2015
   [ -z "$prepared" ] && [ -f "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" ] && grep -q "VDM_${VDM_ENV_KEY^^}_DB=" "${VDM_REPO_PATH}/${VDM_CONTAINER_TYPE}/.env" || {
     # get the database name needed
-    while [ ${#vdm_database_name} -le 1 ]; do
+    while [ ${#vdm_database_name} -lt "$minimum_database_value" ]; do
       # get the value
       vdm_database_name=$(getInput "Enter Database Name\n[Text with no spaces that is only underscore and alphabetical]" \
         "vdm_io" 'Enter Database Name') || return $?
@@ -1597,7 +1598,7 @@ function joomla__TRuST__setup() {
       }
     done
     # get the database user name needed
-    while [ ${#vdm_database_user} -le 1 ]; do
+    while [ ${#vdm_database_user} -lt "$minimum_database_value" ]; do
       # get the value
       vdm_database_user=$(getInput "Enter Database Username\n[Text with no spaces that is only underscore and alphabetical]" \
         "vdm_user" 'Enter Database Username') || return $?
@@ -1607,7 +1608,7 @@ function joomla__TRuST__setup() {
       }
     done
     # get the database user password needed
-    while [ ${#vdm_database_pass} -le 1 ]; do
+    while [ ${#vdm_database_pass} -lt "$minimum_database_value" ]; do
       # get the value
       vdm_database_pass=$(getPassword "Enter Database User Password" \
         "$(getRandomPass 20)" 'Enter Database User Password') || return $?
@@ -1617,7 +1618,7 @@ function joomla__TRuST__setup() {
       }
     done
     # get the database root password
-    while [ "$VDM_DB_ENGINE" != postgres ] && [ ${#vdm_database_rootpass} -le 1 ]; do
+    while [ "$VDM_DB_ENGINE" != postgres ] && [ ${#vdm_database_rootpass} -lt "$minimum_database_value" ]; do
       # get the value
       vdm_database_rootpass=$(getPassword "Enter Database Root Password" \
         "$(getRandomPass 40)" 'Enter Database Root Password') || return $?
@@ -1840,6 +1841,7 @@ function joomla__TRuST__setup() {
   if [ -n "$prepared" ]; then
     local url="${VDM_HTTP_SCHEME}${fresh_site}"
     if [ "${VDM_TLS_CHOICE:-default}" != default ]; then url=$(joomlaTLSURL "$VDM_TLS_CHOICE" "$fresh_site" "$VDM_TLS_PORT") || return 1; fi
+    # shellcheck disable=SC2016 # The filter uses jq variables.
     joomlaSiteJSON -c --arg site "$fresh_site" --arg url "$url" --arg image "${VDM_J_REPO}:${VDM_JV}" --argjson enabled "$VDM_ENABLE" \
       '{target:"new", $site, $url, joomlaVersion, databasePrefix, $image, $enabled}' < "$prepared/metadata.json" > "$prepared/result.json" || return 1
     fresh_committed=true
@@ -1847,6 +1849,9 @@ function joomla__TRuST__setup() {
     rm -f -- "$fresh_available/$fresh_marker" "$fresh_project/$fresh_marker" || return 1
     # Host aliases and future-site preferences are shared, optional operations.
     # Once the site is committed, report any remaining host work separately.
+    if ! setEnvVariable "VDM_REPO_PATH=\"$VDM_REPO_PATH\"" || ! setEnvVariable "VDM_PROJECT_PATH=\"$VDM_PROJECT_PATH\""; then
+      printf 'Website saved. Supply the same repository and project paths on later commands.\n' >&2
+    fi
     local alias
     local -a aliases=("$VDM_SUBDOMAIN")
     if [ "${VDM_PHPMYADMIN:-true}" = true ]; then aliases+=("${VDM_SUBDOMAIN}db"); fi
@@ -12487,14 +12492,16 @@ function joomlaPlaygroundFreshAccountCode() {
 
   // Joomla's bootstrap may exit successfully early, e.g. when an installation
   // directory remains. A deployment completes only after account resolution.
+  $stage = 21;
   $completed = false;
-  register_shutdown_function(static function () use (&$completed) {
+  register_shutdown_function(static function () use (&$completed, &$stage) {
       if (!$completed) {
-          exit(1);
+          exit($stage);
       }
   });
   try {
       $settings = json_decode(stream_get_contents(STDIN), true, 512, JSON_THROW_ON_ERROR);
+      $stage = 22;
       define('_JEXEC', 1);
       if (is_file($argv[1] . '/defines.php')) {
           require_once $argv[1] . '/defines.php';
@@ -12504,21 +12511,35 @@ function joomlaPlaygroundFreshAccountCode() {
           require_once JPATH_BASE . '/includes/defines.php';
       }
       require_once JPATH_BASE . '/includes/framework.php';
+      $stage = 23;
       $config = new JConfig();
       if (!is_string($config->secret ?? null) || $config->secret === '') {
           throw new RuntimeException();
       }
+      $stage = 24;
+      // ConsoleApplication::execute() sets these before importing plugins.
+      // User::save() imports user plugins even in this one-shot CLI operation.
+      $_SERVER['HTTP_HOST'] = $argv[2];
+      $_SERVER['REQUEST_URI'] = '/';
+      $_SERVER['HTTPS'] = 'off';
       $container = Factory::getContainer();
       foreach (['session', 'JSession', Joomla\CMS\Session\Session::class, Joomla\Session\Session::class,
                 Joomla\Session\SessionInterface::class] as $alias) {
           $container->alias($alias, 'session.cli');
       }
       Factory::$application = $container->get(Joomla\Console\Application::class);
+      Factory::$application->createExtensionNamespaceMap();
+      $stage = 25;
       $users = $container->get(UserFactoryInterface::class);
       $account = $users->loadUserByUsername($settings['sourceUsername']);
-      if (!$account->id || $account->block || !$account->authorise('core.login.admin')) {
+      if (!$account->id) {
           throw new RuntimeException();
       }
+      $stage = 26;
+      if ($account->block || !$account->authorise('core.login.admin')) {
+          throw new RuntimeException();
+      }
+      $stage = 27;
       $changes = [];
       foreach (['username', 'name', 'email'] as $field) {
           if ($account->$field !== $settings[$field]) {
@@ -12528,6 +12549,7 @@ function joomlaPlaygroundFreshAccountCode() {
               $changes[$field] = $settings[$field];
           }
       }
+      $stage = 28;
       if (!UserHelper::verifyPassword($settings['password'], $account->password)) {
           if (!$settings['changed']['password']) {
               throw new RuntimeException();
@@ -12535,16 +12557,19 @@ function joomlaPlaygroundFreshAccountCode() {
           $changes['password'] = $changes['password2'] = $settings['password'];
       }
       if ($changes) {
+          $stage = 29;
           if (!$account->bind($changes)
-              || (isset($changes['password2']) && !UserHelper::verifyPassword($settings['password'], $account->password))
-              || !$account->save(true)) {
+              || (isset($changes['password2']) && !UserHelper::verifyPassword($settings['password'], $account->password))) {
+              throw new RuntimeException();
+          }
+          $stage = 30;
+          if (!$account->save(true)) {
               throw new RuntimeException();
           }
       }
       $completed = true;
   } catch (Throwable $error) {
-      fwrite(STDERR, "Imported administrator settings could not be aligned. Supply the current account details or explicitly choose new values.\n");
-      exit(1);
+      exit($stage);
   }
 PHP
 }
@@ -12658,7 +12683,7 @@ function joomlaPlaygroundWaitFresh() {
   if [ -n "$env_file" ]; then env_file=$(joomlaWebHostPath "$env_file") || return 1; fi
   # shellcheck disable=SC2016 # Static PHP runs inside the selected Joomla container.
   for ((attempt=0; attempt<60; attempt++)); do
-    if MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' migrationRunCompose "$env_file" "$compose" exec -T "$app" php -r '
+    if MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' migrationRunCompose "$env_file" "$compose" exec -T "$app" php -d register_argc_argv=1 -r '
       try {
         require $argv[1]."/configuration.php"; $c=new JConfig();
         $host=explode(":",$c->host,2); $port=(int)($host[1]??3306);
@@ -12731,7 +12756,9 @@ function joomlaPlaygroundProvisionFresh() {
     # Convert host paths once so Git Bash leaves arguments to guest programs intact.
     VDM_DB_COMPOSE=$(joomlaWebHostPath "$candidate") && VDM_DB_PROJECT_DIR=$(joomlaWebHostPath "$work") || exit 1
     local MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
-    export MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL
+    # An operator's global Compose project must never override the private one.
+    local COMPOSE_PROJECT_NAME="octojoom-playground-$token"
+    export MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL COMPOSE_PROJECT_NAME
     : > "$work/starting" || exit 1
     joomlaDatabaseCompose up -d --no-deps "$database" >/dev/null || exit 1
     joomlaDatabaseDiscoverClients || exit 1
@@ -12745,11 +12772,18 @@ function joomlaPlaygroundProvisionFresh() {
     joomlaDatabaseClient sql --local-infile=0 --max-allowed-packet=1G < "$prepared/database.sql" >/dev/null || {
       printf 'The Playground database import failed.\n' >&2; exit 1;
     }
-    local account_code
+    local account_code account_status account_stage
+    local -a account_stages=('reading the confirmed settings' 'loading the Joomla framework' 'reading the application secret'
+      'initializing Joomla CLI services' 'finding the imported account' 'resolving administrator privileges'
+      'reconciling the account fields' 'verifying the password' 'applying the account update' 'saving the account')
     account_code=$(joomlaPlaygroundFreshAccountCode) || exit 1
     joomlaDatabaseCompose run --rm --no-deps -T --entrypoint php \
-      "$app" -r "$account_code" -- "$root" < "$prepared/account.json" >/dev/null 2>&1 || {
-      printf 'The confirmed Joomla administrator could not be reconciled with the imported account.\n' >&2; exit 1;
+      "$app" -d register_argc_argv=1 -r "$account_code" -- "$root" "$site" < "$prepared/account.json" >/dev/null 2>&1 || {
+      account_status=$?
+      account_stage='starting PHP in the selected Joomla service'
+      if ((account_status >= 21 && account_status <= 30)); then account_stage="${account_stages[account_status-21]}"; fi
+      printf 'Could not apply the confirmed Joomla administrator while %s (status %d).\n' "$account_stage" "$account_status" >&2
+      exit 1
     }
     if [ "${VDM_WEBSERVER:-apache}" = nginx ]; then web="$nginx"; fi
     joomlaDatabaseCompose up -d >/dev/null || exit 1
@@ -12779,7 +12813,7 @@ function joomlaPlaygroundCleanupFresh() {
   [[ "$token" =~ ^[0-9a-f]{32}$ ]] || return 1
   if [ -f "$work/activating" ]; then joomlaSiteCompose "$site" down >/dev/null || return 1; fi
   if [ -f "$work/starting" ]; then
-    migrationRunCompose '' "$work/candidate.json" down --volumes --remove-orphans >/dev/null || return 1
+    COMPOSE_PROJECT_NAME="octojoom-playground-$token" migrationRunCompose '' "$work/candidate.json" down --volumes --remove-orphans >/dev/null || return 1
   fi
   if [ -f "$work/seeding" ]; then
     ids=$(docker ps -aq --filter "label=com.octoleo.octojoom.playground=$token") || return 1
