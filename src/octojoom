@@ -11613,7 +11613,13 @@ function showJoomlaWebsiteInformation() {
 # reader so installations using only src/octojoom have the same validator.
 function joomlaPlaygroundInspectPackage() {
   command -v python3 >/dev/null 2>&1 || { echo 'Playground inspection requires Python 3.' >&2; return 1; }
-  python3 -I -B -Werror - "${1:-}" "${2:-json}" <<'PYTHON'
+  local package_path="${1:-}"
+  # Native Windows Python cannot resolve Git Bash mounts such as /tmp or /d.
+  # Convert absolute paths only so a relative request still fails inspection.
+  case "${OSTYPE:-}:$package_path" in
+    msys*:/*|cygwin*:/*) package_path=$(cygpath -am -- "$package_path") || return 1;;
+  esac
+  python3 -I -B -Werror - "$package_path" "${2:-json}" <<'PYTHON'
 import hashlib
 import json
 import os
