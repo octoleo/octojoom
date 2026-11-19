@@ -10,11 +10,7 @@ setup() {
 }
 
 fixture() {
-  local script="$HELPERS_DIR/playground-fixture.py" destination="$package"
-  if is_windows; then
-    script=$(cygpath -am -- "$script") && destination=$(cygpath -am -- "$destination") || return 1
-  fi
-  python3 "$script" "$destination" "${1:-valid}"
+  write_playground_fixture "$package" "${1:-valid}"
 }
 
 inspect_cli() {
@@ -122,7 +118,7 @@ inspect_cli() {
     fi
     command whiptail "$@"
   }
-  answers playground "$package" back
+  answers playground "$package" back back
   run showJoomla
   assert_success
   assert_answers_used
@@ -142,4 +138,17 @@ inspect_cli() {
   assert_answers_used
   refute_file_exists "$VDM_REPO_PATH/joomla/available"
   refute_command 'docker compose .* (up|down|stop|restart)'
+}
+
+@test "an invalid package shows the inspector diagnostic before the path can be retried" {
+  octojoom_config
+  fixture wrong-hash
+  answers "$package" '<cancel>'
+  run showJoomlaPlayground
+  assert_success
+  assert_answers_used
+  assert_dialog "Playground payload checksum mismatch."
+  refute_dialog "private-fixture"
+  refute_file_exists "$VDM_REPO_PATH/joomla/available"
+  refute_command '^docker '
 }
