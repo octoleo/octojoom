@@ -127,6 +127,13 @@ Joomla site using MariaDB or MySQL, with dedicated project-directory storage
 or ordinary local Docker volumes for its website and database. The web root
 can be a subdirectory of `/var/www/html`.
 
+The Docker Engine must support an internal bridge with IPv4 gateway mode
+`isolated`. Octojoom uses it during staging, while the original site is still
+in its previous state. Private verification runs Joomla, its database and,
+for PHP-FPM, its Nginx service. Custom service commands, extra mounts or a
+required dependency outside those services can prevent Octojoom from isolating
+the site. Octojoom rejects such configurations before cutover.
+
 The database prompts default to the destination's current database name, user
 and password. Leave the password prompt blank to keep the current one. To
 change these values in automation, use `db-name`, `db-user` and `db-password`
@@ -145,25 +152,55 @@ Fresh deployment and replacement preserve Joomla’s **Site Offline** setting.
 An intentionally offline site can pass verification and serve its offline page
 to visitors while its containers are running.
 
-During staging, the original website keeps its current service state. Octojoom
-pauses writers for the backup and switch. It then starts the published services
-and checks that Joomla connects to its database and serves its home page.
-Services started only for verification return to their previous stopped state.
-The website keeps its enabled or disabled registration.
+During staging, the original website keeps its current service state. Plan for
+a service interruption at cutover. Octojoom pauses writers for the backup and
+switch, then verifies the replacement on its final storage in a private Docker
+network. Joomla must connect to its database and serve its home page. During
+this check, neither the site's Traefik route nor a directly published host port
+serves the replacement. Visitors may receive a proxy error or a refused
+connection while the route is unavailable.
 
-On success with a backup, the result reports the verified archive in `backup`
-and the private directory holding the recovery records in `recovery`. The
-records identify the retained original website and database storage. Allow
-disk space for both copies. Use the backup command's **verify** action to
-recheck the archive and **restore** to restore it to a new or existing site.
-See [Verifying and restoring backups](BACKUPS.md).
+Octojoom records the commit before restoring the site's public Compose
+definition, routing and published ports. It starts the services that were
+running before replacement and preserves the site's enabled or disabled
+registration and its custom health checks. A fully stopped site stays
+unavailable to visitors throughout verification and after commit. If
+verification fails before commit, Octojoom removes the private verifier and
+attempts to restore the original storage and services.
 
-If the switch fails, Octojoom attempts to restore the previous installation
-and its running services. If it reports incomplete recovery, keep the journal
-and the storage it identifies. A remaining `.octojoom-change.lock/recovery.path`
-in the site's available directory points to that journal and blocks a second
-change while recovery is outstanding. A successful replacement with an
-explicit backup opt-out discards the old storage after readiness passes.
+### Read the replacement result
+
+With `--output json`, read `data.outcome` and `data.committed` in the replacement
+report before deciding whether to retry. The exit status also covers work that
+happens after commit.
+
+| `data.outcome` | `data.committed` | `data.status` | What to do |
+| --- | --- | --- | --- |
+| `not_committed` | `false` | `failed` | The replacement stopped before commit and the original site was left intact or restored. Review `stage` and `reason` before another attempt. |
+| `recovery_incomplete` | `false` | `failed` | Octojoom could not finish recovering the original state. Keep the journal and the storage it names. Resolve recovery before changing the site. |
+| `committed` | `true` | `deployed` | The replacement completed. Keep the verified backup and recovery records if you requested a backup. |
+| `committed_with_followup` | `true` | `committed_with_followup` | The new installation is committed, and Octojoom returned a nonzero exit status. Use `stage`, `reason` and the recovery path to finish the reported work, such as restoring public service or retiring the old storage. Retrying the import would start another replacement. |
+
+`data.running` can be `null` when Octojoom could not establish the running
+state. `data.backup` names the verified archive when one exists. On success
+with a backup, `data.recovery` names the private directory recording the
+retained original website and database storage. Allow disk space for both
+copies. With an explicit backup opt-out, Octojoom retires the original storage
+after commit.
+
+If a site operation leaves `.octojoom-change.lock/recovery.path` in the site's
+available directory, it points to the private journal and blocks a second
+change. The journal can contain copies of the site's original Compose and
+environment files, including credentials. Keep it private and preserve the
+storage it identifies while investigating. If public startup was interrupted,
+the journal's `committed` file records the commit, `candidate.yml` holds the
+intended public definition, and `running-services` lists the services that
+should be running. The `stage` file names the last step entered and can read
+`commit` before the decision is recorded.
+
+To check a retained backup, use the backup command's **verify** action. Use
+**restore** to restore it to a new or existing site. See
+[Verifying and restoring backups](BACKUPS.md).
 
 ## Inspect an existing host
 
