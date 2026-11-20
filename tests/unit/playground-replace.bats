@@ -161,6 +161,11 @@ record_outcome() {
     refute_output_contains 'private transaction diagnostic'
   done
 
+  record_outcome committed_with_followup 0
+  run --separate-stderr replace_cli --container "$site" --confirm yes
+  assert_status 1
+  joomlaSiteJSON -e '.success==false and .exit_status==1 and .data.committed' <<< "$output"
+
   record_outcome committed 0
   run --separate-stderr replace_cli --container "$site" --confirm yes
   assert_success
@@ -175,6 +180,7 @@ record_outcome() {
   assert_status 130
   assert_answers_used
   assert_dialog "The replacement of $site was committed. Follow-up is required at stage cleanup."
+  assert_dialog 'The running state of the website is unconfirmed.'
   assert_dialog 'Review the cleanup receipt.'
   assert_dialog "$SANDBOX/verified backup.tar.gz"
   assert_dialog "$SANDBOX/private recovery"
