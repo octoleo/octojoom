@@ -14476,7 +14476,9 @@ function joomlaPlaygroundDeployCurrent() {
         IFS= read -r transaction < "$prepared/transaction.path" || true
         if [[ "${transaction%/*}" = "$VDM_SITE_DIR" && "${transaction##*/}" = .playground-replace.* && -d "$transaction" && ! -L "$transaction" ]]; then
           recovery="$transaction"
-          [ ! -s "$recovery/verified-backup" ] || IFS= read -r verified < "$recovery/verified-backup"
+          if [ -f "$recovery/verified-backup" ] && [ ! -L "$recovery/verified-backup" ]; then
+            IFS= read -r verified < "$recovery/verified-backup" || verified=''
+          fi
         fi
         outcome=recovery_incomplete stage=report
         reason="The transaction result is unavailable. Verify recovery before changing the site."
