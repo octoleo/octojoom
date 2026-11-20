@@ -13196,6 +13196,9 @@ function joomlaPlaygroundReplacementModel() {
       else checked($kind=="volume" and $model.volumes[.source].name==($old|escaped); "unexpected volume source") end;
     . as $model |
     .services |= with_entries(.key as $s | .value |= (
+      # Compose renders inherited image commands and entrypoints as null.
+      checked(.command==null and .entrypoint==null; "unsupported service command or entrypoint") |
+      del(.command,.entrypoint) |
       checked(((keys-["image","container_name","environment","healthcheck","volumes","networks","expose","labels","depends_on","working_dir","restart","ports","platform","user","read_only","init","stop_grace_period","stop_signal","tty","stdin_open","attach","pull_policy","logging","deploy"])|length)==0; "unsupported custom service configuration") |
       del(.deploy,.logging,.pull_policy) |
       checked(all((.depends_on//{} | keys[]); . as $dependency | $model.services | has($dependency)); "dependency outside the isolated site") |
