@@ -122,3 +122,22 @@ COMPOSE
   assert_failure
   assert_output_contains 'Another Compose configuration'
 }
+
+@test "website seeding accepts stored Apache IDs, fresh numeric IDs and image defaults" {
+  mkdir "$work/website"
+  docker() {
+    cat >/dev/null
+    # The guest shell receives root, UID, GID, file bytes and database bytes.
+    printf '%s:%s\n' "${@: -4:1}" "${@: -3:1}"
+  }
+  local -a seed=(joomlaPlaygroundSeedWebsite "$work/website" web db image . 0 0 "$token")
+  VDM_PUID='#1234' VDM_PGID='#5678' run "${seed[@]}"
+  assert_success
+  assert_equal "$output" '1234:5678'
+  VDM_PUID=1234 VDM_PGID=5678 run "${seed[@]}"
+  assert_success
+  assert_equal "$output" '1234:5678'
+  VDM_PUID='' VDM_PGID='' run "${seed[@]}"
+  assert_success
+  assert_equal "$output" ':'
+}

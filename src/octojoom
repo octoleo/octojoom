@@ -12682,6 +12682,8 @@ function joomlaPlaygroundSeedWebsite() {
   (
     set -o pipefail
     local source="$1" mount="$2" db_mount="$3" image="$4" relative="$5" file_bytes="$6" db_bytes="$7" token="$8"
+    local uid="${VDM_PUID:-}" gid="${VDM_PGID:-}"
+    # Existing sites store numeric Apache identities as #123. chown takes 123.
     TAR_OPTIONS='' tar -cf - -C "$source" . | MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
       docker run --rm -i --network none --read-only --user 0:0 --entrypoint sh \
         --label "com.octoleo.octojoom.playground=$token" --mount "$mount" --mount "$db_mount,readonly" "$image" -ceu '
@@ -12699,7 +12701,7 @@ function joomlaPlaygroundSeedWebsite() {
         chown -R "$uid:$gid" "$base"
         free=$(df -Pk /octojoom-db | awk "END{print \$4}")
         [ "$free" -ge "$(( ($5 + 1023) / 1024 ))" ] || { echo "Insufficient space for the database import." >&2; exit 1; }
-      ' sh "$relative" "${VDM_PUID:-}" "${VDM_PGID:-}" "$file_bytes" "$db_bytes"
+      ' sh "$relative" "${uid#\#}" "${gid#\#}" "$file_bytes" "$db_bytes"
   )
 }
 
