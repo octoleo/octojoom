@@ -12781,6 +12781,7 @@ function joomlaPlaygroundSeedWebsite() {
 
 # Compose interpolates the test when it reads the YAML. Escape the script's
 # literal dollars for that pass, leaving a normal sh command inside Docker.
+# shellcheck disable=SC2016 # Preserve jq variables and Compose's literal dollars.
 function joomlaPlaygroundApacheHealthcheck() {
   local probe
   probe=$(joomlaPlaygroundHttpProbeCode) || return 1
