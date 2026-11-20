@@ -16,6 +16,8 @@ ssh_network="octojoom-ssh-$run_id"
 export OCTOJOOM_HOME="$work/home"
 sites="$OCTOJOOM_HOME/Docker/joomla/available"
 package="$work/Donor store.zip"
+offline_package="$work/Offline donor store.zip"
+offline_message='The donor shop is closed for inventory.'
 image=joomla:6.2.0-php8.4-apache
 database_image=mariadb:11.4
 fpm_image=joomla:6.2.0-php8.4-fpm
@@ -107,14 +109,22 @@ donor exec -T web php -r '
   $db->query("INSERT INTO demo_fixture_marker VALUES
     (4381,-2.50,128,0x00FF31,NULL,\"wholesale\",\"a,b\",2024,CONVERT(0xC3A9 USING utf8mb4))");
   if ($db->query("SELECT HEX(legacy_label) FROM demo_fixture_marker")->fetch_row()[0] !== "E9") exit(1);
-'
+  $account = $db->query("SELECT u.id, GROUP_CONCAT(m.group_id ORDER BY m.group_id), SHA2(u.password,256)
+    FROM demo_users u JOIN demo_user_usergroup_map m ON m.user_id=u.id
+    WHERE u.username=\"donoradmin\" GROUP BY u.id,u.password")->fetch_row();
+  if (!$account) exit(2);
+  echo implode("\t", $account), "\n";
+' > "$work/donor-account"
+IFS=$'\t' read -r donor_id donor_groups donor_hash_digest < "$work/donor-account"
 export_revision=1dd95451f8a0c3fda51802f8cbf0a1e72d0fb079
 curl --fail --silent --show-error --location --retry 3 \
   "https://raw.githubusercontent.com/joomengine/playground/$export_revision/src/export/site.php" -o "$work/export.php"
 [ "$(git hash-object "$work/export.php")" = ed47c417a5d69581cfa4ed71d54e891794535379 ]
 donor cp "$work/export.php" web:/tmp/fixture-export.php >/dev/null
-export_dir="/tmp/joomengine-export-$(cat /proc/sys/kernel/random/uuid)"
-donor exec -T web php -d pdo_mysql.default_socket=/run/mysqld/mysqld.sock -r '
+export_package() {
+  local output="$1" export_dir
+  export_dir="/tmp/joomengine-export-$(cat /proc/sys/kernel/random/uuid)"
+  donor exec -T web php -d pdo_mysql.default_socket=/run/mysqld/mysqld.sock -r '
   $exportOptions = [
     "operation" => "create", "root" => "/var/www/html", "directory" => $argv[1], "format" => "bundle",
     "playground" => ["schemaVersion" => 1, "configuration" => [
@@ -127,9 +137,32 @@ donor exec -T web php -d pdo_mysql.default_socket=/run/mysqld/mysqld.sock -r '
     "database" => ["host" => "localhost", "user" => "", "password" => "", "name" => "donor"]
   ];
   require "/tmp/fixture-export.php";
-' -- "$export_dir" > "$work/export-receipt"
-sed -n 's/^__JOOMENGINE_RESULT__//p' "$work/export-receipt" | jq -e '.ok==true' >/dev/null
-donor cp "web:$export_dir/site.zip" "$package" >/dev/null
+  ' -- "$export_dir" > "$work/export-receipt"
+  sed -n 's/^__JOOMENGINE_RESULT__//p' "$work/export-receipt" | jq -e '
+    .ok and .metadata.playground.configuration.admin.username=="donoradmin" and
+    (.metadata.playground.contentHash.value | test("^[0-9a-f]{64}$"))' >/dev/null
+  donor cp "web:$export_dir/site.zip" "$output" >/dev/null
+}
+export_package "$package"
+# Change the installed website after saving its launch identity. The same
+# unmodified exporter still receives the original, now stale, admin settings.
+donor exec -T --user 0 web php -r '
+  require "configuration.php"; $c = new JConfig;
+  $db = new mysqli($c->host, $c->user, $c->password, $c->db);
+  $changed = $db->prepare("UPDATE demo_users SET username=\"shopmanager\",password=? WHERE username=\"donoradmin\"");
+  $hash = password_hash(bin2hex(random_bytes(24)), PASSWORD_BCRYPT);
+  $changed->bind_param("s", $hash);
+  $changed->execute();
+  if ($changed->affected_rows !== 1 || password_verify(getenv("JOOMLA_ADMIN_PASSWORD"), $hash)) exit(1);
+  $raw = file_get_contents("configuration.php");
+  foreach (["offline"=>true, "display_offline_message"=>1, "offline_message"=>$argv[1]] as $key=>$value) {
+      $raw = preg_replace_callback("/^(\\h*public\\s+\\$".$key."\\s*=).*?;\\h*$/ms",
+          static fn($m) => $m[1]." ".var_export($value, true).";", $raw, 1, $count);
+      if ($count !== 1) exit(2);
+  }
+  if (file_put_contents("configuration.php", $raw) === false) exit(3);
+' -- "$offline_message"
+export_package "$offline_package"
 source_secret=$(donor exec -T web php -r 'require "configuration.php"; echo hash("sha256", (new JConfig)->secret);')
 donor down -v >/dev/null
 
@@ -155,10 +188,25 @@ deploy() {
 # Source the same literal .env reader used by the application.
 # shellcheck disable=SC1090
 source <(awk '/^(function )?[A-Za-z_][A-Za-z0-9_]*\(\) \{$/ {p=1} p {print} p && /^}$/ {p=0}' "$root/src/octojoom")
+check_http() {
+  local sub="$1" key="$2" mode="$3" web="$4" attempt expected=200
+  [ "$mode" != offline ] || expected=503
+  for ((attempt=0; attempt<20; attempt++)); do
+    if destination "$sub" exec -T "joomla$key" curl --silent --max-time 5 --include \
+        --header "Host: $sub.$domain" "http://$web/" > "$work/homepage" &&
+      awk -v expected="$expected" 'NR==1 {ok=($2==expected)} END {exit !ok}' "$work/homepage" &&
+      { [ "$mode" != offline ] || grep -Fq -- "$offline_message" "$work/homepage"; }; then
+      return 0
+    fi
+    sleep 1
+  done
+  printf 'The %s Joomla home page did not return its expected HTTP %s response.\n' "$mode" "$expected" >&2
+  return 1
+}
 check_site() {
-  local sub="$1" key="$2" sitename="$3" username="$4" display="$5" email="$6" password="$7"
-  local docroot="${8:-/var/www/html}" web="${9:-127.0.0.1}"
-  local env_file="$sites/$sub.$domain/.env" var expected observed
+  local sub="$1" key="$2" mode="$3" sitename="$4" username="$5" display="$6" email="$7" password="$8"
+  local docroot="${9:-/var/www/html}" web="${10:-127.0.0.1}"
+  local env_file="$sites/$sub.$domain/.env" var expected observed expected_hash_digest=''
   [ "$(stat -c %a "$env_file")" = 600 ] || { echo 'Site environment permissions are too broad.' >&2; return 1; }
   for var in SITE_NAME ADMIN_USERNAME ADMIN_USER ADMIN_EMAIL ADMIN_PASSWORD DB_PREFIX; do
     case "$var" in
@@ -168,30 +216,50 @@ check_site() {
     migrationReadEnvValue "$env_file" "VDM_${key^^}_JOOMLA_$var" observed
     [ "$observed" = "$expected" ] || { echo "Unexpected per-site environment field: $var" >&2; return 1; }
   done
-  # A read-only SQL lookup checks the persisted account and test marker.
-  # Pass the fixture password over stdin; no interactive sign-in or Joomla UI.
-  printf '%s' "$password" | destination "$sub" exec -T --workdir "$docroot" "joomla$key" php -d register_argc_argv=1 -r '
-    require "configuration.php"; $c = new JConfig;
+  # Check the original donor ID, groups and Joomla permissions independently
+  # of CLI output. The confirmed password travels through standard input.
+  if [ "$password" = "$DONOR_PASSWORD" ]; then expected_hash_digest="$donor_hash_digest"; fi
+  printf '%s\n%s' "$expected_hash_digest" "$password" |
+    destination "$sub" exec -T --workdir "$docroot" "joomla$key" php -d register_argc_argv=1 -r '
+    define("_JEXEC", 1); define("JPATH_BASE", getcwd());
+    require JPATH_BASE."/includes/defines.php";
+    require JPATH_BASE."/includes/framework.php";
+    $c = new JConfig;
     if ($c->sitename !== $argv[1] || $c->dbprefix !== "demo_" || hash("sha256",$c->secret) !== $argv[5]) exit(1);
     if ($c->tmp_path !== getcwd()."/tmp" || $c->log_path !== getcwd()."/administrator/logs") exit(4);
+    if ((bool) $c->offline !== ($argv[8] === "offline")) exit(5);
     $db = new mysqli(explode(":",$c->host)[0],$c->user,$c->password,$c->db);
     $marker = $db->query("SELECT CAST(value AS CHAR), CAST(price AS CHAR), HEX(flags), HEX(payload),
                                  optional_qty, customer_type, tags, CAST(model_year AS CHAR), HEX(legacy_label)
                             FROM demo_fixture_marker")->fetch_row();
     if ($marker !== ["4381","-2.50","80","00FF31",null,"wholesale","a,b","2024","E9"]) exit(2);
-    $st = $db->prepare("SELECT name,email,password FROM demo_users WHERE username=?");
+    $st = $db->prepare("SELECT name,email,password,id FROM demo_users WHERE username=?");
     $st->bind_param("s",$argv[2]); $st->execute(); $user=$st->get_result()->fetch_row();
-    if (!$user || $user[0] !== $argv[3] || $user[1] !== $argv[4] || !password_verify(stream_get_contents(STDIN),$user[2])) exit(3);
-  ' -- "$sitename" "$username" "$display" "$email" "$source_secret"
-  destination "$sub" exec -T "joomla$key" curl -fsS --max-time 10 --header "Host: $sub.$domain" "http://$web/" >/dev/null
+    [$expectedHash, $password] = explode("\n", stream_get_contents(STDIN), 2);
+    if (!$user || $user[0] !== $argv[3] || $user[1] !== $argv[4] || !password_verify($password,$user[2])) exit(3);
+    if ($expectedHash !== "" && hash("sha256", $user[2]) !== $expectedHash) exit(3);
+    if ((string) $user[3] !== $argv[6]) exit(6);
+    $_SERVER["HTTP_HOST"] = $argv[9]; $_SERVER["REQUEST_URI"] = "/";
+    $container = Joomla\CMS\Factory::getContainer();
+    foreach (["session", "JSession", Joomla\CMS\Session\Session::class, Joomla\Session\Session::class,
+              Joomla\Session\SessionInterface::class] as $alias) $container->alias($alias, "session.cli");
+    Joomla\CMS\Factory::$application = $container->get(Joomla\Console\Application::class);
+    $account = $container->get(Joomla\CMS\User\UserFactoryInterface::class)->loadUserById((int) $user[3]);
+    $groups = array_values($account->groups);
+    sort($groups, SORT_NUMERIC);
+    if ($account->block || !$account->authorise("core.login.admin") || implode(",", $groups) !== $argv[7]) exit(7);
+    echo "Account verified\n";
+  ' -- "$sitename" "$username" "$display" "$email" "$source_secret" "$donor_id" "$donor_groups" "$mode" "$sub.$domain" > "$work/account-check"
+  grep -Fxq 'Account verified' "$work/account-check"
+  check_http "$sub" "$key" "$mode" "$web"
 }
 first="p$run_id"; second="q$run_id"; failed="r$run_id"
 apache_options=(--engine mariadb --database-image "$database_image")
-deploy new "$first" "$package" true "${apache_options[@]}" --input-json "$work/request.json"
+deploy new "$first" "$offline_package" true "${apache_options[@]}" --input-json "$work/request.json"
 jq -e '.success and .data.enabled == true' "$work/result" >/dev/null
-check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+check_site new "$first" offline 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 destination new up -d --force-recreate --wait --wait-timeout 240 >/dev/null
-check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+check_site new "$first" offline 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 
 deploy stopped "$second" "$package" false --enable false --image-tag "${fpm_image#*:}" \
   --engine mysql --database-image "$mysql_image" --webserver nginx --docroot "$nginx_docroot"
@@ -206,7 +274,7 @@ destination stopped config --format json | jq -e --arg key "$second" --arg db "$
         .source == $nginx_conf and .target == "/etc/nginx/conf.d/default.conf" and .read_only)
   ' >/dev/null
 destination stopped up -d --wait --wait-timeout 240 >/dev/null
-check_site stopped "$second" 'Playground Donor' donoradmin 'Donor Administrator' donor@example.test "$DONOR_PASSWORD" \
+check_site stopped "$second" online 'Playground Donor' donoradmin 'Donor Administrator' donor@example.test "$DONOR_PASSWORD" \
   "/var/www/html/$nginx_docroot" "nginx$second"
 
 # A valid older-format bundle with a deliberately unsuccessful final SQL
@@ -241,8 +309,8 @@ if docker container inspect "joomla$failed" >/dev/null 2>&1 || docker container 
 fi
 [ -z "$(docker ps -aq --filter "label=com.docker.compose.service=mariadb$failed")" ]
 [ -z "$(docker volume ls -q --filter 'label=com.octoleo.octojoom.playground' --filter "name=$failed")" ]
-check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
-echo 'Fresh Playground deployment passed on Apache/MariaDB with bind mounts and Nginx/PHP-FPM/MySQL with named volumes and a nested document root.'
+check_site new "$first" offline 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+echo 'Fresh Playground deployment preserved the renamed offline Apache/MariaDB site and the online Nginx/PHP-FPM/MySQL site.'
 
 # Mark the disposable destination so replacement can prove that only its
 # files, database and application secret changed. A custom hosting property
@@ -288,8 +356,7 @@ neighbor_ids=$(destination stopped ps --status running -q | sort)
 assert_original() {
   cmp "$sites/new.$domain/.env" "$work/before/.env"
   cmp "$sites/new.$domain/docker-compose.yml" "$work/before/docker-compose.yml"
-  destination new exec -T "joomla$first" curl -fsS --retry 20 --retry-all-errors --retry-delay 1 \
-    --max-time 5 http://127.0.0.1/ >/dev/null
+  check_http new "$first" offline 127.0.0.1
   replacement_state new "$first" original
   [ "$(destination stopped ps --status running -q | sort)" = "$neighbor_ids" ]
 }
@@ -354,10 +421,29 @@ jq -e '.success==false' "$work/result" >/dev/null
 assert_original
 
 # Default-on backup captures the old website and SQL. Replacement restarts
-# the already enabled site and retains its per-host configuration.
+# the already enabled site and upgrades a previous Octojoom Apache healthcheck.
+new_compose="$sites/new.$domain/docker-compose.yml"
+enabled_compose="$OCTOJOOM_HOME/Docker/joomla/enabled/new.$domain/docker-compose.yml"
+apache_health() {
+  destination new config --format json | jq -ce --arg app "joomla$first" '.services[$app].healthcheck.test'
+}
+managed_health=$(apache_health)
+cat > "$work/legacy-health.yml" <<'YAML'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+YAML
+joomlaSetServiceProperty "$new_compose" "$work/legacy-compose.yml" "joomla$first" healthcheck "$work/legacy-health.yml"
+cat "$work/legacy-compose.yml" > "$new_compose"
+if ! [ "$enabled_compose" -ef "$new_compose" ]; then cp -- "$new_compose" "$enabled_compose"; fi
+[ "$(apache_health)" = '["CMD","curl","-f","http://localhost/"]' ]
+[ "$(apache_health)" != "$managed_health" ]
 old_web=$(destination new ps -q "joomla$first")
 old_db=$(destination new ps -q "mariadb$first")
 replace_site new "$package"
+[ "$(apache_health)" = "$managed_health" ]
 backup=$(jq -er '.data | select(.target=="current" and .status=="deployed" and .running==true) | .backup' "$work/result")
 [ -f "$backup" ]
 [ -f "$backup.sha256" ]
@@ -378,7 +464,7 @@ PY
 [ "$(destination new ps -q "mariadb$first")" != "$old_db" ]
 [ -e "$OCTOJOOM_HOME/Docker/joomla/enabled/new.$domain" ]
 [ "$(destination stopped ps --status running -q | sort)" = "$neighbor_ids" ]
-check_site new "$first" 'Playground Donor' donoradmin 'Donor Administrator' donor@example.test "$DONOR_PASSWORD"
+check_site new "$first" online 'Playground Donor' donoradmin 'Donor Administrator' donor@example.test "$DONOR_PASSWORD"
 replacement_state new "$first" replaced
 [ "$(destination new exec -T "joomla$first" php -r 'echo ini_get("precision");')" = 15 ]
 
@@ -401,6 +487,7 @@ import json, secrets, sys
 with open(sys.argv[1]) as source:
     request = json.load(source)
 request["options"].update({
+    "source-admin-username": "shopmanager", "admin-username": "replacedmanager",
     "db-name": "pg_replaced", "db-user": "pg_replacer",
     "db-password": secrets.token_hex(18) + "'\"$literal!",
 })
@@ -408,7 +495,7 @@ with open(sys.argv[2], "w") as output:
     json.dump(request, output)
 PY
 started_after=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
-replace_site stopped "$package" "${without_backup[@]}" --input-json "$work/replace-request.json"
+replace_site stopped "$offline_package" "${without_backup[@]}" --input-json "$work/replace-request.json"
 jq -e '.success and .data.target=="current" and .data.backup==null and .data.running==false' "$work/result" >/dev/null
 # Docker's event log also includes containers removed when returning to the
 # stopped state. Capture it before the manual persistence check starts them.
@@ -432,7 +519,7 @@ for volume in "$old_web_volume" "$old_db_volume"; do
   fi
 done
 destination stopped up -d --wait --wait-timeout 240 >/dev/null
-check_site stopped "$second" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD" \
+check_site stopped "$second" offline 'Imported Shop' replacedmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD" \
   "/var/www/html/$nginx_docroot" "nginx$second"
 replacement_state stopped "$second" replaced "/var/www/html/$nginx_docroot"
 # Read the protected request locally and pass it to PHP over stdin so the
@@ -451,4 +538,4 @@ destination stopped exec -T --workdir "/var/www/html/$nginx_docroot" "joomla$sec
   if ($name !== $c->db || explode("@",$account)[0] !== $c->user) exit(2);
 ' < "$work/replace-request.json"
 [ "$(destination new ps --status running -q | sort)" = "$new_neighbor_ids" ]
-echo 'Existing-site replacement passed for backup, opt-out, bind and named storage, SQL failure, publication rollback and restart.'
+echo 'Existing-site replacement passed for backup, opt-out, SQL failure, rollback, preserved administrator, offline page and restart.'
