@@ -66,6 +66,16 @@ password. An unattended deployment enables the new site by default.
 Add `--output json` to receive the site name, URL, image and
 enablement state in `data`. See [the request format](COMMANDS.md).
 
+If someone renamed the administrator inside Joomla before export, enter the
+current Joomla login at the administrator username prompt or supply it with
+`--admin-username`. When the saved login is missing, Octojoom checks that the
+specified account matches the export's administrator email. If that email also
+changed, select the existing account explicitly with `--source-admin-username`
+and confirm its current details. To rename the selected account on deployment,
+use both names, for example `--source-admin-username owner --admin-username shopmanager`.
+The same options apply when replacing an existing site. The account retains
+its Joomla user ID and group memberships.
+
 Octojoom checks the selected image against the installed Joomla version,
 webserver, PHP requirements and database driver. By default it uses the
 package's preferred PHP series and imports the supported PHP settings. The
@@ -130,6 +140,10 @@ confirmed site and administrator details are written to the site's private
 `.env` and applied to Joomla. Octojoom imports the files and database into
 separate storage, so tables and files that existed only on the old site are
 removed from the active installation.
+
+Fresh deployment and replacement preserve Joomla’s **Site Offline** setting.
+An intentionally offline site can pass verification and serve its offline page
+to visitors while its containers are running.
 
 During staging, the original website keeps its current service state. Octojoom
 pauses writers for the backup and switch. It then starts the published services
