@@ -140,6 +140,8 @@ COMPOSE
 
 @test "website seeding accepts stored Apache IDs, fresh numeric IDs and image defaults" {
   mkdir "$work/website"
+  # The seeding helper invokes this test-local Docker stub indirectly.
+  # shellcheck disable=SC2317
   docker() {
     cat >/dev/null
     # The guest shell receives root, UID, GID, file bytes and database bytes.
@@ -186,4 +188,66 @@ JSON
   mv "$work/maria.json" "$work/candidate.json"
   joomlaPlaygroundDatabaseBootstrap "$work" db mariadb
   refute_file_exists "$work/bootstrap.json"
+}
+
+# Docker protects named-volume references itself. These fixtures also expose
+# its backing directory through an ordinary bind in a second site's model or
+# in the live container inventory.
+original_volume_fixture() {
+  local site_dir="$VDM_REPO_PATH/joomla/available"
+  mkdir -p "$work/web" "$work/backing" "$site_dir/shop.example.test" "$site_dir/other.example.test"
+  touch "$site_dir/shop.example.test/docker-compose.yml" "$site_dir/other.example.test/docker-compose.yml"
+  joomlaSiteJSON -n --arg path "$work/backing" '[{Name:"old_web",CreatedAt:"t1",Driver:"local",Scope:"local",Options:null,Labels:{},Mountpoint:$path}]' > "$work/web/original-volume.json"
+  cp "$work/web/original-volume.json" "$work/volume.json"
+  echo replacement_web > "$work/web/new-volume"
+  echo '{"original":"old_web"}' > "$work/web/mount.json"
+  echo '{"volumes":{"web":{"name":"old_web"}},"services":{"app":{"volumes":[{"type":"volume","source":"web","target":"/var/www/html"}]}}}' > "$work/selected.json"
+  echo '{"services":{}}' > "$work/neighbor.json"
+  joomlaSiteCompose() {
+    case "$*" in
+      'shop.example.test config --format json') cat "$work/selected.json";;
+      'other.example.test config --format json') cat "$work/neighbor.json";;
+      'shop.example.test ps -aq') return 0;;
+      *) return 1;;
+    esac
+  }
+  docker() {
+    case "$*" in
+      'volume inspect old_web') cat "$work/volume.json";;
+      'ps -aq') if [ -f "$work/live.json" ]; then echo neighbor; fi;;
+      'inspect neighbor') cat "$work/live.json";;
+      'volume rm old_web') touch "$work/removed";;
+      *) return 1;;
+    esac
+  }
+}
+
+@test "cutover refuses a changed volume identity or a late configured bind of its backing directory" {
+  original_volume_fixture
+  run joomlaPlaygroundCheckOriginalVolume shop.example.test old_web "$work/web" /var/www/html
+  assert_success
+
+  joomlaSiteJSON '.[0].CreatedAt="t2"' < "$work/web/original-volume.json" > "$work/volume.json"
+  run joomlaPlaygroundCheckOriginalVolume shop.example.test old_web "$work/web" /var/www/html
+  assert_failure
+  cp "$work/web/original-volume.json" "$work/volume.json"
+
+  joomlaSiteJSON -n --arg path "$work/backing" '{services:{worker:{volumes:[{type:"bind",source:$path,target:"/var/www/html"}]}}}' > "$work/neighbor.json"
+  run joomlaPlaygroundCheckOriginalVolume shop.example.test old_web "$work/web" /var/www/html
+  assert_failure
+  assert_output_contains 'other.example.test'
+}
+
+@test "retirement preserves an original volume while a live container binds its backing tree" {
+  original_volume_fixture
+  echo '{"services":{}}' > "$work/selected.json"
+  joomlaSiteJSON -n --arg path "$work/backing/content" '[{Id:"neighbor",Mounts:[{Type:"bind",Source:$path,Destination:"/work"}]}]' > "$work/live.json"
+  run joomlaPlaygroundDiscardReplacementStorage "$work" "$token" original shop.example.test
+  assert_failure
+  refute_file_exists "$work/removed"
+
+  rm "$work/live.json"
+  run joomlaPlaygroundDiscardReplacementStorage "$work" "$token" original shop.example.test
+  assert_success
+  assert_file_exists "$work/removed"
 }
