@@ -120,9 +120,101 @@ record_yes_no_dialogs() {
   joomlaPlaygroundReplaceSite() { touch "$SANDBOX/transaction-started"; }
   run --separate-stderr joomlaPlaygroundDeployCurrent "$package" "$site" true "$wrong_digest"
   assert_failure
-  joomlaSiteJSON -e '.status=="failed" and .stage=="package" and .target=="current"' <<< "$output"
+  joomlaSiteJSON -e '.status=="failed" and .stage=="package" and .target=="current" and
+    .outcome=="not_committed" and .committed==false and .running==null and .recovery==null' <<< "$output"
   refute_file_exists "$SANDBOX/transaction-started"
   refute_command '^docker '
+}
+
+# Stub only the transaction; exercise package preparation, receipt formatting
+# and both entry points without changing service state.
+# shellcheck disable=SC2016
+record_outcome() {
+  fixture_outcome="$1" fixture_status="$2"
+  joomlaPlaygroundReplaceSite() {
+    printf '%s\n' 'private transaction diagnostic' >&2
+    joomlaSiteJSON -nc --arg site "$2" --arg outcome "$fixture_outcome" \
+      --arg recovery "$SANDBOX/private recovery" --arg backup "$SANDBOX/verified backup.tar.gz" '
+      {target:"current",$site,$outcome,committed:($outcome|startswith("committed")),
+        status:(if $outcome=="committed" then "deployed" elif $outcome=="committed_with_followup" then $outcome else "failed" end),
+        stage:"cleanup",reason:"Review the cleanup receipt.",running:null,$backup,$recovery}' > "$1/result.json"
+    return "$fixture_status"
+  }
+}
+
+# shellcheck disable=SC2016
+@test "replacement CLI distinguishes committed follow-up and incomplete recovery and preserves their paths" {
+  local state committed
+  for state in committed_with_followup recovery_incomplete; do
+    committed=false
+    [ "$state" != committed_with_followup ] || committed=true
+    record_outcome "$state" 7
+    run --separate-stderr replace_cli --container "$site" --confirm yes
+    assert_status 7
+    joomlaSiteJSON -e --arg outcome "$state" --argjson committed "$committed" \
+      --arg backup "$SANDBOX/verified backup.tar.gz" --arg recovery "$SANDBOX/private recovery" '
+      .success==false and .exit_status==7 and .data.outcome==$outcome and .data.committed==$committed and
+      .data.status==(if $committed then $outcome else "failed" end) and .data.stage=="cleanup" and
+      .data.reason=="Review the cleanup receipt." and .data.running==null and .data.backup==$backup and .data.recovery==$recovery and
+      (.data.archiveSha256|length)==64 and
+      (.error|contains(if $committed then "was committed" else "recovery is incomplete" end))' <<< "$output"
+    refute_output_contains 'private transaction diagnostic'
+  done
+
+  record_outcome committed 0
+  run --separate-stderr replace_cli --container "$site" --confirm yes
+  assert_success
+  joomlaSiteJSON -e '.success and .exit_status==0 and .error==null and
+    .data.status=="deployed" and .data.outcome=="committed" and .data.committed' <<< "$output"
+}
+
+@test "replacement menu shows the public committed result and retained paths even if interrupted" {
+  record_outcome committed_with_followup 130
+  answers "$package" current "$site" yes yes
+  run showJoomlaPlayground
+  assert_status 130
+  assert_answers_used
+  assert_dialog "The replacement of $site was committed. Follow-up is required at stage cleanup."
+  assert_dialog 'Review the cleanup receipt.'
+  assert_dialog "$SANDBOX/verified backup.tar.gz"
+  assert_dialog "$SANDBOX/private recovery"
+  refute_dialog 'private transaction diagnostic'
+  refute_dialog 'Playground deployment did not complete'
+}
+
+# Bats fills stderr when run uses --separate-stderr.
+# shellcheck disable=SC2154
+@test "replacement text distinguishes incomplete recovery and keeps errors on stderr" {
+  record_outcome recovery_incomplete 1
+  run --separate-stderr joomlaPlaygroundDeployCurrent "$package" "$site" true
+  assert_failure
+  assert_equal "$output" ''
+  [[ "$stderr" == *"The replacement of $site was not committed. Automatic recovery is incomplete"* ]]
+  [[ "$stderr" == *"$SANDBOX/private recovery"* && "$stderr" == *"$SANDBOX/verified backup.tar.gz"* ]]
+}
+
+# shellcheck disable=SC2016
+@test "replacement CLI checks the commit marker if a transaction receipt is missing or unreadable" {
+  local fixture_journal="$VDM_REPO_PATH/joomla/available/$site/.playground-replace.12345678" mode
+  mkdir "$fixture_journal"
+  printf '%s\n' "$SANDBOX/verified backup.tar.gz" > "$fixture_journal/verified-backup"
+  joomlaPlaygroundReplaceSite() {
+    printf '%s\n' "$fixture_journal" > "$1/transaction.path"
+    case "$mode" in
+      uncommitted) printf '{' > "$1/result.json";;
+      prepared) touch "$1/committed";;
+      journal) touch "$fixture_journal/committed"; printf '{}' > "$1/result.json";;
+    esac
+    return 1
+  }
+  for mode in uncommitted prepared journal; do
+    run --separate-stderr replace_cli --container "$site" --confirm yes
+    assert_failure
+    joomlaSiteJSON -e --arg recovery "$fixture_journal" --arg mode "$mode" --arg backup "$SANDBOX/verified backup.tar.gz" '
+      .success==false and .data.stage=="report" and .data.recovery==$recovery and .data.backup==$backup and .data.running==null and
+      (if $mode=="uncommitted" then .data.committed==false and .data.outcome=="recovery_incomplete"
+       else .data.committed==true and .data.outcome=="committed_with_followup" end)' <<< "$output"
+  done
 }
 
 @test "replacement configuration uses the target connection and mail policy with the imported title, secret and table prefix" {
