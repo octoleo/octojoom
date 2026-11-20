@@ -394,7 +394,8 @@ named_mounts() {
     . as $model | .services[$service].volumes[] | select(.target==$target and .type=="volume") |
     $model.volumes[.source].name'
 }
-old_volumes=$(named_mounts "joomla$second" /var/www/html && named_mounts "mariadb$second" /var/lib/mysql)
+old_web_volume=$(named_mounts "joomla$second" /var/www/html)
+old_db_volume=$(named_mounts "mariadb$second" /var/lib/mysql)
 destination stopped down >/dev/null
 new_neighbor_ids=$(destination new ps --status running -q | sort)
 backup_listing=$(find "${backup%/*}" -maxdepth 1 -name '*.sha256' -print | sort)
@@ -421,12 +422,18 @@ grep -Fxq -- "mariadb$second" "$work/started-containers"
 [ "$backup_listing" = "$(find "${backup%/*}" -maxdepth 1 -name '*.sha256' -print | sort)" ]
 [ ! -e "$OCTOJOOM_HOME/Docker/joomla/enabled/stopped.$domain" ]
 [ -z "$(destination stopped ps -q --status running)" ]
-active_volumes=$(named_mounts "joomla$second" /var/www/html && named_mounts "mariadb$second" /var/lib/mysql)
-while IFS= read -r volume; do
-  if ! grep -Fxq -- "$volume" <<< "$active_volumes" && docker volume inspect "$volume" >/dev/null 2>&1; then
+active_web_volume=$(named_mounts "joomla$second" /var/www/html)
+active_db_volume=$(named_mounts "mariadb$second" /var/lib/mysql)
+[ "$active_web_volume" != "$active_db_volume" ]
+docker volume inspect "$active_web_volume" "$active_db_volume" >/dev/null
+for volume in "$old_web_volume" "$old_db_volume"; do
+  if [ "$volume" = "$active_web_volume" ] || [ "$volume" = "$active_db_volume" ]; then
+    echo 'Replacement reused original named storage.' >&2; exit 1
+  fi
+  if docker volume inspect "$volume" >/dev/null 2>&1; then
     echo 'Replacement retained old named storage after the explicit backup opt-out.' >&2; exit 1
   fi
-done <<< "$old_volumes"
+done
 destination stopped up -d --wait --wait-timeout 240 >/dev/null
 check_site stopped "$second" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD" \
   "/var/www/html/$nginx_docroot" "nginx$second"
