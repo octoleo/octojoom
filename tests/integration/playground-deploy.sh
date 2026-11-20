@@ -298,24 +298,21 @@ assert_original() {
 if replace_site new "$package" --pre-backup no; then echo 'One refusal bypassed the backup confirmation.' >&2; exit 1; fi
 jq -e '.success==false' "$work/result" >/dev/null
 assert_original
-# Record source locations for an unexpected early return. Never trace command
-# arguments: Compose configuration, administrator details and SQL are private.
-cat > "$work/trace-replacement.bash" <<'BASH'
-set -T
-trap 'case "$BASH_COMMAND" in
-  "return 1"|"exit 1"|"return \$?"|"exit \$?")
-    if [[ " ${FUNCNAME[*]} " == *" joomlaPlaygroundReplaceSite "* && ${BASH_SOURCE[0]} == */src/octojoom ]]; then
-      printf "Replacement location: %s:%s\n" "${FUNCNAME[0]}" "$LINENO" >&2
-    fi;;
-esac' DEBUG
-BASH
-if BASH_ENV="$work/trace-replacement.bash" replace_site new "$work/failing.zip" "${without_backup[@]}" 2>"$work/bad-replacement.log"; then
+if replace_site new "$work/failing.zip" "${without_backup[@]}" 2>"$work/bad-replacement.log"; then
   echo 'Replacement accepted a failing SQL import.' >&2; exit 1
 fi
 jq -e '.success==false' "$work/result" >/dev/null
 if ! grep -q 'database sql failed' "$work/bad-replacement.log"; then
   jq -r '"Unexpected replacement failure at stage " + (.data.stage // "unknown")' "$work/result" >&2
-  grep -E '^Replacement location: [a-zA-Z_][a-zA-Z0-9_]*:[0-9]+$' "$work/bad-replacement.log" | tail -n 20 >&2 || :
+  # Only the fixed operational labels are public; configuration and SQL stay private.
+  grep -E '^Replacement candidate failed while [a-zA-Z ]+\.$' "$work/bad-replacement.log" >&2 || :
+  for diagnostic in 'unsupported custom service configuration' 'unsupported extra mount in the isolated site' \
+    'unexpected website mount access' 'unsupported data mount' 'unexpected bind source' 'unexpected volume source' \
+    'Cannot isolate the configured website, database, or HTTP companion.' \
+    'Could not reconcile the source Joomla secret and destination site settings.' \
+    'Could not reconcile the destination Joomla database configuration.'; do
+    if grep -Fq -- "$diagnostic" "$work/bad-replacement.log"; then printf '%s\n' "$diagnostic" >&2; fi
+  done
   echo 'Replacement did not reach the native import.' >&2; exit 1
 fi
 assert_original
