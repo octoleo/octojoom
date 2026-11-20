@@ -41,6 +41,8 @@ class JConfig {
     if variant == "path-alias":
         files["site/media/preview.txt"] = b"First website asset"
         files["site/media/Preview.txt"] = b"Second website asset"
+    if variant == "unicode-spaces":
+        files["site/media/fiche\u202fproduit.txt"] = b"Product information"
     sql = b"CREATE TABLE demo_items (id INTEGER);\n"
     statements = json.dumps(sql.decode().rstrip(";\n")).encode() + b"\n"
     if variant == "mysql-values":
@@ -137,7 +139,13 @@ class JConfig {
     }
     if variant == "mysql-values":
         metadata["database"]["rows"] = 3
-    if variant == "legacy":
+    if variant == "unicode-spaces":
+        metadata["siteName"] = config["configuration"]["siteName"] = "Maison\u00a0Neuve"
+        config["configuration"]["admin"].update(
+            username="Marie\u00a0Anne", name="Marie\u202fAnne", password="fixture\u00a0password")
+    elif variant == "line-separator":
+        metadata["siteName"] = "Maison\u2028Neuve"
+    elif variant == "legacy":
         del config["contentHash"]
     elif variant == "wrong-hash":
         config["contentHash"]["value"] = "f" * 64
