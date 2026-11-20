@@ -63,6 +63,21 @@ setup() {
   done
 }
 
+@test "replacement accepts a local directory but refuses a missing directory and filesystem root" {
+  local directory="$work/site storage" root=/
+  mkdir "$directory"
+  if is_windows; then
+    root=$(cygpath -am -- "$directory")
+    root="${root%%/*}/"
+  fi
+  run joomlaPlaygroundReplaceableDirectory "$directory"
+  assert_success
+  run joomlaPlaygroundReplaceableDirectory "$directory/missing"
+  assert_failure
+  run joomlaPlaygroundReplaceableDirectory "$root"
+  assert_failure
+}
+
 @test "replacement changes only owned environment entries in a selected service" {
   local file="$work/site.yml" property="$work/environment"
   cat > "$file" <<'COMPOSE'
