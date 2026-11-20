@@ -20839,7 +20839,9 @@ function cliComplete() {
         joomla/backup) printf '%s\n' create list verify restore delete cleanup;;
         *) printf '%s\n' show list inspect apply set switch settings path read replace script complete change export import tables console execute create verify restore delete cleanup;;
       esac;;
-    --engine|--db-engine) printf '%s\n' mariadb mysql postgres;;
+    --engine|--db-engine)
+      printf '%s\n' mariadb mysql
+      [ "$type/$task" = joomla/playground ] || printf '%s\n' postgres;;
     --data-mode) printf '%s\n' preserve clone fresh;;
     --compression) printf '%s\n' none gzip custom;;
     --format) printf '%s\n' tar.gz zip;; --scope) printf '%s\n' full website database files;;
