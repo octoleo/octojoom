@@ -41,12 +41,16 @@ setup() {
   joomlaPlaygroundPlanReplacement() {
     local work="$3" ini_source
     ini_source=$(joomlaWebHostPath "${TX_INI_SOURCE:-$TX_PROJECT/php.ini}") || return 1
-    joomlaSiteJSON --arg ini "$ini_source" '.services.app.volumes |=
-      (map(select(.target!="/var/www/html/php.ini")) + [{type:"bind",source:$ini,target:"/var/www/html/php.ini"}])' \
+    joomlaSiteJSON --arg ini "$ini_source" --arg web "$TX_WEB" '
+      .services.helper={image:"helper"} |
+      if $web=="nginx" then .services.nginx={image:"nginx",volumes:[.services.app.volumes[] | select(.target=="/var/www/html") | .read_only=true]} else . end |
+      .services.app.volumes |= (map(select(.target!="/usr/local/etc/php/conf.d/zz-octojoom.ini")) +
+        [{type:"bind",source:$ini,target:"/usr/local/etc/php/conf.d/zz-octojoom.ini",read_only:true}])' \
       < "$SANDBOX/model.json" > "$work/original-model.json" || return 1
-    cp "$work/original-model.json" "$SANDBOX/model.json" && cp "$work/original-model.json" "$work/rendered.json" || return 1
+    cp "$work/original-model.json" "$SANDBOX/model.json" && cp "$work/original-model.json" "$work/rendered.json" &&
+      cp "$work/original-model.json" "$work/proposed.json" || return 1
     joomlaSiteJSON -nc --arg web "$TX_WEB" '{project:"shop",app:"app",db:"db",web:$web,
-      root:"/var/www/html",engine:"mariadb",image:"joomla:6"}' > "$work/services.json"
+      root:"/var/www/html",ini:"/usr/local/etc/php/conf.d/zz-octojoom.ini",engine:"mariadb",image:"joomla:6"}' > "$work/services.json"
     cp "$SANDBOX/original.yml" "$work/candidate.yml" && echo '# candidate compose' >> "$work/candidate.yml" || return 1
     echo 'VDM_SHOP_DB="candidate"' > "$work/candidate.env"
     VDM_SITE_SERVICE=app VDM_PHP_INI_TARGET=/usr/local/etc/php/conf.d/zz-octojoom.ini \
@@ -60,21 +64,65 @@ setup() {
       candidate=$(joomlaSiteJSON -er --arg role "$role" '.[$role].candidate' < "$3/storage.json") || return 1
       printf 'candidate %s' "$role" > "$candidate/content" || return 1
     done
+    VDM_DB_HOST=db joomlaPlaygroundReplacementModel "$3" "$(cat "$3/token")" app db "$TX_WEB" "$(cat "$3/services.json")" || return 1
     case "$TX_FAULT" in
       compose) echo 'name: other-project' >> "$TX_DIR/docker-compose.yml";;
       registration) link_enabled joomla "$TX_SITE";;
     esac
     echo staged >> "$TX_EVENTS"
   }
-  migrationRunCompose() { cat "$SANDBOX/model.json"; }
+  migrationRunCompose() {
+    case "$2" in
+      */candidate.yml) cat "$SANDBOX/model.json"; return;;
+      verify.json)
+        [ "$3" = config ] && [ "$4" = --quiet ] &&
+          joomlaSiteJSON -e --arg project "$COMPOSE_PROJECT_NAME" --arg web "$TX_WEB" '
+            .name==$project and .networks.default.internal and
+            (.services|keys)==(if $web=="nginx" then ["app","db","nginx"] else ["app","db"] end)' < "$2"
+        return;;
+      */verify.json) ;;
+      *) return 92;;
+    esac
+    local work="${2%/*}"
+    [ -z "$1" ] && [ "$COMPOSE_PROJECT_NAME" = "octojoom-verify-$(cat "$work/token")" ] &&
+      [ -f "$work/verifying" ] && [ ! -e "$work/committed" ] &&
+      assert_registration_gated && assert_candidate_storage || return 1
+    shift 2
+    case "$*" in
+      'up -d'*) [ -f "$SANDBOX/public-removed" ] && echo 'gate up' >> "$TX_EVENTS" && touch "$SANDBOX/gate-live";;
+      'down --remove-orphans')
+        echo 'gate down' >> "$TX_EVENTS"
+        if [ "$TX_FAULT" != gate-held ]; then rm -f "$SANDBOX/gate-live"; fi;;
+      *) return 92;;
+    esac
+  }
   joomlaPlaygroundOriginalCompose() {
     [ -s "$1/rendered.json" ] && [ "$2" = "$TX_DIR" ] && [ "$3" = shop ] || return 1
     shift 3
-    joomlaSiteCompose "$TX_SITE" "$@"
+    TX_PINNED=true joomlaSiteCompose "$TX_SITE" "$@"
   }
   joomlaSiteCompose() {
     [ "$1" = "$TX_SITE" ] || return 1
     shift
+    if [ "$1" = up ]; then
+      local work scope
+      IFS= read -r work < "$TX_DIR/.octojoom-change.lock/recovery.path" || return 1
+      if grep -qF '# candidate compose' "$TX_DIR/docker-compose.yml"; then
+        scope=candidate
+        [ -f "$work/committed" ] && [ ! -e "$SANDBOX/gate-live" ] && assert_candidate_storage || return 1
+      else
+        scope=original
+        cmp -s "$TX_DIR/docker-compose.yml" "$SANDBOX/original.yml" &&
+          [ ! -e "$SANDBOX/gate-live" ] && [ "$(cat "$TX_PROJECT/db/content")" = 'original db' ] &&
+          [ "$(cat "$TX_PROJECT/joomla/content")" = 'original web' ] || return 1
+      fi
+      printf '%s %s\n' "$scope" "$*" >> "$TX_EVENTS"
+      if [ "$scope" = candidate ] && [ "$2" = -d ] && [ "$TX_FAULT" = public-start ]; then
+        printf 'customer order' > "$TX_PROJECT/db/accepted-order"
+        return 1
+      fi
+      return 0
+    fi
     printf '%s\n' "$*" >> "$TX_EVENTS"
     if [ "$*" = stop ] && [ "$TX_FAULT" = ini-cutover ]; then
       printf 'late operator edit' > "$TX_INI_DESTINATION"
@@ -83,11 +131,22 @@ setup() {
       'config --format json') cat "$SANDBOX/model.json";;
       'ps --status running --services') printf '%s\n' "$TX_RUNNING";;
       'ps --all --services') printf 'app\ndb\nhelper\n'; [ "$TX_WEB" = 127.0.0.1 ] || printf '%s\n' "$TX_WEB";;
-      'stop'|'stop '*|'up --no-start '*|'up -d --no-recreate '*|'up -d --force-recreate '*|'down') return 0;;
+      'rm --force --stop '*)
+        [ "${TX_PINNED:-}" = true ] && assert_registration_gated &&
+          [ "$(cat "$TX_PROJECT/db/content")" = 'original db' ] && touch "$SANDBOX/public-removed";;
+      'stop'|'stop '*) return 0;;
       *) return 92;;
     esac
   }
-  docker() { case "$*" in 'ps -aq'|'ps --quiet'|'ps -aq --filter label=com.docker.compose.project=shop') return 0;; *) return 92;; esac; }
+  docker() {
+    case "$*" in
+      'ps -aq'|'ps --quiet'|'ps -aq --filter label=com.docker.compose.project=shop') return 0;;
+      'ps -aq --filter label=com.docker.compose.project=octojoom-verify-'*)
+        [ ! -f "$SANDBOX/gate-live" ] || echo verify-container;;
+      'network ls -q --filter name=^octojoom-verify-'*) return 0;;
+      *) return 92;;
+    esac
+  }
   joomlaBackupCreateAction() {
     [ "$1" = "$TX_SITE" ] && [ "$3" = full ] && [ "$6" = true ] || return 1
     touch "$2" || return 1
@@ -100,24 +159,53 @@ setup() {
     [ "$TX_FAULT" != backup ]
   }
   joomlaPlaygroundWaitFresh() {
-    # Record a check only after the public configuration, web and DB form a
-    # consistent candidate. A failing check exercises rollback after cutover.
-    if [ "$1" = "$VDM_REPO_PATH/joomla/.env" ]; then
+    if [[ "$2" == */verify.json ]]; then
+      [ -z "$1" ] && [ -f "$SANDBOX/gate-live" ] && assert_registration_gated && assert_candidate_storage || return 1
+      [ "$3" = app ] && [ "$4" = "$TX_SITE" ] && [ "$5" = /var/www/html ] && [ "$6" = "$TX_WEB" ] || return 1
+      echo 'gate ready' >> "$TX_EVENTS"
+      [ "$TX_FAULT" != ready ]
+    elif [ "$1" = "$VDM_REPO_PATH/joomla/.env" ]; then
       assert_original_site || return 1
       echo 'original ready' >> "$TX_EVENTS"
-      return 0
+    else
+      [ "$2" = "$TX_DIR/docker-compose.yml" ] && assert_candidate_storage || return 1
+      echo 'public ready' >> "$TX_EVENTS"
     fi
-    [ "$(cat "$TX_PROJECT/joomla/content")" = 'candidate web' ] &&
-      [ "$(cat "$TX_PROJECT/db/content")" = 'candidate db' ] &&
-      grep -qF '# candidate compose' "$TX_DIR/docker-compose.yml" &&
-      grep -qF 'candidate' "$TX_DIR/.env" &&
-      grep -qF 'candidate ini' "$TX_PROJECT/php.ini" || return 1
-    echo ready >> "$TX_EVENTS"
-    [ "$TX_FAULT" != ready ]
   }
   VDM_DEFAULT_BACKUP_PATH="$SANDBOX/backups"
   mkdir -p "$VDM_DEFAULT_BACKUP_PATH"
   OCTOJOOM_NON_INTERACTIVE=true
+}
+
+assert_registration_gated() {
+  local file
+  [ -f "$TX_DIR/docker-compose.yml" ] || return 1
+  for file in "$TX_DIR/docker-compose.yml" "$VDM_REPO_PATH/joomla/enabled/$TX_SITE/docker-compose.yml"; do
+    [ -d "${file%/*}" ] || continue
+    [ -f "$file" ] || return 1
+    joomlaSiteJSON -e '.name=="shop" and .services=={}' < "$file" >/dev/null || return 1
+  done
+}
+
+assert_candidate_storage() {
+  assert_equal "$(cat "$TX_PROJECT/joomla/content")" 'candidate web' &&
+    assert_equal "$(cat "$TX_PROJECT/db/content")" 'candidate db' &&
+    assert_file_contains "$TX_DIR/.env" candidate && assert_file_contains "$TX_PROJECT/php.ini" 'candidate ini'
+}
+
+assert_public_lifecycle() {
+  local expected actual
+  expected=$(printf '%s\n' "$@")
+  actual=$(awk '/^rm / {removed=1} removed && /^(rm |gate |original (up|ready)|candidate up|public ready|stop|down)/' "$TX_EVENTS")
+  assert_equal "$actual" "$expected"
+}
+
+assert_offline_originals() {
+  local recovery="$1" role sibling
+  for role in web db; do
+    sibling=$(joomlaSiteJSON -er --arg role "$role" '.[$role].candidate' < "$recovery/storage.json") || return 1
+    assert_equal "$(cat "${sibling%/*}/original/content")" "original $role" || return 1
+  done
 }
 
 assert_original_site() {
@@ -210,8 +298,8 @@ assert_transaction_cleaned() {
   assert_failure
   assert_output_contains 'site registration changed'
   assert_file_contains "$TX_EVENTS" backup-verified
-  assert_file_contains "$TX_EVENTS" 'up -d --no-recreate --no-deps app db'
-  refute_file_contains "$TX_EVENTS" 'up -d --force-recreate'
+  assert_file_contains "$TX_EVENTS" 'original up -d --no-recreate --no-deps app db'
+  refute_file_contains "$TX_EVENTS" 'candidate up'
   assert_equal "$(cat "$TX_DIR/.env")" COMPOSE_PROJECT_NAME=other-project
   assert_equal "$(cat "$TX_PROJECT/joomla/content")" 'original web'
   assert_equal "$(cat "$TX_PROJECT/db/content")" 'original db'
@@ -234,70 +322,94 @@ assert_transaction_cleaned() {
   assert_failure
   assert_file_contains "$TX_EVENTS" backup-created
   assert_file_contains "$TX_EVENTS" backup-verified
-  assert_file_contains "$TX_EVENTS" 'up -d --no-recreate --no-deps app db'
-  refute_file_contains "$TX_EVENTS" 'up -d --force-recreate'
-  joomlaSiteJSON -e '.status=="failed" and .stage=="backup" and .recovery==null and .backup==null' < "$TX_PACKAGE/result.json"
+  assert_file_contains "$TX_EVENTS" 'original up -d --no-recreate --no-deps app db'
+  refute_file_contains "$TX_EVENTS" 'candidate up'
+  joomlaSiteJSON -e '.status=="failed" and .outcome=="not_committed" and .committed==false and .stage=="backup" and .recovery==null and .backup==null' < "$TX_PACKAGE/result.json"
   assert_original_site
   assert_transaction_cleaned
 }
 
-@test "failed public readiness restores the prior database, uploads, site configuration and running set" {
+@test "failed gated readiness removes the verifier before restoring the original storage, definition and running set" {
   TX_FAULT=ready
   run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
   assert_failure
-  assert_file_contains "$TX_EVENTS" ready
+  assert_public_lifecycle 'rm --force --stop app db helper' \
+    'gate up' 'gate ready' 'gate down' \
+    'original up --no-start --no-deps app db helper' \
+    'original up -d --no-recreate --no-deps app db' \
+    'original ready'
   refute_file_contains "$TX_EVENTS" backup-created
-  assert_file_contains "$TX_EVENTS" 'up --no-start --no-deps app db helper'
-  assert_file_contains "$TX_EVENTS" 'up -d --no-recreate --no-deps app db'
-  assert_file_contains "$TX_EVENTS" 'original ready'
-  joomlaSiteJSON -e '.status=="failed" and .stage=="activate" and .recovery==null' < "$TX_PACKAGE/result.json"
+  joomlaSiteJSON -e '.status=="failed" and .outcome=="not_committed" and .committed==false and
+    .stage=="verify" and .recovery==null and .running==true' < "$TX_PACKAGE/result.json"
   assert_original_site
   assert_transaction_cleaned
 }
 
-@test "a successful default replacement keeps its verified backup and both offline originals for recovery" {
+@test "a verifier still holding published storage keeps the registration gated and the recovery lock held" {
+  TX_FAULT=gate-held
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
+  assert_failure
+  local report="$TX_PACKAGE/result.json" recovery
+  joomlaSiteJSON -e '.status=="failed" and .outcome=="recovery_incomplete" and .committed==false and
+    .stage=="verify" and .running==null and (.reason|length)>0' < "$report"
+  recovery=$(joomlaSiteJSON -er .recovery < "$report")
+  assert_equal "$(cat "$TX_DIR/.octojoom-change.lock/recovery.path")" "$recovery"
+  assert_file_exists "$recovery/verifying"
+  refute_file_exists "$recovery/committed"
+  assert_file_contains "$TX_EVENTS" 'gate down'
+  refute_file_contains "$TX_EVENTS" 'original up'
+  refute_file_contains "$TX_EVENTS" 'candidate up'
+  assert_registration_gated
+  assert_candidate_storage
+  assert_offline_originals "$recovery"
+}
+
+@test "a successful default replacement reopens only after commit and keeps verified recovery data" {
   link_enabled joomla "$TX_SITE"
   run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" true
   assert_success
-  local report="$TX_PACKAGE/result.json" backup recovery role sibling
-  joomlaSiteJSON -e '.status=="deployed" and .enabled=="enabled" and .running==true' < "$report"
+  local report="$TX_PACKAGE/result.json" backup recovery
+  joomlaSiteJSON -e '.status=="deployed" and .outcome=="committed" and .committed==true and
+    .enabled=="enabled" and .running==true' < "$report"
   backup=$(joomlaSiteJSON -er .backup < "$report")
   recovery=$(joomlaSiteJSON -er .recovery < "$report")
   assert_file_exists "$backup"
-  assert_file_exists "$recovery/storage.json"
-  for role in web db; do
-    sibling=$(joomlaSiteJSON -er --arg role "$role" '.[$role].candidate' < "$recovery/storage.json")
-    assert_equal "$(cat "${sibling%/*}/original/content")" "original $role"
-  done
+  assert_file_exists "$recovery/committed"
+  assert_offline_originals "$recovery"
   assert_file_contains "$TX_EVENTS" backup-verified
-  assert_file_contains "$TX_EVENTS" ready
+  assert_public_lifecycle 'rm --force --stop app db helper' \
+    'gate up' 'gate ready' 'gate down' \
+    'candidate up --no-start --no-deps --pull never app db helper' \
+    'candidate up -d --no-recreate --no-deps --pull never app db' 'public ready'
   assert_equal "$(getJoomlaSiteEnabledState "$TX_SITE")" enabled
   [ ! -e "$TX_DIR/.octojoom-change.lock" ]
 }
 
-@test "a stopped site is restarted for readiness, then returned to its previous stopped state" {
+@test "a stopped site's private verifier starts and stops without ever starting public services" {
   TX_RUNNING=''
   run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
   assert_success
-  joomlaSiteJSON -e '.status=="deployed" and .running==false and .backup==null and .recovery==null' < "$TX_PACKAGE/result.json"
-  local lifecycle
-  lifecycle=$(awk '/^(up|ready|stop)( |$)/' "$TX_EVENTS")
-  assert_equal "$lifecycle" $'stop\nup --no-start --force-recreate --no-deps helper\nup -d --force-recreate --no-deps db app\nready\nstop db\nstop app'
-  assert_equal "$(cat "$TX_PROJECT/joomla/content")" 'candidate web'
-  assert_equal "$(cat "$TX_PROJECT/db/content")" 'candidate db'
+  joomlaSiteJSON -e '.status=="deployed" and .outcome=="committed" and .committed==true and
+    .running==false and .backup==null and .recovery==null' < "$TX_PACKAGE/result.json"
+  assert_public_lifecycle 'rm --force --stop app db helper' \
+    'gate up' 'gate ready' 'gate down' \
+    'candidate up --no-start --no-deps --pull never app db helper'
+  assert_candidate_storage
   assert_equal "$(cat "$TX_PROJECT/adjacent-file")" untouched
   cmp "$VDM_REPO_PATH/joomla/.env" "$SANDBOX/shared.env"
   assert_transaction_cleaned
 }
 
-@test "readiness temporarily starts Nginx while preserving a running FPM service and companion" {
+@test "a partially running FPM site keeps its public Nginx stopped and its companion running" {
   TX_WEB=nginx
   TX_RUNNING=$'app\ndb\nhelper'
   run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
   assert_success
-  assert_file_contains "$TX_EVENTS" 'up -d --force-recreate --no-deps db app nginx helper'
-  assert_equal "$(awk '/^ready$/{record=1; next} record && /^stop /' "$TX_EVENTS")" 'stop nginx'
-  joomlaSiteJSON -e '.status=="deployed" and .running==false' < "$TX_PACKAGE/result.json"
+  assert_public_lifecycle 'rm --force --stop app db helper nginx' \
+    'gate up' 'gate ready' 'gate down' \
+    'candidate up --no-start --no-deps --pull never app db helper nginx' \
+    'candidate up -d --no-recreate --no-deps --pull never app db helper'
+  joomlaSiteJSON -e '.status=="deployed" and .committed==true and .running==false' < "$TX_PACKAGE/result.json"
   assert_transaction_cleaned
 }
 
@@ -307,18 +419,91 @@ assert_transaction_cleaned() {
   TX_FAULT=ready
   run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
   assert_failure
-  assert_file_contains "$TX_EVENTS" 'up -d --no-recreate --no-deps db nginx'
-  refute_file_contains "$TX_EVENTS" 'original ready'
-  joomlaSiteJSON -e '.stage=="activate" and .running==false and .recovery==null' < "$TX_PACKAGE/result.json"
+  assert_public_lifecycle 'rm --force --stop app db helper nginx' \
+    'gate up' 'gate ready' 'gate down' \
+    'original up --no-start --no-deps app db helper nginx' \
+    'original up -d --no-recreate --no-deps db nginx'
+  joomlaSiteJSON -e '.outcome=="not_committed" and .stage=="verify" and .running==false and .recovery==null' < "$TX_PACKAGE/result.json"
   assert_original_site
   assert_transaction_cleaned
+}
+
+@test "the commit receipt exists before the first public definition can reopen" {
+  joomlaPlaygroundOpenIngress() {
+    local work="${1%/*}"
+    if [ -f "$work/committed" ] && [ -f "$TX_PACKAGE/committed" ] && assert_registration_gated &&
+      [ ! -e "$work/verifying" ] && [ ! -e "$SANDBOX/gate-live" ]; then
+      touch "$SANDBOX/committed-before-open"
+    fi
+    return 1
+  }
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
+  assert_failure
+  assert_file_exists "$SANDBOX/committed-before-open"
+  joomlaSiteJSON -e '.outcome=="committed_with_followup" and .committed==true and .stage=="ingress"' < "$TX_PACKAGE/result.json"
+  refute_file_contains "$TX_EVENTS" 'candidate up'
+  assert_registration_gated
+  assert_candidate_storage
+}
+
+@test "partial public activation after commit keeps acknowledged writes, recovery data and the copied registration" {
+  local mirror="$VDM_REPO_PATH/joomla/enabled/$TX_SITE" report="$TX_PACKAGE/result.json" recovery
+  mkdir -p "$mirror"
+  cp "$TX_DIR/docker-compose.yml" "$mirror/docker-compose.yml"
+  getJoomlaSiteEnabledState() { printf 'enabled\n'; }
+  TX_FAULT=public-start
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" true
+  assert_failure
+  joomlaSiteJSON -e '.status=="committed_with_followup" and .outcome=="committed_with_followup" and
+    .committed==true and .stage=="ingress" and .running==null and (.reason|length)>0' < "$report"
+  recovery=$(joomlaSiteJSON -er .recovery < "$report")
+  assert_file_exists "$recovery/committed"
+  assert_equal "$(cat "$TX_DIR/.octojoom-change.lock/recovery.path")" "$recovery"
+  assert_file_exists "$(joomlaSiteJSON -er .backup < "$report")"
+  assert_file_exists "$recovery/candidate.yml"
+  assert_equal "$(cat "$recovery/running-services")" "$TX_RUNNING"
+  assert_equal "$(cat "$recovery/existing-services")" $'app\ndb\nhelper'
+  joomlaSiteJSON -e '.reason | contains("candidate.yml") and contains("service")' < "$report"
+  assert_offline_originals "$recovery"
+  assert_file_contains "$TX_EVENTS" 'candidate up -d --no-recreate --no-deps --pull never app db'
+  refute_file_contains "$TX_EVENTS" 'original up'
+  assert_equal "$(cat "$TX_PROJECT/db/accepted-order")" 'customer order'
+  assert_candidate_storage
+  assert_file_contains "$TX_DIR/docker-compose.yml" '# candidate compose'
+  cmp "$TX_DIR/docker-compose.yml" "$mirror/docker-compose.yml"
+  cmp "$TX_DIR/.env" "$mirror/.env"
+}
+
+@test "failed retirement of offline storage keeps the committed site and the original storage receipt" {
+  local report="$TX_PACKAGE/result.json" recovery
+  joomlaDatabaseStorageStopped() {
+    if [[ "$1" == */original ]]; then
+      echo 'cleanup original' >> "$TX_EVENTS"
+      return 1
+    fi
+    return 0
+  }
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
+  assert_failure
+  joomlaSiteJSON -e '.status=="committed_with_followup" and .outcome=="committed_with_followup" and
+    .committed==true and .stage=="cleanup" and .running==true and .backup==null and (.reason|length)>0' < "$report"
+  recovery=$(joomlaSiteJSON -er .recovery < "$report")
+  assert_file_exists "$recovery/committed"
+  assert_equal "$(cat "$TX_DIR/.octojoom-change.lock/recovery.path")" "$recovery"
+  joomlaSiteJSON -e '.reason | contains("original storage") and contains("cleanup")' < "$report"
+  assert_offline_originals "$recovery"
+  assert_file_contains "$TX_EVENTS" 'candidate up -d --no-recreate --no-deps --pull never app db'
+  assert_file_contains "$TX_EVENTS" 'cleanup original'
+  refute_file_contains "$TX_EVENTS" 'original up'
+  assert_candidate_storage
+  assert_file_contains "$TX_DIR/docker-compose.yml" '# candidate compose'
 }
 
 @test "a failure before the running services were inspected reports an unknown running state" {
   joomlaPlaygroundPlanReplacement() { return 1; }
   run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
   assert_failure
-  joomlaSiteJSON -e '.stage=="preflight" and has("running") and .running==null' < "$TX_PACKAGE/result.json"
+  joomlaSiteJSON -e '.stage=="preflight" and .committed==false and .outcome=="not_committed" and has("running") and .running==null' < "$TX_PACKAGE/result.json"
   assert_original_site
   assert_transaction_cleaned
 }
@@ -327,6 +512,6 @@ assert_transaction_cleaned() {
   joomlaPlaygroundWaitFresh() { return 1; }
   run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
   assert_failure
-  joomlaSiteJSON -e '.stage=="activate" and has("running") and .running==null and .recovery!=null' < "$TX_PACKAGE/result.json"
+  joomlaSiteJSON -e '.stage=="verify" and .committed==false and .outcome=="recovery_incomplete" and has("running") and .running==null and .recovery!=null' < "$TX_PACKAGE/result.json"
   [ -s "$TX_DIR/.octojoom-change.lock/recovery.path" ]
 }
