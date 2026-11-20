@@ -84,7 +84,11 @@ octojoom_globals() {
 # the sandbox
 
 octojoom_setup() {
-  SANDBOX="${BATS_TEST_TMPDIR}/sandbox"
+  # macOS exposes /private/var through /var. Use the same physical paths as
+  # deployment code so the sudo stand-in can recognize its own sandbox.
+  local test_tmpdir
+  test_tmpdir=$(cd -- "${BATS_TEST_TMPDIR}" && pwd -P) || return 1
+  SANDBOX="${test_tmpdir}/sandbox"
   STUB_DIR="${SANDBOX}/stub"
   STUB_SANDBOX="${SANDBOX}"
   STUB_KILL_PID="${BASHPID}"
