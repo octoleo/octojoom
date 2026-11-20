@@ -3042,6 +3042,10 @@ function joomlaSetupWebPrepare() {
     joomlaApacheConfiguration "$root" > "$dir/apache.conf" || return 1
     VDM_JOOMLA_VOLUMES_MOUNT+=$(getYMLine3 '- "./apache.conf:/etc/apache2/sites-enabled/000-default.conf:ro"')
   fi
+  if [ -n "${1:-}" ] && [ "$VDM_WEBSERVER" = apache ]; then
+    # Generated Apache sites use the document root as their working directory.
+    VDM_WEB_HEALTH=$(joomlaPlaygroundApacheHealthcheck .) || return 1
+  fi
   local companion
   for companion in "$dir/nginx.conf" "$dir/apache.conf"; do
     [ ! -f "$companion" ] || chmod 644 "$companion" || return 1
@@ -12775,12 +12779,60 @@ function joomlaPlaygroundSeedWebsite() {
   )
 }
 
+# Compose interpolates the test when it reads the YAML. Escape the script's
+# literal dollars for that pass, leaving a normal sh command inside Docker.
+function joomlaPlaygroundApacheHealthcheck() {
+  local probe
+  probe=$(joomlaPlaygroundHttpProbeCode) || return 1
+  joomlaSiteJSON -nc --arg probe "$probe" --arg root "$1" \
+    '["CMD","sh","-c",($probe | gsub("\\$"; "$$")),"sh",$root,"localhost","127.0.0.1"]'
+}
+
 # Wait for the installed site to reach its database and serve its root URL.
 # Both requests originate in the site container and use its actual web server.
+# Shared by deployment readiness and the published Apache healthcheck.
+# The guest shell receives the document root, site hostname and HTTP service.
+function joomlaPlaygroundHttpProbeCode() {
+  cat <<'PLAYGROUND_HTTP'
+set +x
+set -eu
+headers=$(curl --disable --silent --noproxy '*' --connect-timeout 3 --max-time 8 \
+  --header "Host: $2" --dump-header - --output /dev/null --write-out '\n%{http_code}' "http://$3/") || exit 1
+case "$(printf '%s\n' "$headers" | tail -n 1)" in
+  2[0-9][0-9]|3[0-9][0-9]) exit 0 ;;
+  503) ;;
+  *) exit 1 ;;
+esac
+
+# Joomla starts a guest session before selecting its offline template. The
+# session provider hashes the secret and configured session_name (also used
+# for shared sessions); CMS Session hashes that name again for the cookie.
+cookie=$(php -d register_argc_argv=1 -r '
+  try {
+    require $argv[1]."/configuration.php"; $config=new JConfig();
+    if (empty($config->offline) || ($config->secret ?? "") === "") exit(1);
+    $name = $config->session_name ?? "";
+    echo md5(md5($config->secret . ($name === "" ? "site" : $name)));
+  } catch (Throwable $e) { exit(1); }
+' -- "$1" 2>/dev/null) || exit 1
+[ -n "$cookie" ] || exit 1
+
+# Ignore interim response headers. Check only the cookie name and discard its value.
+printf '%s\n' "$headers" | awk -v cookie="$cookie" '
+  /^HTTP\/[0-9.]+[[:space:]]/ {issued=0}
+  tolower(substr($0,1,11))=="set-cookie:" {
+    field=substr($0,12); sub(/^[[:blank:]]*/, "", field)
+    if (index(field,cookie "=")==1 && substr(field,length(cookie)+2,1) ~ /[^;[:space:]]/) issued=1
+  }
+  END {exit !issued}'
+PLAYGROUND_HTTP
+}
+
 function joomlaPlaygroundWaitFresh() {
-  local env_file="$1" compose="$2" app="$3" site="$4" root="$5" web="$6" attempt
+  local env_file="$1" compose="$2" app="$3" site="$4" root="$5" web="$6" attempt http_probe
   compose=$(joomlaWebHostPath "$compose") || return 1
   if [ -n "$env_file" ]; then env_file=$(joomlaWebHostPath "$env_file") || return 1; fi
+  http_probe=$(joomlaPlaygroundHttpProbeCode) || return 1
   # shellcheck disable=SC2016 # Static PHP runs inside the selected Joomla container.
   for ((attempt=0; attempt<60; attempt++)); do
     if MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' migrationRunCompose "$env_file" "$compose" exec -T "$app" php -d register_argc_argv=1 -r '
@@ -12796,8 +12848,8 @@ function joomlaPlaygroundWaitFresh() {
         } else exit(1);
       } catch (Throwable $e) { exit(1); }
     ' -- "$root" </dev/null >/dev/null 2>&1 &&
-      migrationRunCompose "$env_file" "$compose" exec -T "$app" curl --fail --silent \
-        --connect-timeout 3 --max-time 8 --header "Host: $site" "http://$web/" </dev/null >/dev/null 2>&1; then
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' migrationRunCompose "$env_file" "$compose" exec -T "$app" \
+        sh -c "$http_probe" sh "$root" "$site" "$web" </dev/null >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -13314,6 +13366,25 @@ function joomlaPlaygroundReplacementProject() {
   done <<< "$ids"
 }
 
+# Migrate the former stock HTTP test using its effective Compose definition.
+# Preserve the operator's timing options and leave custom checks untouched.
+# shellcheck disable=SC2016
+function joomlaPlaygroundUpgradeApacheHealthcheck() {
+  local work="$1" app="$2" root="$3" original healthcheck test working_dir
+  original=$(joomlaSiteJSON -c --arg app "$app" '.services[$app].healthcheck |
+    select(.test == ["CMD","curl","-f","http://localhost/"] and .disable != true)' < "$work/original-model.json") || return 1
+  [ -n "$original" ] || return 0
+  working_dir=$(joomlaSiteJSON -r --arg app "$app" '.services[$app].working_dir // "/var/www/html"' < "$work/original-model.json") || return 1
+  # Managed docroot moves update working_dir. A customized site can have a
+  # different working directory, so use its resolved document root explicitly.
+  if [ "$working_dir" = "$root" ]; then root=.; fi
+  test=$(joomlaPlaygroundApacheHealthcheck "$root") || return 1
+  healthcheck=$(joomlaSiteJSON -c --argjson test "$test" '.test=$test' <<< "$original") || return 1
+  printf '    healthcheck: %s\n' "$healthcheck" > "$work/apache-health.property" || return 1
+  joomlaSetServiceProperty "$work/with-env.yml" "$work/with-health.yml" "$app" healthcheck "$work/apache-health.property" &&
+    mv "$work/with-health.yml" "$work/with-env.yml"
+}
+
 # The transaction has already read the destination database context and
 # collected the operator's choices. Prepare changes in its private directory.
 # shellcheck disable=SC2016
@@ -13359,6 +13430,9 @@ function joomlaPlaygroundPlanReplacement() {
   if cliHasValue vdm_database_rootpass; then root_override=true; fi
   joomlaPlaygroundReplacementEnvironment "$work/with-app.yml" "$VDM_DB_SERVICE" db "$VDM_SITE_ENV_KEY" "$VDM_DB_ENGINE" "$work/db-env" "$root_override" &&
     joomlaSetServiceProperty "$work/with-app.yml" "$work/with-env.yml" "$VDM_DB_SERVICE" environment "$work/db-env" || return 1
+  if [ "$VDM_WEBSERVER" = apache ]; then
+    joomlaPlaygroundUpgradeApacheHealthcheck "$work" "$VDM_SITE_SERVICE" "$VDM_SITE_DOCROOT" || return 1
+  fi
   if [ "$VDM_SITE_ENV" = "$VDM_SITE_DIR/.env" ]; then
     [ -f "$VDM_SITE_ENV" ] && [ ! -L "$VDM_SITE_ENV" ] && cp "$VDM_SITE_ENV" "$work/candidate.env" &&
       chmod 600 "$work/candidate.env" || return 1
