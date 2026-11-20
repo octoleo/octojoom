@@ -156,3 +156,30 @@ COMPOSE
   assert_success
   assert_equal "$output" ':'
 }
+
+@test "private MySQL startup provisions literal credentials without changing the final Compose model" {
+  cat > "$work/candidate.json" <<'JSON'
+{"services":{"mysql":{"environment":{"MYSQL_DATABASE":"shop_data","MYSQL_USER":"shop","MYSQL_PASSWORD":"a'\\$$b","MYSQL_ROOT_PASSWORD":"root'credential","MYSQL_ROOT_HOST":"localhost"}}}}
+JSON
+  cp "$work/candidate.json" "$work/final.before"
+  run joomlaPlaygroundDatabaseBootstrap "$work" mysql mysql
+  assert_success
+  [ -z "$output" ]
+  cmp "$work/final.before" "$work/candidate.json"
+  joomlaSiteJSON -e '.services.mysql | (.environment | keys)==["MYSQL_ROOT_HOST","MYSQL_ROOT_PASSWORD"] and
+    (.environment.MYSQL_ROOT_PASSWORD | test("^[a-f0-9]{64}$")) and
+    (.volumes | length==1) and .volumes[0].read_only' < "$work/bootstrap.json" >/dev/null
+  assert_file_contains "$work/bootstrap-account.sql" "IDENTIFIED BY 'a''\\\$b'"
+  assert_file_contains "$work/bootstrap-root.sql" "ALTER USER 'root'@'localhost'"
+  refute_file_contains "$work/bootstrap-root.sql" "'root'@'%'"
+}
+
+@test "native database entrypoints retain their ordinary credential path" {
+  printf '%s\n' '{"services":{"db":{"environment":{"MYSQL_DATABASE":"shop","MYSQL_USER":"shop","MYSQL_PASSWORD":"simple"}}}}' > "$work/candidate.json"
+  joomlaPlaygroundDatabaseBootstrap "$work" db mysql
+  refute_file_exists "$work/bootstrap.json"
+  joomlaSiteJSON '.services.db.environment.MYSQL_PASSWORD="a\u0027quote"' < "$work/candidate.json" > "$work/maria.json"
+  mv "$work/maria.json" "$work/candidate.json"
+  joomlaPlaygroundDatabaseBootstrap "$work" db mariadb
+  refute_file_exists "$work/bootstrap.json"
+}

@@ -12963,6 +12963,102 @@ function joomlaPlaygroundProvisionFresh() {
   )
 }
 
+# The official database entrypoints interpolate schema/user names into SQL.
+# MySQL also interpolates passwords verbatim. Provision affected values as
+# SQL data on the private, empty volume; normal containers keep the literal ENV.
+function joomlaPlaygroundDatabaseBootstrap() {
+  (
+    set +x
+    umask 077
+    local work="$1" db="$2" engine="$3" mount
+    mount=$(joomlaWebHostPath "$work/bootstrap-account.sql") || exit 1
+    cd "$work" || exit 1
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' python3 -I -B - "$db" "$engine" "$mount" <<'PYTHON'
+import json
+from pathlib import Path
+import secrets
+import sys
+
+service, engine, source = sys.argv[1:]
+model = json.loads(Path("candidate.json").read_text(encoding="utf-8"))
+database = model["services"][service]
+env = database["environment"]
+prefixes = ["MARIADB_", "MYSQL_"] if engine == "mariadb" else ["MYSQL_"]
+
+def value(field, default=""):
+    for prefix in prefixes:
+        if prefix + field in env:
+            # Compose serializes literal dollars as $$ for its next reading.
+            return env[prefix + field].replace("$$", "$")
+    return default
+
+def literal(text):
+    # The private session sets NO_BACKSLASH_ESCAPES before using these literals.
+    return "'" + text.replace("'", "''") + "'"
+
+def identifier(text):
+    return "`" + text.replace("`", "``") + "`"
+
+def write_sql(path, statements):
+    Path(path).write_text("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES';\n" +
+                          ";\n".join(statements) + ";\n", encoding="utf-8")
+
+name, user, password = value("DATABASE"), value("USER"), value("PASSWORD")
+root_password = value("ROOT_PASSWORD")
+unsafe_user = any(char in user for char in "'\\")
+unsafe_schema = any(char in name for char in ("`", "%", "\\"))
+unsafe_password = engine == "mysql" and any(char in password for char in "'\\")
+unsafe_root = (engine == "mysql" and not value("RANDOM_ROOT_PASSWORD") and
+               any(char in root_password for char in ("'", '"', "\\")))
+if not (unsafe_user or unsafe_schema or unsafe_password or unsafe_root):
+    sys.exit(0)
+if not (name and user and password):
+    sys.exit("The private database initializer requires the configured application schema and account.")
+
+host = value("USER_HOST", "%") if engine == "mariadb" else "%"
+account = literal(user) + "@" + literal(host)
+# Database names in GRANT have LIKE-pattern semantics on native default servers.
+grant_name = name.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%")
+write_sql("bootstrap-account.sql", [
+    "CREATE DATABASE IF NOT EXISTS " + identifier(name),
+    "CREATE USER " + account + " IDENTIFIED BY " + literal(password),
+    "GRANT ALL ON " + identifier(grant_name) + ".* TO " + account,
+])
+# The native initializer runs as mysql. Its parent work directory is mode 0700.
+Path("bootstrap-account.sql").chmod(0o444)
+database.setdefault("volumes", []).append({
+    "type": "bind", "source": source.replace("$", "$$"),
+    "target": "/docker-entrypoint-initdb.d/99-octojoom-account.sql", "read_only": True,
+})
+for prefix in prefixes:
+    for field in ("DATABASE", "USER", "PASSWORD"):
+        env.pop(prefix + field, None)
+if unsafe_root:
+    bootstrap = secrets.token_hex(32)
+    env["MYSQL_ROOT_PASSWORD"] = bootstrap
+    Path("bootstrap-root").write_text(bootstrap + "\n", encoding="ascii")
+    host = value("ROOT_HOST", "%")
+    hosts = ["localhost"] + ([host] if host and host != "localhost" else [])
+    rotation = ["ALTER USER 'root'@" + literal(h) + " IDENTIFIED BY " + literal(root_password)
+                for h in hosts]
+    if value("ONETIME_PASSWORD") and "%" in hosts:
+        rotation.append("ALTER USER 'root'@'%' PASSWORD EXPIRE")
+    write_sql("bootstrap-root.sql", rotation)
+Path("bootstrap.json").write_text(json.dumps(model), encoding="utf-8")
+PYTHON
+  )
+}
+
+function joomlaPlaygroundWaitDatabase() {
+  local attempt
+  for ((attempt=0; attempt<90; attempt++)); do
+    if printf 'SELECT 1;\n' | joomlaDatabaseClient query >/dev/null 2>&1; then return 0; fi
+    sleep 2
+  done
+  printf 'The new database did not accept the configured site credentials.\n' >&2
+  return 1
+}
+
 # A fresh site and a replacement both import through the isolated database
 # service. The candidate contains only private storage and receives no traffic.
 function joomlaPlaygroundImportCandidate() {
@@ -12970,7 +13066,7 @@ function joomlaPlaygroundImportCandidate() {
     set +x
     umask 077
     local prepared="$1" site="$2" work="$3" app="$4" database="$5" root="$6" web="$7" engine="$8" token="$9"
-    local candidate="$work/candidate.json" attempt tables ready=false port="${10:-3306}"
+    local candidate="$work/candidate.json" tables port="${10:-3306}"
     local VDM_DB_COMPOSE="$candidate" VDM_DB_ENV='' VDM_DB_PROJECT_DIR="$work" VDM_DB_SITE="$site"
     local VDM_DB_SERVICE="$database" VDM_DB_NAME="$vdm_database_name" VDM_DB_USER="$vdm_database_user" VDM_DB_PASSWORD="$vdm_database_pass" VDM_DB_PORT="$port"
     export -n VDM_DB_PASSWORD
@@ -12980,14 +13076,26 @@ function joomlaPlaygroundImportCandidate() {
     # An operator's global Compose project must never override the private one.
     local COMPOSE_PROJECT_NAME="octojoom-playground-$token"
     export MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL COMPOSE_PROJECT_NAME
+    joomlaPlaygroundDatabaseBootstrap "$work" "$database" "$engine" || exit 1
+    if [ -f "$work/bootstrap.json" ]; then VDM_DB_COMPOSE=$(joomlaWebHostPath "$work/bootstrap.json") || exit 1; fi
     : > "$work/starting" || exit 1
     joomlaDatabaseCompose up -d --no-deps "$database" >/dev/null || exit 1
-    joomlaDatabaseDiscoverClients || exit 1
-    for ((attempt=0; attempt<90; attempt++)); do
-      if printf 'SELECT 1;\n' | joomlaDatabaseClient query >/dev/null 2>&1; then ready=true; break; fi
-      sleep 2
-    done
-    "$ready" || { printf 'The new database did not accept the configured site credentials.\n' >&2; exit 1; }
+    joomlaDatabaseDiscoverClients && joomlaPlaygroundWaitDatabase || exit 1
+    if [ -f "$work/bootstrap.json" ]; then
+      if [ -f "$work/bootstrap-root.sql" ]; then
+        (
+          VDM_DB_USER=root VDM_DB_NAME=mysql
+          IFS= read -r VDM_DB_PASSWORD < "$work/bootstrap-root" &&
+            joomlaDatabaseClient sql --connect-expired-password < "$work/bootstrap-root.sql" >/dev/null
+        ) || exit 1
+      fi
+      # Recreate on initialized storage so the healthcheck and PHP use the
+      # real credentials, and the bootstrap SQL is no longer mounted.
+      VDM_DB_COMPOSE=$(joomlaWebHostPath "$candidate") || exit 1
+      joomlaDatabaseCompose up -d --force-recreate --no-deps "$database" >/dev/null &&
+        joomlaPlaygroundWaitDatabase || exit 1
+      rm -f -- "$work/bootstrap.json" "$work/bootstrap-account.sql" "$work/bootstrap-root" "$work/bootstrap-root.sql" || exit 1
+    fi
     tables=$(joomlaDatabaseTablesResolved) || exit 1
     [ -z "$tables" ] || { printf 'The destination database already contains tables.\n' >&2; exit 1; }
     if ! (
