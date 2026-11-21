@@ -57,6 +57,10 @@ stage_doubles() {
   joomlaSiteCompose() {
     [ "$2" != config ] || migrationRunCompose '' '' config --format json
   }
+  runComposeProgress() {
+    [[ "$*" == *'config --format json' ]] || return 1
+    migrationRunCompose '' '' config --format json
+  }
   siteValidateCompose() { [ -s "$1" ] && [ -s "$2" ]; }
 }
 
