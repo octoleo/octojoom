@@ -121,7 +121,7 @@ loopback HTTP ports.
 | Docker migration integration | `migration.sh` | Complete archive, destination realignment, source preservation, and independent destination writes |
 | Docker PHP runtime integration | `php-runtime.sh` | Published PHP-image change, effective INI values, unchanged installed-version fixture/database, and rejected-candidate preservation |
 | Docker web runtime integration | `web-runtime.sh` | Real Joomla installation, Apache/Nginx round trip, nested-root move, frontend/admin/SEF/API/assets, and preserved site data |
-| Docker Playground deployment and replacement | `playground-deploy.sh` | Fresh deployment and existing-site replacement on Linux Docker. Tests cover a running Apache/MariaDB site with bind mounts and a stopped Nginx/PHP-FPM/MySQL site with named volumes and a nested document root. |
+| Docker Playground setup and in-place import | `playground-deploy.sh` | Fresh deployment and existing-site replacement on Linux Docker. Tests cover a running Apache/MariaDB site with bind mounts and a stopped Nginx/PHP-FPM/MySQL site with named volumes and a nested document root. |
 | Docker database and backups (MariaDB, MySQL, PostgreSQL) | `database-backups.sh` | Real Joomla installation, native SQL operations, Unicode/binary data, ZIP/tar restores, bind/named-volume storage, batch operations, and database changes onto fresh storage |
 
 The clone test checks a real cold database copy and confirms Apache/PHP in the
@@ -270,7 +270,7 @@ Passing workflows only block merge when branch protection requires them.
 Require `ShellCheck`, `Tests (ubuntu-latest)`, `Tests (macos-latest)`,
 `Tests (windows-latest)`, `Docker clone integration`,
 `Docker migration integration`, `Docker PHP runtime integration`,
-`Docker web runtime integration`, `Docker Playground deployment and replacement`,
+`Docker web runtime integration`, `Docker Playground setup and in-place import`,
 and each `Docker database and backups`
 matrix job on protected branches. A portable-suite pass
 alone does not establish the real-Docker acceptance results.
