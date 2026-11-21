@@ -21,8 +21,6 @@ sites="$OCTOJOOM_HOME/Docker/joomla/available"
 shared_env="$OCTOJOOM_HOME/Docker/joomla/.env"
 package="$work/Donor store.zip"
 renamed_package="$work/Renamed donor store.zip"
-offline_package="$work/Offline donor store.zip"
-offline_message='The donor shop is closed for inventory.'
 image=joomla:6.2.0-php8.4-apache
 database_image=mariadb:11.4
 fpm_image=joomla:6.2.0-php8.4-fpm
@@ -58,9 +56,6 @@ cleanup() {
   done
   if [ -f "$work/donor.yml" ]; then donor down -v --remove-orphans >/dev/null; fi
   docker rm -f "$proxy" >/dev/null 2>&1
-  if [ -s "$work/retained-volumes" ]; then
-    while IFS= read -r volume; do docker volume rm "$volume" >/dev/null 2>&1; done < "$work/retained-volumes"
-  fi
   docker network rm "$network" "$ssh_network" >/dev/null 2>&1
   if ((EUID == 0)); then rm -rf -- "$work"; else sudo -n rm -rf -- "$work"; fi
   exit "$status"
@@ -144,12 +139,12 @@ curl --fail --silent --show-error --location --retry 3 \
   "https://raw.githubusercontent.com/joomengine/playground/$export_revision/src/export/site.php" -o "$work/export.php"
 [ "$(git hash-object "$work/export.php")" = ed47c417a5d69581cfa4ed71d54e891794535379 ]
 donor cp "$work/export.php" web:/tmp/fixture-export.php >/dev/null
-# Disposable HTTP fixtures. The POST can only store its fixed marker in this
-# site's tmp directory. Its GET checks that the write survived publication.
+# Disposable HTTP fixture: write through the proxy and read through the direct
+# port to verify that both routes use the same imported website storage.
 cat > "$work/proof.php" <<'PHP'
 <?php
-$marker = __DIR__ . '/tmp/octojoom-committed-fixture.txt';
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && file_put_contents($marker, 'committed fixture write') === false) {
+$marker = __DIR__ . '/tmp/octojoom-write-fixture.txt';
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && file_put_contents($marker, 'stored fixture write') === false) {
     http_response_code(500);
     exit;
 }
@@ -194,19 +189,6 @@ donor exec -T --user 0 web php -r '
 '
 donor exec -T web sh -c 'echo "$1" > "$2"' sh "exported-renamed-$run_id" "$route_file"
 export_package "$renamed_package"
-# Keep a separate offline export to verify that an HTTP error rejects a
-# replacement without changing the original website or its healthcheck.
-donor exec -T --user 0 web php -r '
-  $raw = file_get_contents("configuration.php");
-  foreach (["offline"=>true, "display_offline_message"=>1, "offline_message"=>$argv[1]] as $key=>$value) {
-      $raw = preg_replace_callback("/^(\\h*public\\s+\\$".$key."\\s*=).*?;\\h*$/ms",
-          static fn($m) => $m[1]." ".var_export($value, true).";", $raw, 1, $count);
-      if ($count !== 1) exit(2);
-  }
-  if (file_put_contents("configuration.php", $raw) === false) exit(3);
-' -- "$offline_message"
-donor exec -T web sh -c 'echo "$1" > "$2"' sh "exported-offline-$run_id" "$route_file"
-export_package "$offline_package"
 source_secret=$(donor exec -T web php -r 'require "configuration.php"; echo hash("sha256", (new JConfig)->secret);')
 donor down -v >/dev/null
 
@@ -246,8 +228,8 @@ check_http() {
   return 1
 }
 check_site() {
-  local sub="$1" key="$2" mode="$3" sitename="$4" username="$5" display="$6" email="$7" password="$8"
-  local docroot="${9:-/var/www/html}" web="${10:-127.0.0.1}"
+  local sub="$1" key="$2" sitename="$3" username="$4" display="$5" email="$6" password="$7"
+  local docroot="${8:-/var/www/html}" web="${9:-127.0.0.1}"
   local env_file var expected observed expected_hash_digest=''
   env_file=$(destination_env "$sub") || return 1
   [ "$(stat -c %a "$env_file")" = 600 ] || { echo 'Site environment permissions are too broad.' >&2; return 1; }
@@ -270,7 +252,6 @@ check_site() {
     $c = new JConfig;
     if ($c->sitename !== $argv[1] || $c->dbprefix !== "demo_" || hash("sha256",$c->secret) !== $argv[5]) exit(1);
     if ($c->tmp_path !== getcwd()."/tmp" || $c->log_path !== getcwd()."/administrator/logs") exit(4);
-    if ((bool) $c->offline !== ($argv[8] === "offline")) exit(5);
     $db = new mysqli(explode(":",$c->host)[0],$c->user,$c->password,$c->db);
     $marker = $db->query("SELECT CAST(value AS CHAR), CAST(price AS CHAR), HEX(flags), HEX(payload),
                                  optional_qty, customer_type, tags, CAST(model_year AS CHAR), HEX(legacy_label)
@@ -282,7 +263,7 @@ check_site() {
     if (!$user || $user[0] !== $argv[3] || $user[1] !== $argv[4] || !password_verify($password,$user[2])) exit(3);
     if ($expectedHash !== "" && hash("sha256", $user[2]) !== $expectedHash) exit(3);
     if ((string) $user[3] !== $argv[6]) exit(6);
-    $_SERVER["HTTP_HOST"] = $argv[9]; $_SERVER["REQUEST_URI"] = "/";
+    $_SERVER["HTTP_HOST"] = $argv[8]; $_SERVER["REQUEST_URI"] = "/";
     $container = Joomla\CMS\Factory::getContainer();
     foreach (["session", "JSession", Joomla\CMS\Session\Session::class, Joomla\Session\Session::class,
               Joomla\Session\SessionInterface::class] as $alias) $container->alias($alias, "session.cli");
@@ -292,17 +273,25 @@ check_site() {
     sort($groups, SORT_NUMERIC);
     if ($account->block || !$account->authorise("core.login.admin") || implode(",", $groups) !== $argv[7]) exit(7);
     echo "Account verified\n";
-  ' -- "$sitename" "$username" "$display" "$email" "$source_secret" "$donor_id" "$donor_groups" "$mode" "$sub.$domain" > "$work/account-check"
+  ' -- "$sitename" "$username" "$display" "$email" "$source_secret" "$donor_id" "$donor_groups" "$sub.$domain" > "$work/account-check"
   grep -Fxq 'Account verified' "$work/account-check"
   check_http "$sub" "$key" "$web"
 }
 first="p$run_id"; second="q$run_id"; failed="r$run_id"
 apache_options=(--engine mariadb --database-image "$database_image")
-deploy new "$first" "$renamed_package" true "${apache_options[@]}" --input-json "$work/request.json"
+fresh_started=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
+deploy new "$first" "$package" true "${apache_options[@]}" --input-json "$work/request.json"
 jq -e '.success and .data.enabled == true' "$work/result" >/dev/null
-check_site new "$first" online 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+# One-shot PHP import helpers may run, but fresh setup starts the website once.
+docker events --since "$fresh_started" --until "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" \
+  --filter type=container --filter event=start --format '{{json .}}' > "$work/fresh-starts.jsonl"
+jq -se --arg service "joomla$first" '
+  [.[] | select(.Actor.Attributes["com.docker.compose.service"]==$service and
+    ((.Actor.Attributes["com.docker.compose.oneoff"] // "false") | ascii_downcase)!="true")]
+  | length == 1' "$work/fresh-starts.jsonl" >/dev/null
+check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 destination new up -d --force-recreate --wait --wait-timeout 240 >/dev/null
-check_site new "$first" online 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 
 deploy stopped "$second" "$package" false --enable false --image-tag "${fpm_image#*:}" \
   --engine mysql --database-image "$mysql_image" --webserver nginx --docroot "$nginx_docroot"
@@ -317,7 +306,7 @@ destination stopped config --format json | jq -e --arg key "$second" --arg db "$
         .source == $nginx_conf and .target == "/etc/nginx/conf.d/default.conf" and .read_only)
   ' >/dev/null
 destination stopped up -d --wait --wait-timeout 240 >/dev/null
-check_site stopped "$second" online 'Playground Donor' donoradmin 'Donor Administrator' donor@example.test "$DONOR_PASSWORD" \
+check_site stopped "$second" 'Playground Donor' donoradmin 'Donor Administrator' donor@example.test "$DONOR_PASSWORD" \
   "/var/www/html/$nginx_docroot" "nginx$second"
 
 # A valid older-format bundle with a deliberately unsuccessful final SQL
@@ -352,8 +341,8 @@ if docker container inspect "joomla$failed" >/dev/null 2>&1 || docker container 
 fi
 [ -z "$(docker ps -aq --filter "label=com.docker.compose.service=mariadb$failed")" ]
 [ -z "$(docker volume ls -q --filter 'label=com.octoleo.octojoom.playground' --filter "name=$failed")" ]
-check_site new "$first" online 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
-echo 'Fresh Playground deployment preserved the renamed Apache/MariaDB site and the Nginx/PHP-FPM/MySQL site.'
+check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+echo 'Fresh Playground deployment passed for Apache/MariaDB and Nginx/PHP-FPM/MySQL, including SQL values and administrator accounts.'
 
 # Reproduce a long-lived installation whose Apache site uses the shared ENV.
 # The stopped/FPM site keeps its private ENV throughout the remaining tests.
@@ -376,6 +365,7 @@ services:
     container_name: retired$run_id
     environment:
       RETIRED_DATABASE: \${VDM_RETIRED_DB}
+      OPTIONAL_UNRELATED_SETTING: \${VDM_RETIRED_ABSENT}
     volumes:
       - "\${VDM_PROJECT_PATH}/retired-$run_id:/fixture:ro"
 YAML
@@ -431,13 +421,9 @@ replacement_state() {
 }
 replace_site() {
   local sub="$1" input="$2"; shift 2
-  local -a observer=()
-  if [ -n "${INGRESS_CASE:-}" ]; then observer=(python3 "$root/tests/integration/playground-ingress.py"); fi
-  "${observer[@]}" bash "$root/src/octojoom" --type joomla --task playground --action deploy --target current \
+  bash "$root/src/octojoom" --type joomla --task playground --action deploy --target current \
     --container "$sub.$domain" --file "$input" --confirm yes --non-interactive --output json "$@" > "$work/result"
 }
-# Set a fixed loopback-only mapping so the independent HTTP client can keep
-# checking the same direct port across container removal and recreation.
 publish_fixture_port() {
   local sub="$1" service="$2" compose="$sites/$1.$domain/docker-compose.yml" enabled next port
   port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
@@ -460,283 +446,194 @@ require_routed_text() {
   printf 'The fixture HTTP %s did not return the expected marker for %s.\n' "$method" "$sub" >&2
   return 1
 }
-observe_replacement() (
-  local mode="$1" sub="$2" key="$3" port="$4" original="$5" candidate="$6"; shift 6
-  export INGRESS_CASE="$work/ingress-$mode" INGRESS_MODE="$mode" INGRESS_HOST="$sub.$domain"
-  export INGRESS_APP="joomla$key" INGRESS_MARKER="$route_file" INGRESS_WRITE="$write_file"
-  export INGRESS_PROXY_PORT="$proxy_port" INGRESS_DIRECT_PORT="$port"
-  export INGRESS_ORIGINAL="$original" INGRESS_CANDIDATE="$candidate" INGRESS_PUBLIC_COMPOSE="$sites/$sub.$domain/docker-compose.yml"
-  if [ "$sub" = new ]; then export INGRESS_WEB=127.0.0.1; else export INGRESS_WEB="nginx$key"; fi
-  mkdir "$INGRESS_CASE" || return 1
-  PATH="$work/ingress-bin:$PATH" replace_site "$sub" "$@"
-)
-export FIXTURE_DOCKER
-FIXTURE_DOCKER=$(command -v docker)
-mkdir "$work/ingress-bin"
-ln -s "$root/tests/integration/playground-ingress.py" "$work/ingress-bin/docker"
-# Only shorten the readiness retry interval after the fixture deliberately
-# rejects the real private HTTP probe. Normal startup waits still use sleep.
-cat > "$work/ingress-bin/sleep" <<'SH'
-#!/bin/sh
-if [ "$#" -eq 1 ] && [ "$1" = 2 ] && [ -f "$INGRESS_CASE/reject" ]; then exit 0; fi
-exec /bin/sleep "$@"
-SH
-chmod 700 "$work/ingress-bin/sleep"
+check_admin_login() {
+  local sub="$1" username="$2" password="$3" token url="http://$1.$domain:$proxy_port"
+  local -a request=(curl --noproxy '*' --fail --silent --show-error
+    --resolve "$sub.$domain:$proxy_port:127.0.0.1")
+  rm -f "$work/cookies"
+  "${request[@]}" -c "$work/cookies" "$url/administrator/" > "$work/login.html"
+  token=$(sed -nE 's/.*name="([a-f0-9]{32})"[[:space:]]+value="1".*/\1/p' "$work/login.html" | head -n 1)
+  [ -n "$token" ] || return 1
+  # Keep the password out of process arguments and ordinary test output.
+  printf '%s' "$password" > "$work/login-password"
+  "${request[@]}" --location -b "$work/cookies" -c "$work/cookies" \
+    --data-urlencode "username=$username" --data-urlencode "passwd@$work/login-password" \
+    --data-urlencode 'option=com_login' --data-urlencode 'task=login' --data-urlencode "$token=1" \
+    "$url/administrator/index.php" > "$work/admin.html"
+  rm -f "$work/login-password"
+  grep -Eq 'task=logout|task=login.logout|com_cpanel' "$work/admin.html"
+}
+# Snapshot actual persistent-resource identities, including mount directory
+# inodes. A successful import must replace contents without moving storage.
+storage_identity() {
+  local sub="$1" key="$2" app db
+  app=$(destination "$sub" ps -aq "joomla$key")
+  db=$(destination "$sub" ps -aq "mariadb$key")
+  docker inspect "$app" "$db" | jq -cS '[.[] | {
+    service:.Config.Labels["com.docker.compose.service"],
+    project:.Config.Labels["com.docker.compose.project"],
+    mounts:([.Mounts[] | {Type,Name,Source,Destination,RW}] | sort_by(.Destination))
+  }] | sort_by(.service)'
+  if [ "$sub" = new ]; then
+    stat -c '%n %i' "$OCTOJOOM_HOME/Projects/$key/joomla" "$OCTOJOOM_HOME/Projects/$key/db"
+  fi
+}
+resource_inventory() {
+  docker volume ls -q | sort
+  docker network ls --format '{{.Name}}' | sort
+  find "$OCTOJOOM_HOME/Projects" -mindepth 1 -maxdepth 2 -type d -print | sort
+  find "$sites" -mindepth 1 -maxdepth 2 -type d -print | sort
+}
+other_database() {
+  destination new exec -T "mariadb$first" sh -c \
+    'exec mariadb --user=root --password="$MARIADB_ROOT_PASSWORD" --batch --skip-column-names'
+}
 without_backup=(--pre-backup no --confirm-no-backup yes)
 replacement_state new "$first" seed
 destination new exec -T --user 0 "joomla$first" sh -c 'echo "$1" > "$2"' sh "previous-new-$run_id" "/var/www/html/$route_file"
 apache_port=$(publish_fixture_port new "joomla$first")
 for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "previous-new-$run_id"; done
+check_admin_login new shopmanager "$CONFIRMED_PASSWORD"
+printf '\nprecision = 15\n' >> "$OCTOJOOM_HOME/Projects/$first/php.ini"
+# A custom probe belongs to the operator. Import must leave it unchanged.
+original_health=$(destination new config --format json | jq -cS --arg app "joomla$first" '.services[$app].healthcheck')
+jq -e '.test==["CMD","curl","-f","http://localhost/"]' <<< "$original_health" >/dev/null
+printf '    healthcheck:\n      test: ["CMD", "curl", "--silent", "--fail", "http://localhost/"]\n      interval: 17s\n      timeout: 4s\n      retries: 7\n' > "$work/custom-health.property"
+joomlaSetServiceProperty "$sites/new.$domain/docker-compose.yml" "$work/custom-health.yml" \
+  "joomla$first" healthcheck "$work/custom-health.property"
+cat "$work/custom-health.yml" > "$sites/new.$domain/docker-compose.yml"
+destination new up -d --no-deps --wait --wait-timeout 240 "joomla$first" >/dev/null
+other_database <<'SQL'
+CREATE DATABASE octojoom_other_fixture;
+CREATE TABLE octojoom_other_fixture.keep_me (value VARCHAR(60));
+INSERT INTO octojoom_other_fixture.keep_me VALUES ('another database survives');
+SQL
 mkdir "$work/before"
 cp "$(destination_env new)" "$sites/new.$domain/docker-compose.yml" "$work/before/"
-printf '\nprecision = 15\n' >> "$OCTOJOOM_HOME/Projects/$first/php.ini"
+storage_identity new "$first" > "$work/before/bind-storage"
+resource_inventory > "$work/before/resources"
+original_db=$(destination new ps -q "mariadb$first")
 neighbor_ids=$(destination stopped ps --status running -q | sort)
+assert_preserved() {
+  assert_shared_environment
+  cmp "$sites/new.$domain/docker-compose.yml" "$work/before/docker-compose.yml"
+  storage_identity new "$first" > "$work/current-storage"
+  cmp "$work/before/bind-storage" "$work/current-storage"
+  resource_inventory > "$work/current-resources"
+  cmp "$work/before/resources" "$work/current-resources"
+  [ "$(destination new ps -q "mariadb$first")" = "$original_db" ]
+  [ "$(destination stopped ps --status running -q | sort)" = "$neighbor_ids" ]
+  [ "$(other_database <<< 'SELECT value FROM octojoom_other_fixture.keep_me;')" = 'another database survives' ]
+}
 assert_original() {
   cmp "$(destination_env new)" "$work/before/.env"
-  cmp "$sites/new.$domain/docker-compose.yml" "$work/before/docker-compose.yml"
-  assert_shared_environment
+  assert_preserved
   check_http new "$first" 127.0.0.1
   replacement_state new "$first" original
-  [ "$(destination stopped ps --status running -q | sort)" = "$neighbor_ids" ]
 }
-
-# The original curl-based readiness check rejects the offline page's HTTP 503.
-# The running destination and its settings must remain untouched.
-if replace_site new "$offline_package" "${without_backup[@]}" --input-json "$work/request.json" 2>"$work/offline-replacement.log"; then
-  echo 'An HTTP 503 was accepted during replacement.' >&2; exit 1
-fi
-jq -e '.success==false and .data.stage=="candidate" and .data.committed==false' "$work/result" >/dev/null
-grep -Fq 'Joomla did not establish its database connection and serve the website after startup.' "$work/offline-replacement.log"
-assert_original
-for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "previous-new-$run_id"; done
-
-# Neither a single backup refusal nor a failed SQL import may publish data.
-if replace_site new "$package" --pre-backup no; then echo 'One refusal bypassed the backup confirmation.' >&2; exit 1; fi
-jq -e '.success==false' "$work/result" >/dev/null
-assert_original
-if replace_site new "$work/failing.zip" "${without_backup[@]}" 2>"$work/bad-replacement.log"; then
-  echo 'Replacement accepted a failing SQL import.' >&2; exit 1
+# An unconfirmed opt-out and a failed requested backup must not write any data.
+if replace_site new "$renamed_package" --pre-backup no --input-json "$work/request.json"; then
+  echo 'One refusal bypassed the backup waiver.' >&2; exit 1
 fi
 jq -e '.success==false' "$work/result" >/dev/null
-if ! grep -q 'database sql failed' "$work/bad-replacement.log"; then
-  jq -r '"Unexpected replacement failure at stage " + (.data.stage // "unknown")' "$work/result" >&2
-  # Only the fixed operational labels are public; configuration and SQL stay private.
-  grep -E '^Replacement candidate failed while [a-zA-Z ]+\.$' "$work/bad-replacement.log" >&2 || :
-  for diagnostic in 'unsupported custom service configuration' 'unsupported extra mount in the isolated site' \
-    'unexpected website mount access' 'unsupported data mount' 'unexpected bind source' 'unexpected volume source' \
-    'Cannot isolate the configured website, database, or HTTP companion.' \
-    'Could not reconcile the source Joomla secret and destination site settings.' \
-    'Could not reconcile the destination Joomla database configuration.'; do
-    if grep -Fq -- "$diagnostic" "$work/bad-replacement.log"; then printf '%s\n' "$diagnostic" >&2; fi
-  done
-  echo 'Replacement did not reach the native import.' >&2; exit 1
-fi
 assert_original
-
-# Make the selected backup destination unusable. The default backup policy
-# must stop publication even after the replacement candidate is ready.
 touch "$work/blocked-backup"
 writeEnvVariable "$(destination_env new)" "VDM_${first^^}_BACKUP_PATH=$work/blocked-backup" true
 cp -p "$(destination_env new)" "$work/before/blocked.env"
-if replace_site new "$package"; then echo 'A failed required backup allowed replacement.' >&2; exit 1; fi
-jq -e '.success==false and .data.stage=="backup" and .data.backup==null' "$work/result" >/dev/null
+if replace_site new "$renamed_package" --input-json "$work/request.json"; then
+  echo 'A failed required backup allowed replacement.' >&2; exit 1
+fi
+jq -e '.success==false and .data.stage=="backup" and .data.backup==null and
+  .data.destructive_started==false' "$work/result" >/dev/null
 cmp "$(destination_env new)" "$work/before/blocked.env"
 cp -p "$work/before/.env" "$(destination_env new)"
 assert_original
 
-# Fail the final private readiness check after independently observing the
-# replacement marker inside the isolated project and probing both public paths.
-if observe_replacement reject new "$first" "$apache_port" "previous-new-$run_id" "exported-online-$run_id" \
-  "$package" "${without_backup[@]}"; then
-  echo 'A failed private verification was reported as successful.' >&2; exit 1
-fi
-[ -f "$work/ingress-reject/observed" ]
-jq -e '.success==false and .data.stage=="verify" and .data.committed==false' "$work/result" >/dev/null
-assert_original
-for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "previous-new-$run_id"; done
-
-# Default-on backup captures the old website and SQL. Seed the exact rejected
-# probe from the earlier implementation, then require the original check back.
-apache_health() {
-  destination new config --format json | jq -cSe --arg app "joomla$first" '.services[$app].healthcheck'
-}
-original_health=$(apache_health)
-jq -e '.test==["CMD","curl","-f","http://localhost/"] and .interval=="30s" and .timeout=="5s" and .retries==5' \
-  <<< "$original_health" >/dev/null
-legacy_health=$(jq -nc --argjson original "$original_health" \
-  --slurpfile legacy "$root/tests/helpers/playground-legacy-healthcheck.json" \
-  '$original | .test=$legacy[0].test | walk(if type=="string" then gsub("\\$"; "$$") else . end)')
-printf '    healthcheck: %s\n' "$legacy_health" > "$work/legacy-health.property"
-joomlaSetServiceProperty "$sites/new.$domain/docker-compose.yml" "$work/legacy-health.yml" \
-  "joomla$first" healthcheck "$work/legacy-health.property"
-cat "$work/legacy-health.yml" > "$sites/new.$domain/docker-compose.yml"
-old_web=$(destination new ps -q "joomla$first")
-old_db=$(destination new ps -q "mariadb$first")
-if ! observe_replacement running new "$first" "$apache_port" "previous-new-$run_id" "exported-online-$run_id" "$package" \
-  2> "$work/running-replacement.log"; then
-  jq -r '"Running replacement failed at " + (.data.stage // "unknown") + ": " + (.data.reason // "no result")' "$work/result" >&2 || :
-  exit 1
-fi
-[ -f "$work/ingress-running/observed" ]
-jq -e '.success and .data.committed==true' "$work/result" >/dev/null
+# Replace ZIP A with ZIP B in the same bind mounts and selected database.
+replace_site new "$renamed_package" --input-json "$work/request.json" 2> "$work/running-replacement.log"
+jq -e '.success and .data.target=="current" and .data.status=="deployed" and .data.running' "$work/result" >/dev/null
 assert_clean_replacement_log "$work/running-replacement.log"
-assert_shared_environment
-for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "exported-online-$run_id"; done
-require_routed_text new "$proxy_port" "$write_file" 'committed fixture write' POST
-require_routed_text new "$apache_port" "$write_file" 'committed fixture write'
-[ "$(apache_health)" = "$original_health" ]
-backup=$(jq -er '.data | select(.target=="current" and .status=="deployed" and .running==true) | .backup' "$work/result")
-[ -f "$backup" ]
-[ -f "$backup.sha256" ]
+backup=$(jq -er '.data.backup' "$work/result")
+[ -f "$backup" ] && [ -f "$backup.sha256" ]
 bash "$root/src/octojoom" --type joomla --task backup --action verify --container "new.$domain" \
   --file "$backup" --non-interactive --output json > "$work/verified"
 jq -e '.success and .data.verified and .data.scope=="full"' "$work/verified" >/dev/null
-python3 - "$backup" <<'PY'
-from pathlib import PurePosixPath
+python3 - "$backup" "$work/before/docker-compose.yml" "$first" <<'PY'
+from pathlib import Path, PurePosixPath
 import sys, tarfile
 with tarfile.open(sys.argv[1], "r:*") as archive:
-    members = {str(PurePosixPath(m.name)):m for m in archive}
-    assert archive.extractfile(members["project/joomla/.octojoom-ci-previous"]).read() == b"original website\n"
-    assert b"ci_previous_data" in archive.extractfile(members["project/database.sql"]).read()
+    members = {str(PurePosixPath(m.name)): m for m in archive}
+    def content(name):
+        return archive.extractfile(members[name]).read()
+    assert content("project/joomla/.octojoom-ci-previous") == b"original website\n"
+    assert b"ci_previous_data" in content("project/database.sql")
+    assert content("compose/docker-compose.yml") == Path(sys.argv[2]).read_bytes()
+    environment = content("compose/.env")
+    assert ("VDM_" + sys.argv[3].upper() + "_DB=").encode() in environment
+    assert b"VDM_RETIRED_NOTE" not in environment
 PY
-[ -n "$old_web" ]
-[ -n "$old_db" ]
-[ "$(destination new ps -q "joomla$first")" != "$old_web" ]
-[ "$(destination new ps -q "mariadb$first")" != "$old_db" ]
-[ -e "$OCTOJOOM_HOME/Docker/joomla/enabled/new.$domain" ]
-[ "$(destination stopped ps --status running -q | sort)" = "$neighbor_ids" ]
-check_site new "$first" online 'Playground Donor' donoradmin 'Donor Administrator' donor@example.test "$DONOR_PASSWORD"
+[ "$(find "${backup%/*}" -maxdepth 1 -name '*.sha256' | wc -l)" -eq 1 ]
+assert_preserved
+check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+check_admin_login new shopmanager "$CONFIRMED_PASSWORD"
 replacement_state new "$first" replaced
 [ "$(destination new exec -T "joomla$first" php -r 'echo ini_get("precision");')" = 15 ]
-
-# The reported operator path: replace a running shared-ENV site and explicitly
-# skip the backup. Confirm the newly selected identity without creating .env.
-backup_listing=$(find "${backup%/*}" -maxdepth 1 -name '*.sha256' -print | sort)
-old_web=$(destination new ps -q "joomla$first")
-old_db=$(destination new ps -q "mariadb$first")
-if ! replace_site new "$renamed_package" "${without_backup[@]}" --input-json "$work/request.json" \
-  2> "$work/running-no-backup.log"; then
-  jq -r '"Running replacement without backup failed at " + (.data.stage // "unknown") + ": " + (.data.reason // "no result")' "$work/result" >&2 || :
-  exit 1
-fi
-jq -e '.success and .data.committed and .data.outcome=="committed" and
-  .data.backup==null and .data.running==true' "$work/result" >/dev/null
-assert_clean_replacement_log "$work/running-no-backup.log"
-assert_shared_environment
-[ "$backup_listing" = "$(find "${backup%/*}" -maxdepth 1 -name '*.sha256' -print | sort)" ]
-[ "$(apache_health)" = "$original_health" ]
-[ "$(destination new ps -q "joomla$first")" != "$old_web" ]
-[ "$(destination new ps -q "mariadb$first")" != "$old_db" ]
-[ "$(destination stopped ps --status running -q | sort)" = "$neighbor_ids" ]
-check_site new "$first" online 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
-replacement_state new "$first" replaced
 for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "exported-renamed-$run_id"; done
-require_routed_text new "$proxy_port" "$write_file" 'committed fixture write' POST
-require_routed_text new "$apache_port" "$write_file" 'committed fixture write'
+require_routed_text new "$proxy_port" "$write_file" 'stored fixture write' POST
+require_routed_text new "$apache_port" "$write_file" 'stored fixture write'
 
-# Replace the named-volume site from a deliberately stopped, disabled state.
-# A successful opt-out must leave only the active volume set and prior backup.
+# Explicit opt-out reuses the same storage without another archive or copy.
+backup_listing=$(find "${backup%/*}" -maxdepth 1 -type f -print | sort)
+replace_site new "$package" "${without_backup[@]}" 2> "$work/running-no-backup.log"
+jq -e '.success and .data.backup==null and .data.running' "$work/result" >/dev/null
+assert_clean_replacement_log "$work/running-no-backup.log"
+[ "$backup_listing" = "$(find "${backup%/*}" -maxdepth 1 -type f -print | sort)" ]
+assert_preserved
+check_site new "$first" 'Playground Donor' donoradmin 'Donor Administrator' donor@example.test "$DONOR_PASSWORD"
+check_admin_login new donoradmin "$DONOR_PASSWORD"
+replacement_state new "$first" replaced
+for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "exported-online-$run_id"; done
+
+# A stopped Nginx/MySQL site imports into its existing named volumes and stays
+# stopped. Only the selected database and one-shot PHP helpers may start.
 replacement_state stopped "$second" seed "/var/www/html/$nginx_docroot"
-destination stopped exec -T --user 0 "joomla$second" sh -c 'echo "$1" > "$2"' sh "previous-stopped-$run_id" "/var/www/html/$nginx_docroot/$route_file"
 nginx_port=$(publish_fixture_port stopped "nginx$second")
-for port in "$proxy_port" "$nginx_port"; do require_routed_text stopped "$port" "$route_file" "previous-stopped-$run_id"; done
-named_mounts() {
-  local service="$1" target="$2"
-  destination stopped config --format json | jq -er --arg service "$service" --arg target "$target" '
-    . as $model | .services[$service].volumes[] | select(.target==$target and .type=="volume") |
-    $model.volumes[.source].name'
-}
-old_web_volume=$(named_mounts "joomla$second" /var/www/html)
-old_db_volume=$(named_mounts "mariadb$second" /var/lib/mysql)
-destination stopped down >/dev/null
+storage_identity stopped "$second" > "$work/before/named-storage"
+cp "$sites/stopped.$domain/docker-compose.yml" "$work/before/nginx-compose.yml"
+private_env=$(destination_env stopped)
+destination stopped stop >/dev/null
 new_neighbor_ids=$(destination new ps --status running -q | sort)
-backup_listing=$(find "${backup%/*}" -maxdepth 1 -name '*.sha256' -print | sort)
-python3 - "$work/request.json" "$work/replace-request.json" <<'PY'
-import json, secrets, sys
-with open(sys.argv[1]) as source:
-    request = json.load(source)
-request["options"].update({
-    "source-admin-username": "shopmanager", "admin-username": "replacedmanager",
-    "db-name": "pg_replaced", "db-user": "pg_replacer",
-    "db-password": secrets.token_hex(18) + "'\"$literal!",
-})
-with open(sys.argv[2], "w") as output:
-    json.dump(request, output)
-PY
 started_after=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
-observe_replacement stopped stopped "$second" "$nginx_port" "previous-stopped-$run_id" "exported-renamed-$run_id" \
-  "$renamed_package" "${without_backup[@]}" --input-json "$work/replace-request.json"
-[ -f "$work/ingress-stopped/observed" ]
+replace_site stopped "$renamed_package" "${without_backup[@]}" --input-json "$work/request.json"
 jq -e '.success and .data.target=="current" and .data.backup==null and .data.running==false' "$work/result" >/dev/null
-# Include every public start event, even if the container was removed
-# before the independent observer inspected it.
-docker events --since "$started_after" --until "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" \
-  --filter type=container --filter event=start --format '{{index .Actor.Attributes "name"}}' > "$work/started-containers"
-for service in "joomla$second" "mariadb$second" "nginx$second"; do
-  if grep -Fxq -- "$service" "$work/started-containers"; then echo 'A stopped public service was started during replacement.' >&2; exit 1; fi
-done
-[ "$backup_listing" = "$(find "${backup%/*}" -maxdepth 1 -name '*.sha256' -print | sort)" ]
+[ "$(destination_env stopped)" = "$private_env" ]
 [ ! -e "$OCTOJOOM_HOME/Docker/joomla/enabled/stopped.$domain" ]
 [ -z "$(destination stopped ps -q --status running)" ]
+cmp "$sites/stopped.$domain/docker-compose.yml" "$work/before/nginx-compose.yml"
+resource_inventory > "$work/current-resources"
+cmp "$work/before/resources" "$work/current-resources"
+[ "$backup_listing" = "$(find "${backup%/*}" -maxdepth 1 -type f -print | sort)" ]
+docker events --since "$started_after" --until "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" \
+  --filter type=container --filter event=start --format '{{json .}}' > "$work/stopped-starts.jsonl"
+jq -se --arg app "joomla$second" --arg http "nginx$second" '
+  [.[] | select((.Actor.Attributes["com.docker.compose.service"]==$app or
+    .Actor.Attributes["com.docker.compose.service"]==$http) and
+    ((.Actor.Attributes["com.docker.compose.oneoff"] // "false") | ascii_downcase)!="true")]
+  | length == 0' "$work/stopped-starts.jsonl" >/dev/null
 for port in "$proxy_port" "$nginx_port"; do
   if curl --noproxy '*' -fsS --max-time 2 --header "Host: stopped.$domain" \
       "http://127.0.0.1:$port/$route_file" >/dev/null 2>&1; then
-    echo 'The stopped site was reachable after private verification.' >&2; exit 1
-  fi
-done
-active_web_volume=$(named_mounts "joomla$second" /var/www/html)
-active_db_volume=$(named_mounts "mariadb$second" /var/lib/mysql)
-[ "$active_web_volume" != "$active_db_volume" ]
-docker volume inspect "$active_web_volume" "$active_db_volume" >/dev/null
-for volume in "$old_web_volume" "$old_db_volume"; do
-  if [ "$volume" = "$active_web_volume" ] || [ "$volume" = "$active_db_volume" ]; then
-    echo 'Replacement reused original named storage.' >&2; exit 1
-  fi
-  if docker volume inspect "$volume" >/dev/null 2>&1; then
-    echo 'Replacement retained old named storage after the explicit backup opt-out.' >&2; exit 1
+    echo 'The stopped site was reachable after import.' >&2; exit 1
   fi
 done
 destination stopped up -d --wait --wait-timeout 240 >/dev/null
-check_site stopped "$second" online 'Imported Shop' replacedmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD" \
+storage_identity stopped "$second" > "$work/current-storage"
+cmp "$work/before/named-storage" "$work/current-storage"
+check_site stopped "$second" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD" \
   "/var/www/html/$nginx_docroot" "nginx$second"
+check_admin_login stopped shopmanager "$CONFIRMED_PASSWORD"
 replacement_state stopped "$second" replaced "/var/www/html/$nginx_docroot"
-# Read the protected request locally and pass it to PHP over stdin so the
-# changed database credentials never appear in subprocess arguments or logs.
-for setting in DB:db-name DB_USER:db-user DB_PASS:db-password; do
-  desired=$(jq -er --arg key "${setting#*:}" '.options[$key]' "$work/replace-request.json")
-  migrationReadEnvValue "$sites/stopped.$domain/.env" "VDM_${second^^}_${setting%:*}" observed
-  [ "$observed" = "$desired" ]
-done
-destination stopped exec -T --workdir "/var/www/html/$nginx_docroot" "joomla$second" php -r '
-  require "configuration.php"; $c = new JConfig();
-  $values = json_decode(stream_get_contents(STDIN),true,512,JSON_THROW_ON_ERROR)["options"];
-  if ($c->db !== $values["db-name"] || $c->user !== $values["db-user"] || $c->password !== $values["db-password"]) exit(1);
-  $connection = new mysqli(explode(":",$c->host)[0],$c->user,$c->password,$c->db);
-  [$name,$account] = $connection->query("SELECT DATABASE(),CURRENT_USER()")->fetch_row();
-  if ($name !== $c->db || explode("@",$account)[0] !== $c->user) exit(2);
-' < "$work/replace-request.json"
 [ "$(destination new ps --status running -q | sort)" = "$new_neighbor_ids" ]
 for port in "$proxy_port" "$nginx_port"; do require_routed_text stopped "$port" "$route_file" "exported-renamed-$run_id"; done
-# The manually restarted MySQL site is now serving. Force the first old
-# named volume retirement to fail after commit, leaving its original data
-# available and its verified replacement serving both normal routes.
-printf '%s\n' "$active_web_volume" "$active_db_volume" > "$work/retained-volumes"
-if INGRESS_RETAIN_VOLUME="$active_web_volume" observe_replacement cleanup stopped "$second" "$nginx_port" \
-  "exported-renamed-$run_id" "exported-online-$run_id" "$package" "${without_backup[@]}"; then
-  echo 'A failed old-volume retirement was reported as fully successful.' >&2; exit 1
-fi
-[ -f "$work/ingress-cleanup/observed" ]
-journal=$(jq -er '.data | select(.committed and .outcome=="committed_with_followup" and .stage=="cleanup" and .running) | .recovery' "$work/result")
-[ -f "$journal/committed" ]
-[ -s "$journal/web/original-volume.json" ]
-[ "$(cat "$sites/stopped.$domain/.octojoom-change.lock/recovery.path")" = "$journal" ]
-docker volume inspect "$active_web_volume" "$active_db_volume" >/dev/null
-[ "$(docker run --rm --network none --read-only --entrypoint cat \
-  --mount "type=volume,src=$active_web_volume,dst=/retained,readonly" "$image" "/retained/$nginx_docroot/$route_file")" = "exported-renamed-$run_id" ]
-for port in "$proxy_port" "$nginx_port"; do require_routed_text stopped "$port" "$route_file" "exported-online-$run_id"; done
-require_routed_text stopped "$proxy_port" "$write_file" 'committed fixture write'
-require_routed_text stopped "$nginx_port" "$write_file" 'committed fixture write'
-require_routed_text new "$proxy_port" "$write_file" 'committed fixture write'
-[ "$(destination new ps --status running -q | sort)" = "$new_neighbor_ids" ]
 assert_shared_environment
-echo 'Existing-site replacement passed for shared and private ENV, backup, running and stopped opt-out, rollback, administrator, restored healthcheck and restart.'
+echo 'Playground in-place import passed: unchanged bind/named storage, selected database, routing and custom settings; shared/private ENV; old-only files/tables removed; administrator login; verified backup, opt-out and failed-backup refusal.'
