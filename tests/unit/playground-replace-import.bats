@@ -83,6 +83,10 @@ setup() {
     printf 'imported web' > "$TX_PROJECT/joomla/content"
     printf 'database-import\n' > "$work/import-stage"
     printf 'imported database' > "$TX_PROJECT/db/content"
+    if [ "$TX_FAULT" = helper-cleanup ]; then
+      : > "$work/import-cleanup-failed"
+      return 1
+    fi
     [ "$TX_FAULT" != import ]
   }
   joomlaPlaygroundWaitDatabase() { printf 'database-ready\n' >> "$TX_EVENTS"; [ "$TX_FAULT" != database ]; }
@@ -217,6 +221,27 @@ assert_imported_data() {
   joomlaSiteJSON -e '.status=="failed" and .destructive_started and .stage=="database-import" and
     .running==false and .backup==null and (.reason|length)>0' < "$TX_PACKAGE/result.json"
   assert_import_cleaned
+}
+
+@test "unconfirmed import helper cleanup retains the site lock and blocks another writer" {
+  TX_FAULT=helper-cleanup
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
+  assert_failure
+  assert_imported_data
+  refute_file_contains "$SANDBOX/running" app
+  joomlaSiteJSON -e --arg lock "$TX_DIR/.octojoom-change.lock" '
+    .status=="failed" and .destructive_started and .running==null and .backup==null and
+    (.reason|contains("com.octoleo.octojoom.playground=")) and (.reason|contains($lock))' < "$TX_PACKAGE/result.json"
+  [ -d "$TX_DIR/.octojoom-change.lock" ]
+  [ ! -e "${TX_ENV}.octojoom-change.lock" ]
+  assert_equal "$(find "$SANDBOX" -maxdepth 1 -name 'octojoom-import.*' -print)" ''
+  : > "$TX_EVENTS"
+  TX_FAULT=''
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
+  assert_failure
+  assert_output_contains 'Another operation is changing this website.'
+  [ ! -s "$TX_EVENTS" ]
+  assert_imported_data
 }
 
 @test "a failed write reports the verified backup and does not invent automatic restoration" {

@@ -93,8 +93,8 @@ ENV
   assert_equal "$(find "${original%/*}" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
 }
 
-@test "an interrupted environment copy leaves the installed file intact" {
-  cp -p "$original" "$SANDBOX/expected.env"
+@test "an interrupted environment or PHP copy leaves the installed file intact" {
+  local destination
   printf 'VDM_SHOP_JOOMLA_SITE_NAME="Imported shop"\n' > "$candidate"
   runPrivileged() {
     if [ "$1" = cp ] && [ "${*: -2:1}" = "$candidate" ]; then
@@ -103,10 +103,43 @@ ENV
     fi
     "$@"
   }
-  run joomlaPlaygroundInstallEnvironment "$candidate" "$original" "$SANDBOX/expected.env" "$original"
+  for destination in "$original" "$SANDBOX/php.ini"; do
+    [ -f "$destination" ] || printf 'precision = 15\n' > "$destination"
+    cp -p "$destination" "$SANDBOX/expected.file"
+    run joomlaPlaygroundInstallEnvironment "$candidate" "$destination" "$SANDBOX/expected.file" "$destination"
+    assert_failure
+    cmp "$destination" "$SANDBOX/expected.file"
+    assert_equal "$(find "${destination%/*}" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
+  done
+}
+
+@test "atomic PHP creation requires the destination to be absent and preserves an existing file" {
+  local destination="$SANDBOX/new-php.ini"
+  printf 'precision = 15\n' > "$candidate"
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$destination" - "$candidate"
+  assert_success
+  cmp "$candidate" "$destination"
+  printf '; operator edit\n' >> "$destination"
+  cp "$destination" "$SANDBOX/expected.ini"
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$destination" - "$candidate"
   assert_failure
-  cmp "$original" "$SANDBOX/expected.env"
-  assert_equal "$(find "${original%/*}" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
+  cmp "$destination" "$SANDBOX/expected.ini"
+  assert_equal "$(find "$SANDBOX" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
+}
+
+@test "atomic PHP creation preserves a destination created while its temporary copy is prepared" {
+  local destination="$SANDBOX/new-php.ini"
+  printf 'precision = 15\n' > "$candidate"
+  runPrivileged() {
+    if [ "$1" = cp ] && [ "${*: -2:1}" = "$candidate" ]; then
+      printf '; concurrent operator file\n' > "$destination"
+    fi
+    "$@"
+  }
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$destination" - "$candidate"
+  assert_failure
+  assert_equal "$(cat "$destination")" '; concurrent operator file'
+  assert_equal "$(find "$SANDBOX" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
 }
 
 @test "an operator environment edit during publication is preserved" {
