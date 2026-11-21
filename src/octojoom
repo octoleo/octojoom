@@ -1448,7 +1448,7 @@ function joomlaPlaygroundReviewFresh() {
   source=$(joomlaSiteJSON -er '.siteName + " (Joomla " + .joomlaVersion + ")"' < "$1/metadata.json") || return 1
   printf -v preview 'Import %s into a new website?\n\nWebsite: %s\nSite name: %s\nImage: %s:%s\nDatabase: %s (%s)\nEnable after import: %s\n\nThe new site uses these hosting settings and the imported tables and files.' \
     "$source" "$fresh_site" "$VDM_J_SITE_NAME" "$VDM_J_REPO" "$VDM_JV" "$vdm_database_name" "$VDM_DB_ENGINE" "$VDM_ENABLE"
-  if getInputYesNo "$preview" 'Deploy Playground website?' 0 0 defaultno; then return 0
+  if getInputYesNo "$preview" 'Deploy Playground website?' 20 112 defaultno; then return 0
   else status=$?; [ "$status" -eq 1 ] || return "$status"; fi
   # A declined deployment is a normal return to the package menu.
   return 130
@@ -12422,10 +12422,10 @@ function joomlaPlaygroundConfirmFreshSettings() {
       selected="${!variable}" override=true
     elif [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ]; then
       if [ "$field" = password ]; then
-        selected=$(getPassword 'Enter a new administrator password, or leave blank to keep the imported password.' '' 'Administrator password' 0) || return $?
+        selected=$(getPassword 'Enter a new administrator password, or leave blank to keep the imported password.' '' 'Administrator password') || return $?
         if [ -z "$selected" ]; then selected="$source"; else override=true; fi
       else
-        selected=$(getInput "${labels[index]}" "$source" 'Confirm imported Joomla settings' 0) || return $?
+        selected=$(getInput "${labels[index]}" "$source" 'Confirm imported Joomla settings') || return $?
       fi
     fi
     if [[ -z "$selected" || "$selected" == *[[:cntrl:]]* ]]; then
@@ -13599,10 +13599,10 @@ function joomlaPlaygroundConfirmReplaceSettings() {
       selected="${!variable}"
     elif [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ]; then
       if [ "$variable" = vdm_database_pass ]; then
-        selected=$(getPassword 'Enter a new database password, or leave blank to keep the destination password.' '' 'Replacement database' 0) || return $?
+        selected=$(getPassword 'Enter a new database password, or leave blank to keep the destination password.' '' 'Replacement database') || return $?
         [ -n "$selected" ] || selected="${existing_values[index]}"
       else
-        selected=$(getInput "${labels[index]}" "$selected" 'Replacement database' 0) || return $?
+        selected=$(getInput "${labels[index]}" "$selected" 'Replacement database') || return $?
       fi
     fi
     if [[ -z "$selected" || "$selected" == *[[:cntrl:]]* ]]; then
@@ -14368,22 +14368,21 @@ function joomla__TRuST__playground() {
 
 # These two-button prompts always require the operator's own response, even
 # when the surrounding menu was launched with automatic confirmation.
-# Zero dimensions let whiptail wrap the full question to the current terminal.
 function joomlaPlaygroundReplacementBackup() {
   local site="$1" VDM_FORCE=false status
-  getInputYesNo "Replace all Joomla files and database tables on ${site} with this Playground package?" 'Replace an existing Joomla site' 0 0 defaultno || {
+  getInputYesNo "Replace all Joomla files and database tables on ${site} with this Playground package?" 'Replace an existing Joomla site' 10 112 defaultno || {
     status=$?
     case "$status" in 1|255) return 130;; *) return "$status";; esac
   }
   while true; do
-    if getInputYesNo "Create and verify a full backup of ${site} before replacing it?" 'Back up the existing site?' 0 0; then
+    if getInputYesNo "Create and verify a full backup of ${site} before replacing it?" 'Back up the existing site?' 10 112; then
       printf 'true\n'
       return 0
     else
       status=$?
       [ "$status" -eq 1 ] || return "$status"
     fi
-    if getInputYesNo "All existing website files and database contents on ${site} will be lost after replacement. Continue without a backup?" 'Continue without a backup?' 0 0 defaultno; then
+    if getInputYesNo "All existing website files and database contents on ${site} will be lost after replacement. Continue without a backup?" 'Continue without a backup?' 11 112 defaultno; then
       printf 'false\n'
       return 0
     else
@@ -14404,7 +14403,7 @@ Example:
 The path must exist on the computer where Octojoom is running.'
   while true; do
     path=$(whiptail --title 'Deploy Joomengine Playground packages' --backtitle "$BACK_TITLE" \
-      --inputbox "$prompt" 0 0 "$path" 3>&1 1>&2 2>&3) || return 0
+      --inputbox "$prompt" 16 112 "$path" 3>&1 1>&2 2>&3) || return 0
     if preview=$(joomlaPlaygroundInspectPackage "$path" menu 2>&1); then
       digest=${preview%%$'\n'*}
       digest=${digest%$'\r'}
@@ -14416,12 +14415,12 @@ The path must exist on the computer where Octojoom is running.'
       done < <(listJoomlaSites)
       if [ "${#sites[@]}" -gt 0 ]; then actions+=(current 'Replace an existing Joomla site'); fi
       choice=$(whiptail --title 'Playground package verified' --backtitle "$BACK_TITLE" \
-        --menu "$summary" 0 0 "$((${#actions[@]} / 2))" "${actions[@]}" 3>&1 1>&2 2>&3) || return 0
+        --menu "$summary" 22 112 "$((${#actions[@]} / 2))" "${actions[@]}" 3>&1 1>&2 2>&3) || return 0
       case "$choice" in
         new) deploy=(joomlaPlaygroundDeployFresh "$path" "$digest");;
         current)
           site=$(whiptail --title 'Replace an existing Joomla site' --backtitle "$BACK_TITLE" \
-            --menu 'Select the website to replace.' 0 0 10 back 'Return to the Joomla menu' "${sites[@]}" 3>&1 1>&2 2>&3) || return 0
+            --menu 'Select the website to replace.' 20 112 10 back 'Return to the Joomla menu' "${sites[@]}" 3>&1 1>&2 2>&3) || return 0
           [ "$site" != back ] || return 0
           (resolveJoomlaSite "$site") || return 1
           backup=$(joomlaPlaygroundReplacementBackup "$site") || {
@@ -14432,18 +14431,18 @@ The path must exist on the computer where Octojoom is running.'
         *) return 0;;
       esac
       if summary=$("${deploy[@]}"); then
-        showNotice "$summary" 0 0
+        showNotice "$summary"
       else
         status=$?
         [ "$status" -ne 130 ] && [ "$status" -ne 255 ] || return 0
-        showError 'Playground deployment did not complete. Check the diagnostic above.' 0 0
+        showError 'Playground deployment did not complete. Check the diagnostic above.'
         return "$status"
       fi
       return 0
     else
       status=$?
       [ "$status" -lt 128 ] || return "$status"
-      showError "$preview" 0 0
+      showError "$preview"
     fi
   done
 }
@@ -15088,7 +15087,7 @@ function showError() {
     return 0
   fi
   whiptail --title "ERROR | ${PROGRAM_NAME} v${_V}" --backtitle "${BACK_TITLE}" \
-    --msgbox "${1}" "${2:-12}" "${3:-112}"
+    --msgbox "${1}" "${2:-12}" 112
 }
 
 # show info
@@ -15110,7 +15109,7 @@ function showNotice() {
     return 0
   fi
   whiptail --title "NOTICE | ${PROGRAM_NAME} v${_V}" --backtitle "${BACK_TITLE}" \
-    --msgbox "${1}" "${2:-12}" "${3:-112}"
+    --msgbox "${1}" "${2:-12}" 112
 }
 
 # show link
@@ -15426,7 +15425,7 @@ function getInput() {
   # set local var
   local answer
   # get the answer
-  answer=$(whiptail --inputbox "$1" 10 "${4:-112}" "${2:-}" --title "${3:-Get Input}" \
+  answer=$(whiptail --inputbox "$1" 10 112 "${2:-}" --title "${3:-Get Input}" \
     --backtitle "${BACK_TITLE}" --nocancel 3>&1 1>&2 2>&3) || return $?
   # return the answer
   printf '%s\n' "${answer}"
@@ -15649,7 +15648,7 @@ function getPassword() {
   # set local var
   local PASSWORD
   # get the pass
-  PASSWORD=$(whiptail --passwordbox "$1" 10 "${4:-112}" "${2:-}" --title "${3:-Get Password}" \
+  PASSWORD=$(whiptail --passwordbox "$1" 10 112 "${2:-}" --title "${3:-Get Password}" \
     --backtitle "${BACK_TITLE}" --nocancel 3>&1 1>&2 2>&3) || return $?
   # return the password
   printf '%s\n' "${PASSWORD}"
