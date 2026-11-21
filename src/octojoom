@@ -13765,7 +13765,7 @@ function joomlaPlaygroundAllocateReplacement() {
     joomlaPersistenceCheckShared "$site" "$kind" "$original" "$target" || return 1
     if [ "$kind" = volume ]; then
       # A foreign container may mount the backing volume directory as a bind.
-      joomlaPersistenceCheckShared "$site" bind "$path" '' || return 1
+      joomlaPersistenceCheckShared "$site" bind "$path" "$target" || return 1
     fi
     mkdir "$work/$role" || return 1
     case "$kind" in
@@ -13859,31 +13859,11 @@ function joomlaPlaygroundStopReplacementCandidate() {
   done <<< "$ids"
 }
 
-# A raw bind of the backing directory is invisible to Docker's volume removal
-# protection. Inspect configured and live mounts again at publication and at
-# retirement, even if this volume was exclusive when staging began.
-# shellcheck disable=SC2016
-function joomlaPlaygroundCheckOriginalVolume() {
-  local site="$1" volume="$2" role_dir="$3" allowed_target="$4" path
-  path=$(
-    set -o pipefail
-    cd -- "$role_dir" || exit 1
-    docker volume inspect "$volume" | joomlaSiteJSON -er --arg name "$volume" --slurpfile receipt original-volume.json '
-      def identity: {Name, CreatedAt, Driver, Scope, Options, Labels, Mountpoint};
-      .[0] | select(.Name==$name and identity==($receipt[0][0] | identity)) |
-      .Mountpoint | select(type=="string" and startswith("/") and (test("[[:cntrl:]]") | not))'
-  ) || { printf 'The original Docker volume changed or could not be inspected.\n' >&2; return 1; }
-  # At cutover the selected site's own named mount is expected. At retirement
-  # no service may still reference it. Raw binds are foreign in both cases.
-  joomlaPersistenceCheckShared "$site" volume "$volume" "$allowed_target" &&
-    joomlaPersistenceCheckShared "$site" bind "$path" ''
-}
-
 # After rollback discard only privately reserved candidates. After commit with
 # no backup discard only the now-offline original recorded at reservation time.
 # shellcheck disable=SC2016
 function joomlaPlaygroundDiscardReplacementStorage() {
-  local work="$1" token="$2" discard="$3" site="$4" role directory tree host image volume owner
+  local work="$1" token="$2" discard="$3" role directory tree host image volume owner before after
   for role in web db; do
     if [ -f "$work/$role/bind-directory" ]; then
       IFS= read -r directory < "$work/$role/bind-directory" || return 1
@@ -13911,7 +13891,9 @@ function joomlaPlaygroundDiscardReplacementStorage() {
         [ "${owner%$'\r'}" = "$token" ] || continue
       else
         volume=$(joomlaSiteJSON -er .original < "$work/$role/mount.json") || return 1
-        joomlaPlaygroundCheckOriginalVolume "$site" "$volume" "$work/$role" '' || return 1
+        before=$(joomlaSiteJSON -ec '.[0]|{Name,CreatedAt,Driver,Options,Labels}' < "$work/$role/original-volume.json") || return 1
+        after=$(set -o pipefail; docker volume inspect "$volume" | joomlaSiteJSON -ec '.[0]|{Name,CreatedAt,Driver,Options,Labels}') || return 1
+        [ "$before" = "$after" ] || return 1
       fi
       docker volume rm "$volume" >/dev/null || return 1
     fi
@@ -13987,7 +13969,7 @@ function joomlaPlaygroundReplaceSite() {
         fi
         if "$recovered" && [ -n "$token" ]; then
           joomlaPlaygroundStopReplacementCandidate "$work" "$token" &&
-            joomlaPlaygroundDiscardReplacementStorage "$work" "$token" candidate "$site" || recovered=false
+            joomlaPlaygroundDiscardReplacementStorage "$work" "$token" candidate || recovered=false
         fi
         if "$recovered"; then
           if "$paused"; then reason="Previous storage, configuration and running services were restored."
@@ -14075,12 +14057,10 @@ function joomlaPlaygroundReplaceSite() {
       if [ "$role" = web ]; then target=/var/www/html; else target=/var/lib/mysql; fi
       local kind
       kind=$(joomlaSiteJSON -er .type < "$work/$role/mount.json") || exit 1
+      joomlaPersistenceCheckShared "$site" "$kind" "$original" "$target" || exit 1
       if [ "$kind" = bind ]; then
-        joomlaPersistenceCheckShared "$site" bind "$original" "$target" &&
-          joomlaDatabaseStorageStopped "$original" "$candidate" &&
+        joomlaDatabaseStorageStopped "$original" "$candidate" &&
           joomlaBackupPublishWebsite "$work/$role" "$original" "$candidate" || exit 1
-      else
-        joomlaPlaygroundCheckOriginalVolume "$site" "$original" "$work/$role" "$target" || exit 1
       fi
     done
     joomlaBackupPublishFile "$work/candidate.yml" "$compose" "$work" &&
@@ -14122,7 +14102,7 @@ function joomlaPlaygroundReplaceSite() {
         -delete || { reason="The verified backup and old storage are available. Private staging files need cleanup."; exit 1; }
     else
       reason="The replacement is active. Cleanup of the offline original storage needs attention."
-      joomlaPlaygroundDiscardReplacementStorage "$work" "$token" original "$site" || exit 1
+      joomlaPlaygroundDiscardReplacementStorage "$work" "$token" original || exit 1
       recovery='' reason=''
     fi
     exit 0
