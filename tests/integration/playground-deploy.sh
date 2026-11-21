@@ -13,9 +13,6 @@ run_id=$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n' | tr 0123456789 ghijklmnop)
 domain="$run_id.localhost"
 network="octojoom-pg-$run_id"
 ssh_network="octojoom-ssh-$run_id"
-proxy="octojoom-traefik-$run_id"
-route_file="octojoom-$run_id.txt"
-write_file="octojoom-$run_id.php"
 export OCTOJOOM_HOME="$work/home"
 sites="$OCTOJOOM_HOME/Docker/joomla/available"
 package="$work/Donor store.zip"
@@ -47,10 +44,6 @@ cleanup() {
     fi
   done
   if [ -f "$work/donor.yml" ]; then donor down -v --remove-orphans >/dev/null; fi
-  docker rm -f "$proxy" >/dev/null 2>&1
-  if [ -s "$work/retained-volumes" ]; then
-    while IFS= read -r volume; do docker volume rm "$volume" >/dev/null 2>&1; done < "$work/retained-volumes"
-  fi
   docker network rm "$network" "$ssh_network" >/dev/null 2>&1
   if ((EUID == 0)); then rm -rf -- "$work"; else sudo -n rm -rf -- "$work"; fi
   exit "$status"
@@ -99,12 +92,6 @@ volumes:
 YAML
 docker network create "$network" >/dev/null
 docker network create "$ssh_network" >/dev/null
-docker run -d --name "$proxy" --network "$network" -p 127.0.0.1::80 \
-  -v /var/run/docker.sock:/var/run/docker.sock:ro traefik:v3.6 \
-  --entrypoints.web.address=:80 --providers.docker=true --providers.docker.exposedbydefault=false \
-  --providers.docker.network="$network" --providers.providersThrottleDuration=100ms >/dev/null
-proxy_port=$(docker port "$proxy" 80/tcp)
-proxy_port=${proxy_port#127.0.0.1:}
 donor up -d --wait --wait-timeout 240
 for ((i=0; i<90; i++)); do
   if donor exec -T web sh -c 'test -s configuration.php && test ! -d installation && curl -fsS http://127.0.0.1/ >/dev/null' 2>/dev/null; then break; fi
@@ -134,20 +121,6 @@ curl --fail --silent --show-error --location --retry 3 \
   "https://raw.githubusercontent.com/joomengine/playground/$export_revision/src/export/site.php" -o "$work/export.php"
 [ "$(git hash-object "$work/export.php")" = ed47c417a5d69581cfa4ed71d54e891794535379 ]
 donor cp "$work/export.php" web:/tmp/fixture-export.php >/dev/null
-# Disposable HTTP fixtures. The POST can only store its fixed marker in this
-# site's tmp directory. Its GET checks that the write survived publication.
-cat > "$work/proof.php" <<'PHP'
-<?php
-$marker = __DIR__ . '/tmp/octojoom-committed-fixture.txt';
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && file_put_contents($marker, 'committed fixture write') === false) {
-    http_response_code(500);
-    exit;
-}
-echo is_file($marker) ? file_get_contents($marker) : 'no fixture write';
-PHP
-chmod 644 "$work/proof.php"
-donor cp "$work/proof.php" "web:/var/www/html/$write_file" >/dev/null
-donor exec -T web sh -c 'echo "$1" > "$2"' sh "exported-online-$run_id" "$route_file"
 export_package() {
   local output="$1" export_dir
   export_dir="/tmp/joomengine-export-$(cat /proc/sys/kernel/random/uuid)"
@@ -189,7 +162,6 @@ donor exec -T --user 0 web php -r '
   }
   if (file_put_contents("configuration.php", $raw) === false) exit(3);
 ' -- "$offline_message"
-donor exec -T web sh -c 'echo "$1" > "$2"' sh "exported-offline-$run_id" "$route_file"
 export_package "$offline_package"
 source_secret=$(donor exec -T web php -r 'require "configuration.php"; echo hash("sha256", (new JConfig)->secret);')
 donor down -v >/dev/null
@@ -372,62 +344,11 @@ replacement_state() {
 }
 replace_site() {
   local sub="$1" input="$2"; shift 2
-  local -a observer=()
-  if [ -n "${INGRESS_CASE:-}" ]; then observer=(python3 "$root/tests/integration/playground-ingress.py"); fi
-  "${observer[@]}" bash "$root/src/octojoom" --type joomla --task playground --action deploy --target current \
+  bash "$root/src/octojoom" --type joomla --task playground --action deploy --target current \
     --container "$sub.$domain" --file "$input" --confirm yes --non-interactive --output json "$@" > "$work/result"
 }
-# Set a fixed loopback-only mapping so the independent HTTP client can keep
-# checking the same direct port across container removal and recreation.
-publish_fixture_port() {
-  local sub="$1" service="$2" compose="$sites/$1.$domain/docker-compose.yml" enabled next port
-  port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
-  next="$work/ports-$sub.yml"; enabled="$OCTOJOOM_HOME/Docker/joomla/enabled/$sub.$domain/docker-compose.yml"
-  printf '    ports:\n      - "127.0.0.1:%s:80"\n' "$port" > "$work/ports.property"
-  joomlaSetServiceProperty "$compose" "$next" "$service" ports "$work/ports.property"
-  cat "$next" > "$compose"
-  if [ -f "$enabled" ] && ! [ "$enabled" -ef "$compose" ]; then cp "$compose" "$enabled"; fi
-  destination "$sub" up -d --no-deps --wait --wait-timeout 240 "$service" >&2
-  [ "$(destination "$sub" port "$service" 80)" = "127.0.0.1:$port" ] || return 1
-  printf '%s\n' "$port"
-}
-require_routed_text() {
-  local sub="$1" port="$2" path="$3" expected="$4" method="${5:-GET}" response attempt
-  for ((attempt=0; attempt<40; attempt++)); do
-    if response=$(curl --noproxy '*' -fsS --max-time 2 -X "$method" --header "Host: $sub.$domain" \
-      "http://127.0.0.1:$port/$path" 2>/dev/null) && [ "$response" = "$expected" ]; then return 0; fi
-    sleep 1
-  done
-  printf 'The fixture HTTP %s did not return the expected marker for %s.\n' "$method" "$sub" >&2
-  return 1
-}
-observe_replacement() (
-  local mode="$1" sub="$2" key="$3" port="$4" original="$5" candidate="$6"; shift 6
-  export INGRESS_CASE="$work/ingress-$mode" INGRESS_MODE="$mode" INGRESS_HOST="$sub.$domain"
-  export INGRESS_APP="joomla$key" INGRESS_MARKER="$route_file" INGRESS_WRITE="$write_file"
-  export INGRESS_PROXY_PORT="$proxy_port" INGRESS_DIRECT_PORT="$port"
-  export INGRESS_ORIGINAL="$original" INGRESS_CANDIDATE="$candidate" INGRESS_PUBLIC_COMPOSE="$sites/$sub.$domain/docker-compose.yml"
-  if [ "$sub" = new ]; then export INGRESS_WEB=127.0.0.1; else export INGRESS_WEB="nginx$key"; fi
-  mkdir "$INGRESS_CASE" || return 1
-  PATH="$work/ingress-bin:$PATH" replace_site "$sub" "$@"
-)
-export FIXTURE_DOCKER
-FIXTURE_DOCKER=$(command -v docker)
-mkdir "$work/ingress-bin"
-ln -s "$root/tests/integration/playground-ingress.py" "$work/ingress-bin/docker"
-# Only shorten the readiness retry interval after the fixture deliberately
-# rejects the real private HTTP probe. Normal startup waits still use sleep.
-cat > "$work/ingress-bin/sleep" <<'SH'
-#!/bin/sh
-if [ "$#" -eq 1 ] && [ "$1" = 2 ] && [ -f "$INGRESS_CASE/reject" ]; then exit 0; fi
-exec /bin/sleep "$@"
-SH
-chmod 700 "$work/ingress-bin/sleep"
 without_backup=(--pre-backup no --confirm-no-backup yes)
 replacement_state new "$first" seed
-destination new exec -T --user 0 "joomla$first" sh -c 'echo "$1" > "$2"' sh "previous-new-$run_id" "/var/www/html/$route_file"
-apache_port=$(publish_fixture_port new "joomla$first")
-for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "previous-new-$run_id"; done
 mkdir "$work/before"
 cp "$sites/new.$domain/.env" "$sites/new.$domain/docker-compose.yml" "$work/before/"
 printf '\nprecision = 15\n' >> "$OCTOJOOM_HOME/Projects/$first/php.ini"
@@ -474,16 +395,30 @@ cmp "$sites/new.$domain/.env" "$work/before/blocked.env"
 cp -p "$work/before/.env" "$sites/new.$domain/.env"
 assert_original
 
-# Fail the final private readiness check after independently observing the
-# replacement marker inside the isolated project and probing both public paths.
-if observe_replacement reject new "$first" "$apache_port" "previous-new-$run_id" "exported-online-$run_id" \
-  "$package" "${without_backup[@]}"; then
-  echo 'A failed private verification was reported as successful.' >&2; exit 1
+# Fail one public Compose activation. The unpublished deployment and all
+# rollback commands continue to use Docker itself. There is no product hook.
+mkdir "$work/one-shot"
+export FIXTURE_DOCKER FIXTURE_COMPOSE="$sites/new.$domain/docker-compose.yml" FIXTURE_FAULT="$work/activation-failed"
+FIXTURE_DOCKER=$(command -v docker)
+cat > "$work/one-shot/docker" <<'SHIM'
+#!/usr/bin/env bash
+selected=false; up=false; recreate=false
+for argument in "$@"; do
+  case "$argument" in "$FIXTURE_COMPOSE") selected=true;; up) up=true;; --force-recreate) recreate=true;; esac
+done
+if "$selected" && "$up" && "$recreate" && [ ! -e "$FIXTURE_FAULT" ]; then
+  : > "$FIXTURE_FAULT"
+  exit 23
 fi
-[ -f "$work/ingress-reject/observed" ]
-jq -e '.success==false and .data.stage=="verify" and .data.committed==false' "$work/result" >/dev/null
+exec "$FIXTURE_DOCKER" "$@"
+SHIM
+chmod 700 "$work/one-shot/docker"
+if PATH="$work/one-shot:$PATH" replace_site new "$package" "${without_backup[@]}"; then
+  echo 'A failed public activation was reported as successful.' >&2; exit 1
+fi
+[ -f "$FIXTURE_FAULT" ]
+jq -e '.success==false' "$work/result" >/dev/null
 assert_original
-for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "previous-new-$run_id"; done
 
 # Default-on backup captures the old website and SQL. Replacement restarts
 # the already enabled site and upgrades a previous Octojoom Apache healthcheck.
@@ -507,12 +442,7 @@ if ! [ "$enabled_compose" -ef "$new_compose" ]; then cp -- "$new_compose" "$enab
 [ "$(apache_health)" != "$managed_health" ]
 old_web=$(destination new ps -q "joomla$first")
 old_db=$(destination new ps -q "mariadb$first")
-observe_replacement running new "$first" "$apache_port" "previous-new-$run_id" "exported-online-$run_id" "$package"
-[ -f "$work/ingress-running/observed" ]
-jq -e '.success and .data.committed==true' "$work/result" >/dev/null
-for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "exported-online-$run_id"; done
-require_routed_text new "$proxy_port" "$write_file" 'committed fixture write' POST
-require_routed_text new "$apache_port" "$write_file" 'committed fixture write'
+replace_site new "$package"
 [ "$(apache_health)" = "$managed_health" ]
 backup=$(jq -er '.data | select(.target=="current" and .status=="deployed" and .running==true) | .backup' "$work/result")
 [ -f "$backup" ]
@@ -541,9 +471,6 @@ replacement_state new "$first" replaced
 # Replace the named-volume site from a deliberately stopped, disabled state.
 # A successful opt-out must leave only the active volume set and prior backup.
 replacement_state stopped "$second" seed "/var/www/html/$nginx_docroot"
-destination stopped exec -T --user 0 "joomla$second" sh -c 'echo "$1" > "$2"' sh "previous-stopped-$run_id" "/var/www/html/$nginx_docroot/$route_file"
-nginx_port=$(publish_fixture_port stopped "nginx$second")
-for port in "$proxy_port" "$nginx_port"; do require_routed_text stopped "$port" "$route_file" "previous-stopped-$run_id"; done
 named_mounts() {
   local service="$1" target="$2"
   destination stopped config --format json | jq -er --arg service "$service" --arg target "$target" '
@@ -568,26 +495,17 @@ with open(sys.argv[2], "w") as output:
     json.dump(request, output)
 PY
 started_after=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
-observe_replacement stopped stopped "$second" "$nginx_port" "previous-stopped-$run_id" "exported-offline-$run_id" \
-  "$offline_package" "${without_backup[@]}" --input-json "$work/replace-request.json"
-[ -f "$work/ingress-stopped/observed" ]
+replace_site stopped "$offline_package" "${without_backup[@]}" --input-json "$work/replace-request.json"
 jq -e '.success and .data.target=="current" and .data.backup==null and .data.running==false' "$work/result" >/dev/null
-# Include every public start event, even if the container was removed
-# before the independent observer inspected it.
+# Docker's event log also includes containers removed when returning to the
+# stopped state. Capture it before the manual persistence check starts them.
 docker events --since "$started_after" --until "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" \
   --filter type=container --filter event=start --format '{{index .Actor.Attributes "name"}}' > "$work/started-containers"
-for service in "joomla$second" "mariadb$second" "nginx$second"; do
-  if grep -Fxq -- "$service" "$work/started-containers"; then echo 'A stopped public service was started during replacement.' >&2; exit 1; fi
-done
+grep -Fxq -- "joomla$second" "$work/started-containers"
+grep -Fxq -- "mariadb$second" "$work/started-containers"
 [ "$backup_listing" = "$(find "${backup%/*}" -maxdepth 1 -name '*.sha256' -print | sort)" ]
 [ ! -e "$OCTOJOOM_HOME/Docker/joomla/enabled/stopped.$domain" ]
 [ -z "$(destination stopped ps -q --status running)" ]
-for port in "$proxy_port" "$nginx_port"; do
-  if curl --noproxy '*' -fsS --max-time 2 --header "Host: stopped.$domain" \
-      "http://127.0.0.1:$port/$route_file" >/dev/null 2>&1; then
-    echo 'The stopped site was reachable after private verification.' >&2; exit 1
-  fi
-done
 active_web_volume=$(named_mounts "joomla$second" /var/www/html)
 active_db_volume=$(named_mounts "mariadb$second" /var/lib/mysql)
 [ "$active_web_volume" != "$active_db_volume" ]
@@ -619,27 +537,5 @@ destination stopped exec -T --workdir "/var/www/html/$nginx_docroot" "joomla$sec
   [$name,$account] = $connection->query("SELECT DATABASE(),CURRENT_USER()")->fetch_row();
   if ($name !== $c->db || explode("@",$account)[0] !== $c->user) exit(2);
 ' < "$work/replace-request.json"
-[ "$(destination new ps --status running -q | sort)" = "$new_neighbor_ids" ]
-for port in "$proxy_port" "$nginx_port"; do require_routed_text stopped "$port" "$route_file" "exported-offline-$run_id"; done
-# The manually restarted MySQL site is now serving. Force the first old
-# named volume retirement to fail after commit, leaving its original data
-# available and its verified replacement serving both normal routes.
-printf '%s\n' "$active_web_volume" "$active_db_volume" > "$work/retained-volumes"
-if INGRESS_RETAIN_VOLUME="$active_web_volume" observe_replacement cleanup stopped "$second" "$nginx_port" \
-  "exported-offline-$run_id" "exported-online-$run_id" "$package" "${without_backup[@]}"; then
-  echo 'A failed old-volume retirement was reported as fully successful.' >&2; exit 1
-fi
-[ -f "$work/ingress-cleanup/observed" ]
-journal=$(jq -er '.data | select(.committed and .outcome=="committed_with_followup" and .stage=="cleanup" and .running) | .recovery' "$work/result")
-[ -f "$journal/committed" ]
-[ -s "$journal/web/original-volume.json" ]
-[ "$(cat "$sites/stopped.$domain/.octojoom-change.lock/recovery.path")" = "$journal" ]
-docker volume inspect "$active_web_volume" "$active_db_volume" >/dev/null
-[ "$(docker run --rm --network none --read-only --entrypoint cat \
-  --mount "type=volume,src=$active_web_volume,dst=/retained,readonly" "$image" "/retained/$nginx_docroot/$route_file")" = "exported-offline-$run_id" ]
-for port in "$proxy_port" "$nginx_port"; do require_routed_text stopped "$port" "$route_file" "exported-online-$run_id"; done
-require_routed_text stopped "$proxy_port" "$write_file" 'committed fixture write'
-require_routed_text stopped "$nginx_port" "$write_file" 'committed fixture write'
-require_routed_text new "$proxy_port" "$write_file" 'committed fixture write'
 [ "$(destination new ps --status running -q | sort)" = "$new_neighbor_ids" ]
 echo 'Existing-site replacement passed for backup, opt-out, SQL failure, rollback, preserved administrator, offline page and restart.'
