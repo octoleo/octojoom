@@ -26,10 +26,16 @@ storage_render_fixture() {
   joomlaSiteJSON -nc --arg source "$VDM_PROJECT_PATH/alpha/joomla" '{services:{web:{
     environment:{PRIVATE_VALUE:"fixture-secret"},
     volumes:[{type:"bind",source:$source,target:"/var/www/html"}]}}}' > "$SANDBOX/model.json"
+  joomlaSiteJSON '.services.web.volumes[0].source="${VDM_PROJECT_PATH}/alpha/joomla"' \
+    < "$SANDBOX/model.json" > "$SANDBOX/unexpanded.json"
   : > "$SANDBOX/diagnostic"
   echo 0 > "$SANDBOX/render-status"
   runComposeProgress() {
     shift
+    if [[ " $* " == *' config --no-interpolate --format json '* ]]; then
+      cat "$SANDBOX/unexpanded.json"
+      return 0
+    fi
     if [[ " $* " == *' config --format json '* ]]; then
       cat "$SANDBOX/diagnostic" >&2
       cat "$SANDBOX/model.json"
@@ -66,7 +72,7 @@ storage_original_snapshot() {
     run joomlaStorageComposeModel "$site" "$directory/.env" "$compose"
     assert_failure
     assert_output_contains "Cannot verify storage for $site using $directory/.env"
-    assert_output_contains 'Compose variables are unset (VDM_PROJECT_PATH).'
+    assert_output_contains 'Compose storage variables are unset (VDM_PROJECT_PATH).'
     refute_output_contains 'fixture-secret'
     refute_output_contains 'Defaulting to a blank string'
     refute_output_contains 'services'
@@ -133,12 +139,16 @@ storage_original_snapshot() {
   done
 }
 
-@test "storage accepts the empty public gate during a replacement" {
+@test "storage ignores missing variables unrelated to project or storage identity" {
   storage_render_fixture
-  printf '{"name":"alpha","services":{}}\n' > "$SANDBOX/model.json"
+  printf 'WARN The "OPTIONAL_UNRELATED_SETTING" variable is not set. Defaulting to a blank string.\n' > "$SANDBOX/diagnostic"
+  joomlaSiteJSON '.services.web.environment.OPTIONAL="${OPTIONAL_UNRELATED_SETTING}"' \
+    < "$SANDBOX/unexpanded.json" > "$SANDBOX/next.json"
+  mv "$SANDBOX/next.json" "$SANDBOX/unexpanded.json"
   run joomlaStorageComposeModel "$site" "$directory/.env" "$compose"
   assert_success
-  assert_equal "$output" '{"name":"alpha","services":{}}'
+  assert_equal "$output" "$(cat "$SANDBOX/model.json")"
+  refute_output_contains 'variable is not set'
 }
 
 @test "anonymous configured volumes do not prevent checking concrete storage ownership" {
@@ -224,7 +234,7 @@ YAML
   run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html
   assert_failure
   assert_output_contains "Cannot verify storage for $other using $neighbor/.env"
-  assert_output_contains 'Compose variables are unset (VDM_PROJECT_PATH).'
+  assert_output_contains 'Compose storage variables are unset (VDM_PROJECT_PATH).'
   refute_output_contains 'Defaulting to a blank string'
   refute_command '^docker ps '
   cmp "$neighbor/.env" "$SANDBOX/neighbor.env"

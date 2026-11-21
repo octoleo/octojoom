@@ -11367,6 +11367,7 @@ function joomlaStorageComposeModel() {
 # shellcheck disable=SC2016
 function joomlaPersistenceCheckShared() {
   local site="$1" kind="$2" storage="$3" target="$4" other model type path mount ids containers own rows container owned id env_file compose_file
+  local same_project="${5:-false}"
   [ "$kind" != bind ] || storage=$(joomlaPersistenceCanonicalPath "$storage") || return 1
   for other in "$VDM_REPO_PATH/joomla/available/"*/docker-compose.yml; do
     [ -f "$other" ] || continue
@@ -11380,7 +11381,8 @@ function joomlaPersistenceCheckShared() {
     while IFS=$'\t' read -r type path mount; do
       [ -n "$type" ] || continue
       [ "$type" != bind ] || path=$(joomlaPersistenceCanonicalPath "$path") || return 1
-      if [ "$other" = "$site" ] && [ "$type" = "$kind" ] && [ "$path" = "$storage" ] && [ "$mount" = "$target" ]; then continue; fi
+      if [ "$other" = "$site" ] && [ "$type" = "$kind" ] && [ "$path" = "$storage" ] &&
+        { [ "$mount" = "$target" ] || [ "$same_project" = true ]; }; then continue; fi
       if [ "$type" = "$kind" ] && { [ "$path" = "$storage" ] || { [ "$kind" = bind ] && [[ "$path/" = "$storage/"* || "$storage/" = "$path/"* ]]; }; }; then
         printf 'Storage is shared or overlaps another mount (%s); separate it before changing persistence.\n' "$other" >&2; return 1
       fi
@@ -11399,7 +11401,7 @@ function joomlaPersistenceCheckShared() {
     if [ "$path" = "$storage" ] || { [ "$kind" = bind ] && [[ "$path/" = "$storage/"* || "$storage/" = "$path/"* ]]; }; then
       owned=false
       while IFS= read -r id; do [[ -z "$id" || "$container" != "$id"* ]] || owned=true; done <<< "$own"
-      if ! "$owned" || [ "$mount" != "$target" ]; then
+      if ! "$owned" || { [ "$mount" != "$target" ] && [ "$same_project" != true ]; }; then
         printf 'Another container shares this storage. Separate that deployment before changing persistence.\n' >&2; return 1
       fi
     fi
@@ -12241,7 +12243,7 @@ PYTHON
 }
 
 # Read only the target's effective Compose configuration and local/registry
-# metadata. Starting an image or allocating candidate storage belongs to deploy.
+# metadata. Starting the selected runtime belongs to deployment.
 function joomlaPlaygroundRuntimeCandidate() {
   local image="$1" version="$2" php="$3" flavor="$4" repository tag catalog base reference
   repository=$(joomlaRuntimeRepository "$image") || return 1
@@ -12430,7 +12432,7 @@ function joomlaPlaygroundTargetPreflight() {
         websiteStorage:$target.web.type,databaseStorage:$target.db.type,
         websiteAvailableBytes:$web,databaseAvailableBytes:$db,
         spaceCheck:(if $web==null then "website capacity unavailable on host" else "website payload fits" end),
-        deploymentSpaceCheck:"pending database allocation and backup choice"}
+        deploymentSpaceCheck:"pending selected database import and backup choice"}
     ' <<< "$summary") || exit 1
     case "$format" in
       json) printf '%s\n' "$result";;
@@ -13257,27 +13259,27 @@ function joomlaPlaygroundImportPackage() {
 # Database service configuration belongs to the destination and is unchanged.
 # shellcheck disable=SC2016
 function joomlaPlaygroundReplacementEnvironment() {
-  local compose="$1" service="$2" key="$3" output="$4" style=list field index
-  local -a fields=(JOOMLA_DB_NAME JOOMLA_DB_USER JOOMLA_DB_PASSWORD JOOMLA_DB_TYPE JOOMLA_DB_PREFIX)
-  local -a suffixes=(DB DB_USER DB_PASS JOOMLA_DB_TYPE JOOMLA_DB_PREFIX)
+  local compose="$1" service="$2" key="$3" output="$4" style=list
   joomlaServiceProperty "$compose" "$service" environment > "$output.input" || return 1
   head -1 "$output.input" | grep -qE '^    environment:[[:space:]]*$' || return 1
   if grep -qE '^      [A-Za-z_][A-Za-z0-9_]*:' "$output.input"; then style=map; fi
-  awk '
+  awk -v style="$style" -v key="$key" '
+    function prefix() {
+      if(style=="map") print "      JOOMLA_DB_PREFIX: \"${VDM_"key"_JOOMLA_DB_PREFIX}\""
+      else print "      - JOOMLA_DB_PREFIX=${VDM_"key"_JOOMLA_DB_PREFIX}"
+      found=1
+    }
     NR==1 {print; next}
     /^[[:space:]]*(#.*)?$/ {print; next}
     /^      (- |[A-Za-z_][A-Za-z0-9_]*:)/ {
       name=$0; sub(/^      (-[[:space:]]*)?["\047]?/,"",name); sub(/[:=].*/,"",name)
-      if (name ~ /^JOOMLA_(SITE_NAME|ADMIN_(USER|USERNAME|PASSWORD|EMAIL)|EXTENSIONS_URLS|CLI_COMMANDS|DB_(NAME|USER|PASSWORD|TYPE|PREFIX))$/) next
+      if (name ~ /^JOOMLA_(SITE_NAME|ADMIN_(USER|USERNAME|PASSWORD|EMAIL)|EXTENSIONS_URLS|CLI_COMMANDS)$/) next
+      if (name=="JOOMLA_DB_PREFIX") {prefix(); next}
       print; next
     }
-    {exit 1}
+    {invalid=1; exit 1}
+    END {if(!invalid && !found) prefix()}
   ' "$output.input" > "$output" || { printf 'Unsupported service environment layout for %s.\n' "$service" >&2; return 1; }
-  for index in "${!fields[@]}"; do
-    field="${fields[index]}"
-    if [ "$style" = map ]; then printf '      %s: "${VDM_%s_%s}"\n' "$field" "$key" "${suffixes[index]}"
-    else printf '      - %s=${VDM_%s_%s}\n' "$field" "$key" "${suffixes[index]}"; fi
-  done >> "$output"
 }
 
 # A missing override is a distinct state: creating it during staging is also
@@ -13704,7 +13706,7 @@ function joomlaPlaygroundReplacementStorage() {
     kind=$(joomlaSiteJSON -er .type <<< "$row") && source=$(joomlaSiteJSON -er .source <<< "$row") &&
       logical=$(joomlaSiteJSON -r .logical <<< "$row") && path=$(joomlaPlaygroundStoragePath "$row") || return 1
     if [ "$kind" = bind ]; then source=$(joomlaPersistenceCanonicalPath "$path") || return 1; fi
-    joomlaPersistenceCheckShared "$site" "$kind" "$source" "$target" || return 1
+    joomlaPersistenceCheckShared "$site" "$kind" "$source" "$target" true || return 1
     if [ "$kind" = volume ]; then joomlaPersistenceCheckShared "$site" bind "$path" '' || return 1; fi
     if [ "$role" = web ]; then
       if [ "$kind" = bind ]; then joomlaPlaygroundValidateWebsiteDirectory "$source" || {
@@ -13842,7 +13844,9 @@ function joomlaPlaygroundReplaceSite() {
     enabled=$(getJoomlaSiteEnabledState "$site") || exit 1
     case "$enabled" in enabled|disabled) ;; *) printf 'The enabled site registration differs from the selected website.\n' >&2; exit 1;; esac
     if [ "$enabled" = enabled ] && [ ! -L "$VDM_REPO_PATH/joomla/enabled/$site" ]; then mirror="$VDM_REPO_PATH/joomla/enabled/$site"; fi
-    [ -n "$old_env" ] && [ -f "$old_env" ] && [ ! -L "$old_env" ] || { printf 'Restore the existing website environment before importing.\n' >&2; exit 1; }
+    if [ -z "$old_env" ] || [ ! -f "$old_env" ] || [ -L "$old_env" ]; then
+      printf 'Restore the existing website environment before importing.\n' >&2; exit 1
+    fi
     env_lock="${old_env}.octojoom-change.lock"
     mkdir "$env_lock" 2>/dev/null || { printf 'Another operation is changing the website environment: %s\n' "$old_env" >&2; exit 1; }
     env_locked=true
@@ -13888,8 +13892,10 @@ function joomlaPlaygroundReplaceSite() {
     stage=preflight
     joomlaPlaygroundCheckOriginalSite "$site" "$work" "$compose" "$old_env" "$old_digest" "$enabled" "$mirror" "$project" &&
       joomlaPlaygroundReplacementStorage "$site" "$work" && joomlaPlaygroundCheckIni "$work"/ini-*.path || exit 1
-    joomlaDatabaseCopyConfiguration "$site" "$work/current-configuration.php" &&
-      cmp -s "$work/target-configuration.php" "$work/current-configuration.php" || { printf 'The destination Joomla configuration changed during import preparation.\n' >&2; exit 1; }
+    if ! joomlaDatabaseCopyConfiguration "$site" "$work/current-configuration.php" ||
+      ! cmp -s "$work/target-configuration.php" "$work/current-configuration.php"; then
+      printf 'The destination Joomla configuration changed during import preparation.\n' >&2; exit 1
+    fi
     if ! grep -Fxq -- "$database" <<< "$running"; then
       db_started=true
       joomlaSiteCompose "$site" up -d --no-deps "$database" >/dev/null || exit 1
