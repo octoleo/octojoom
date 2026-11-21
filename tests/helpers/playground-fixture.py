@@ -1,4 +1,4 @@
-"""Write a deterministic synthetic Playground export for inspection and fresh setup."""
+"""Write a deterministic synthetic Playground export for the package inspection tests."""
 
 import hashlib
 import json
@@ -22,25 +22,6 @@ def write_fixture(destination, variant):
     }
     if variant == "minimum-php":
         files[manifest] = files[manifest].replace(b"</extension>", b"<php_minimum>8.3.0</php_minimum></extension>")
-    if variant == "fresh":
-        files["site/configuration.php"] = b"""<?php
-class JConfig {
-    public $host = 'localhost';
-    public $dbtype = 'mysqli';
-    public $db = 'joomla';
-    public $user = 'root';
-    public $password = 'private-fixture-old-db';
-    public $dbprefix = 'demo_';
-    public $secret = 'private-fixture-key';
-    public $sitename = 'Fixture Shop';
-    public $tmp_path = __DIR__ . '/tmp';
-    public $log_path = __DIR__ . '/administrator/logs';
-    public $live_site = 'https://playground.example.test';
-}
-"""
-    if variant == "path-alias":
-        files["site/media/preview.txt"] = b"First website asset"
-        files["site/media/Preview.txt"] = b"Second website asset"
     sql = b"CREATE TABLE demo_items (id INTEGER);\n"
     payload = {
         **files,
@@ -88,11 +69,6 @@ class JConfig {
             "value": digest.hexdigest(),
         },
     }
-    if variant == "fresh":
-        config["configuration"]["phpSettings"] = {
-            "memory_limit": "512M", "max_execution_time": "60", "max_input_time": "60",
-            "max_input_vars": "10000", "upload_max_filesize": "128M", "post_max_size": "160M",
-        }
     website_files = [data for name, data in payload.items() if name.startswith("site/")]
     metadata = {
         "format": "joomengine-playground-export",
