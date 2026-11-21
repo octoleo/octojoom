@@ -162,6 +162,57 @@ storage_original_snapshot() {
   assert_command '^docker ps -aq$'
 }
 
+@test "in-place ownership permits the selected project to mount its exact store at another target" {
+  storage_render_fixture
+  joomlaSiteJSON '.services.worker={image:"busybox:latest",volumes:[
+    .services.web.volumes[0] | .target="/srv/application"]}' \
+    < "$SANDBOX/model.json" > "$SANDBOX/aliases.json"
+  mv "$SANDBOX/aliases.json" "$SANDBOX/model.json"
+
+  # Moving persistence still needs matching targets; in-place import keeps
+  # every owned mount intact and pauses all writers belonging to the selected site.
+  run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html
+  assert_failure
+  assert_output_contains 'Storage is shared or overlaps another mount'
+  run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html true
+  assert_success
+  assert_equal "$output" ''
+}
+
+@test "in-place ownership permits actual same-project aliases but persistence changes still refuse them" {
+  storage_render_fixture
+  joomlaSiteJSON -nc --arg source "$VDM_PROJECT_PATH/alpha/joomla" '[
+    {Id:"own-web",Mounts:[{Type:"bind",Source:$source,Destination:"/var/www/html"}]},
+    {Id:"own-worker",Mounts:[{Type:"bind",Source:$source,Destination:"/srv/application"}]}
+  ]' > "$SANDBOX/containers.json"
+  docker() {
+    case "$1 $2" in
+      'ps -aq') printf 'own-web\nown-worker\n';;
+      'inspect own-web') cat "$SANDBOX/containers.json";;
+      *) return 99;;
+    esac
+  }
+  joomlaSiteCompose() { printf 'own-web\nown-worker\n'; }
+
+  run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html
+  assert_failure
+  assert_output_contains 'Another container shares this storage.'
+  run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html true
+  assert_success
+  assert_equal "$output" ''
+}
+
+@test "in-place ownership still refuses an exact store declared by a different project" {
+  storage_render_fixture
+  local other="$VDM_REPO_PATH/joomla/available/neighbor.example.test"
+  mkdir "$other"
+  cp "$compose" "$other/docker-compose.yml"
+  cp "$directory/.env" "$other/.env"
+  run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html true
+  assert_failure
+  assert_output_contains 'Storage is shared or overlaps another mount (neighbor.example.test)'
+}
+
 @test "storage inventory and inspect failures still prevent a change" {
   storage_render_fixture
   fail_command docker-ps 19
@@ -187,9 +238,12 @@ storage_original_snapshot() {
       *) return 99;;
     esac
   }
-  run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html
-  assert_failure
-  assert_output_contains 'Another container shares this storage.'
+  local allow_same_project
+  for allow_same_project in false true; do
+    run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html "$allow_same_project"
+    assert_failure
+    assert_output_contains 'Another container shares this storage.'
+  done
 }
 
 @test "real Compose original-state checks accept an unchanged model and reject a changed external service environment" {
