@@ -88,29 +88,42 @@ connection, log and temporary paths, mail and site settings are adapted to
 the destination. The complete website already contains Joomla and its
 extensions, so deployment skips installation.
 
-Octojoom starts the imported site privately to confirm Joomla can connect to
-the database and serve its home page. Choosing **Yes** to enable starts the
-published site. Choosing **No**, or passing `--enable false`, registers it as
-available and leaves its containers stopped. Both project-directory storage
-and Docker named volumes retain the imported data between starts. Setup
-refuses an occupied destination. If provisioning fails, it cleans up the
-new site's resources and reports when any private recovery files remain.
+The import is a step in the normal Joomla setup. It seeds the website storage,
+starts only the database needed for the import, imports the SQL and adapts
+`configuration.php`, PHP settings and the administrator account. It then uses
+the ordinary enable/start path. The Joomla installer is not run, and the
+website is not started in a separate temporary project first.
+
+Choosing **Yes** to enable starts the configured site. Choosing **No**, or
+passing `--enable false`, registers it as available and leaves its containers
+stopped. Both project-directory storage and Docker named volumes retain the
+imported data between starts. Setup refuses an occupied destination.
 
 ## Replace an existing site
 
 Choose the existing-site option, select the website by its hostname, and
 confirm that its Joomla files and database tables should be replaced with the
-package contents. The backup question defaults to **Yes**. With that choice,
-Octojoom creates and verifies a full backup of the old website before switching
-over. If the backup fails, the replacement stops.
+package contents. Octojoom validates the complete ZIP and identifies the
+selected site's storage before pausing its writers. Replacement imports into
+that site's existing website mount and selected database. Old-only files and
+tables are removed; the package is not merged into the old installation.
+
+The backup question defaults to **Yes**. With that choice, Octojoom creates
+and verifies its normal full-site backup before the first destructive write.
+The archive includes the old website files, logical SQL, Compose definition,
+selected site's effective environment settings and referenced configuration.
+A shared environment is scoped to the selected site in the archive. If the
+backup cannot be created or verified, the overwrite does not begin and the
+previous service state is restored.
 
 Choosing **No** at the backup question opens a second warning that the old
 website files and database data will be lost. **Yes** at the warning authorizes
-replacement without a backup. **No** at the warning returns to the backup
-question, with **Yes** selected again.
+replacement without a backup. **No** returns to the backup question, with
+**Yes** selected again. Skipping the backup does not create an old-data copy
+elsewhere and does not promise recovery of data overwritten by a failed import.
 
 For an unattended replacement with the default full backup, specify one
-managed hostname and explicitly confirm the replacement.
+managed hostname and explicitly confirm the replacement:
 
 ```bash
 octojoom --type joomla --task playground --action deploy --target current \
@@ -122,115 +135,86 @@ To deliberately skip the backup, add both `--pre-backup no` and
 `--confirm-no-backup yes` to the same command. The general `--yes` switch
 cannot approve skipping the backup.
 
-Existing-site replacement runs on the local Docker host. It requires an installed
-Joomla site using MariaDB or MySQL, with dedicated project-directory storage
-or ordinary local Docker volumes for its website and database. The web root
-can be a subdirectory of `/var/www/html`.
+### What stays with the destination
 
-The Docker Engine must support an internal bridge with IPv4 gateway mode
-`isolated`, introduced in Docker Engine 28.0. Octojoom uses it during staging,
-while the original site is still in its previous state. See the
-[Docker Engine 28.0 release notes](https://docs.docker.com/engine/release-notes/28/#2800).
+Existing-site import runs on the local Docker host and requires an installed
+Joomla site using MariaDB or MySQL. It preserves the site's Compose project,
+website bind path or named volume, database service and storage, database
+connection credentials, hostname, TLS, routing, enabled registration and
+custom settings. The web root can be a subdirectory of `/var/www/html`.
+The selected database is replaced; other databases in its service are not
+cleared or recreated. Use the separate database-management operations to
+change database identity or credentials. An existing-site import refuses
+`db-*` options that would change its connection settings.
 
-Private verification runs Joomla, its database and,
-for PHP-FPM, its Nginx service. Custom service commands, extra mounts or a
-required dependency outside those services can prevent Octojoom from isolating
-the site. Octojoom rejects such configurations before cutover.
+The destination's Joomla configuration supplies hosting and mail settings.
+The imported application supplies its secret and database table prefix.
+Both fresh setup and existing-site import use the same package reader, file
+and SQL importer, configuration adapter and administrator handling. SQL
+values and character encodings use the same conversion rules described above.
+Only Compose settings required by the incoming runtime and import change.
+The stock Apache health check and any custom probe remain as configured.
 
-The database prompts default to the destination's current database name, user
-and password. Leave the password prompt blank to keep the current one. To
-change these values in automation, use `db-name`, `db-user` and `db-password`
-in a private `--input-json` request. The imported database keeps the package's
-table prefix.
-
-The replacement keeps the target hostname, routing and storage arrangement.
-The target's Joomla configuration supplies its hosting and mail settings.
-The imported application supplies its secret and database table prefix. The
-confirmed site and administrator details are applied to Joomla and saved in
+Confirmed site and administrator details are applied to Joomla and saved in
 the site's existing effective environment file. A site using the shared
 `joomla/.env` continues using it; only that site's assignments change, while
-other sites' settings and comments are retained. A site with its own private
-`.env` keeps that file. Publication preserves the environment file's mode,
-and rollback restores its original contents. Octojoom checks for edits before
-publication and recovery. When it detects a change, it preserves the edited
-file and stops that step, with a diagnostic identifying the file.
-Replacements using the same environment file share a lock. Publication and
-rollback copy to a temporary file first and rename it into place, so a failed
-copy leaves the installed environment intact.
+other settings and comments are retained. A site with a private `.env` keeps
+that file. Environment publication uses a complete temporary file and an
+atomic rename, preserving the file's mode. Concurrent imports for the same
+site or shared environment are serialized, and an operator edit detected
+before publication is preserved and reported.
 
-If an earlier replacement already created a private `.env`, that file remains
-the effective location. Updating Octojoom does not automatically consolidate
-it with the shared file. Octojoom imports the website and database into
-separate storage, so tables and files that existed only on the old site are
-removed from the active installation.
+Storage checks establish ownership before any destructive operation. They
+consider both configured sites and actual Docker mounts, including stopped
+sites, so another site's storage cannot be overwritten. An unrelated Compose
+warning by itself does not cause refusal. Octojoom refuses a destination when
+it cannot establish safe ownership, such as an unresolved mount path or a
+shared website mount. It does not rewrite neighboring configurations to make
+them pass inspection.
 
-Storage checks also read other available sites to detect shared mounts.
-An unresolved Compose variable or an empty required project path stops the
-check and identifies the affected website and environment file. An obsolete
-Compose `version` field does not prevent these checks or require rewriting
-the neighboring site's configuration.
+### Service state and failures
 
-Deployment verification uses `curl --fail` against the website's home page.
-HTTP errors, including HTTP 503 from an offline site, fail verification.
-Verification preserves Joomla’s imported **Site Offline** setting.
+Plan for a service interruption while the selected site's writers are
+paused. The importer uses the existing database service and writes directly
+to the selected website storage and database. It does not allocate replacement
+storage, switch mount identities, start a private website stack, or require
+Docker Engine 28's isolated bridge mode. After a successful import, it resumes
+previously running services through the normal Compose path. A site that was
+stopped remains stopped.
 
-During staging, the original website keeps its current service state. Plan for
-a service interruption at cutover. Octojoom pauses writers for the backup and
-switch, then verifies the replacement on its final storage in a private Docker
-network. Joomla must connect to its database and serve its home page. During
-this check, neither the site's Traefik route nor a directly published host port
-serves the replacement. Visitors may receive a proxy error or a refused
-connection while the route is unavailable.
+If an error happens before destructive writes, Octojoom reports the failed
+step and restores the previous service state. If an error happens after writes
+begin, it leaves the website's writers stopped and reports a failed import.
+A partly imported website is not presented as successfully deployed. Import
+scratch files and operation locks are cleaned up; no second recovery journal
+or retained old storage is created.
 
-Octojoom records the commit before restoring the site's public Compose
-definition, routing and published ports. It starts the services that were
-running before replacement and preserves the site's enabled or disabled
-registration. Existing health checks remain unchanged, except for the exact
-inline Apache probe generated by the earlier Playground implementation. On
-the selected replacement site, Octojoom restores that known probe to the
-original `curl -f http://localhost/` check and retains its timing and disabled
-settings.
-Custom health checks are not rewritten. A fully stopped site stays
-unavailable to visitors throughout verification and after commit. If
-verification fails before commit, Octojoom removes the private verifier and
-attempts to restore the original storage and services.
+With a verified backup, use Octojoom's existing backup verification and
+restoration tools. The error report identifies that archive. Without a
+backup, overwritten files and database data cannot be recovered by this
+operation. Correct the reported issue before deciding whether to repeat the
+import or use another recovery source.
 
 ### Read the replacement result
 
-With `--output json`, read `data.outcome` and `data.committed` in the replacement
-report before deciding whether to retry. The exit status also covers work that
-happens after commit.
+With `--output json`, inspect the normal result envelope and `data.status`.
+The command returns a nonzero exit status for a failed import.
 
-| `data.outcome` | `data.committed` | `data.status` | What to do |
-| --- | --- | --- | --- |
-| `not_committed` | `false` | `failed` | The replacement stopped before commit and the original site was left intact or restored. Review `stage` and `reason` before another attempt. |
-| `recovery_incomplete` | `false` | `failed` | Octojoom could not finish recovering the original state. Keep the journal and the storage it names. Resolve recovery before changing the site. |
-| `committed` | `true` | `deployed` | The replacement completed. Keep the verified backup and recovery records if you requested a backup. |
-| `committed_with_followup` | `true` | `committed_with_followup` | The new installation is committed, and Octojoom returned a nonzero exit status. Use `stage`, `reason` and the recovery path to finish the reported work, such as restoring public service or retiring the old storage. Retrying the import would start another replacement. |
+| Field | Meaning |
+| --- | --- |
+| `target`, `site` | `current` and the selected managed hostname |
+| `status` | `deployed` on success or `failed` when the operation did not complete |
+| `stage`, `reason` | The completed or failed step and its explanation |
+| `destructive_started` | Whether writes that can replace existing website or database data began |
+| `enabled` | The site's enabled registration |
+| `running` | The observed running state, or `null` if it could not be established |
+| `backup` | The verified normal backup archive path, or `null` when none was created |
 
-`data.running` can be `null` when Octojoom could not establish the running
-state. `data.backup` names the verified archive when one exists. On success
-with a backup, `data.recovery` names the private directory recording the
-retained original website and database storage. Allow disk space for both
-copies. With an explicit backup opt-out, Octojoom retires the original storage
-after commit.
-
-If a site operation leaves `.octojoom-change.lock/recovery.path` in the site's
-available directory, it points to the private journal and blocks a second
-change. A replacement can also retain a lock beside the effective environment
-file, named `.env.octojoom-change.lock`, with its own `recovery.path` pointing
-to that journal. Resolve the recorded recovery before releasing either lock.
-The journal can contain copies of the site's original Compose and
-environment files, including credentials. Keep it private and preserve the
-storage it identifies while investigating. If public startup was interrupted,
-the journal's `committed` file records the commit, `candidate.yml` holds the
-intended public definition, and `running-services` lists the services that
-should be running. The `stage` file names the last step entered and can read
-`commit` before the decision is recorded.
-
-To check a retained backup, use the backup command's **verify** action. Use
-**restore** to restore it to a new or existing site. See
-[Verifying and restoring backups](BACKUPS.md).
+A backup path is reported only after verification. Keep that archive for as
+long as the previous site is needed. A successful backup opt-out leaves no
+archive, old storage copy, private stack or recovery directory behind.
+See [Verifying and restoring backups](BACKUPS.md) for the existing recovery
+commands.
 
 ## Inspect an existing host
 

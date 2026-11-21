@@ -2,8 +2,6 @@
 
 Octojoom supports MariaDB, MySQL and PostgreSQL when the selected Joomla image has the required PHP driver and its Joomla release accepts the server version. The actual database image is inspected; PostgreSQL data-directory placement is measured from its `PGDATA`. Installed websites are checked against their own Joomla database driver as well as the image's bundled Joomla code.
 
-PostgreSQL 19 requires `standard_conforming_strings` to stay on. If the Joomla driver turns it off when connecting, choose PostgreSQL 18 or a Joomla release with a compatible driver. Octojoom checks this before a database change. [PostgreSQL 19 release notes](https://www.postgresql.org/docs/19/release-19.html) · [Joomla issue #48849](https://github.com/joomla/joomla-cms/issues/48849)
-
 The existing default remains MariaDB. New-site setup accepts `--engine mariadb|mysql|postgres` and `--database-image IMAGE:TAG`; the optional customization menu exposes the same choices. Database name, user, password and root password retain their existing scoped ENV keys. New `VDM_<SITE>_DB_ENGINE` and `VDM_<SITE>_DB_IMAGE` values describe that website, while future-site defaults remain separate. PostgreSQL uses its supported initialization variables and phpMyAdmin is omitted for new PostgreSQL sites.
 
 ## Change an existing website

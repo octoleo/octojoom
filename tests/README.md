@@ -55,7 +55,7 @@ On Linux, installed Docker Compose also validates generated configuration.
 | Configuration and dialogs | Secret persistence, literal input, permissions, validation, random values, and prompt cancellation |
 | Joomla setup | Single and bulk project-folder defaults, explicit named-volume opt-out, cancellation, generated Compose, environment values, and feature options |
 | Guided setup and defaults | One customization fork, saved-default precedence, manual versus automatic installation, headless preflight, and staged publication failures |
-| Playground packages | Offline inspection, archive validation, menu and CLI consent, isolated staging, cutover and recovery, existing environment location, neighboring-setting preservation, interrupted environment writes, original healthcheck restoration, and unresolved storage configuration refusal |
+| Playground packages | Package inspection and validation, menu and CLI consent, shared import through normal setup, in-place overwrite, selected-site storage ownership, existing environment location, neighboring-setting preservation, optional verified backup and explicit partial-import failures |
 | Configuration alignment | Effective Compose equivalence, complete scoped ENV, custom-field preservation, idempotence, per-site batch failure reporting, and recoverable publication |
 | PHP runtime | Published-tag compatibility, measured runtime checks, selective INI changes, custom-directive preservation, stopped-site handling, and rollback |
 | Webserver and document root | Apache/Nginx configuration, companion mounts, routing preservation, supported root selection/moves, custom-layout refusal, and failed-change recovery |
@@ -164,35 +164,27 @@ the database container, and a database marker must survive these changes.
 The real root-move fixture uses bind storage; named-volume root handling has
 portable coverage, not equivalent real-Docker move acceptance.
 
-The Playground fixture exercises the public CLI. It verifies the default full
-backup, explicit backup opt-out, failed SQL import, an unusable backup path,
-rollback after failed verification, and the stopped site's state after restart.
-It uses a disposable Traefik container and a separately published HTTP port
-on loopback. An independent client polls both endpoints while the replacement
-answers its private HTTP probe. Distinct markers identify the old and incoming
-sites. The fixture checks public access after commit, rollback after a rejected
-private probe, and continued isolation for the stopped site. A forced failure
-retiring an original volume covers the `committed_with_followup` result. After
-publication, a request writes a fixture value through Traefik and a second
-request reads it through the host port.
+The Playground fixture exercises the public CLI with complete Joomla exports.
+It deploys ZIP A through normal setup, then imports ZIP B into the selected
+site's existing website mount and database. It checks the imported files,
+SQL values and administrator login, removal of A-only files and tables, and
+preservation of mount or named-volume identities, effective environment
+location, hostname, routing and custom settings. A running Apache/MariaDB
+site uses bind mounts; a stopped Nginx/PHP-FPM/MySQL site uses named volumes
+and a nested document root.
 
-The running Apache fixture uses a shared `joomla/.env` for its replacement
-tests. Failed import, failed backup and failed verification must restore the
-original settings. A successful replacement with the default backup and another
-with an explicit backup opt-out must keep that environment location, preserve
-unrelated assignments and comments, and leave the running neighboring site
-untouched. A configured but never-started neighbor with an obsolete Compose
-`version` remains unchanged and stopped; successful replacement must not emit
-obsolete-version or missing-variable warnings. The stopped Nginx/PHP-FPM fixture
-continues exercising its private environment file and named volumes.
+The backup case verifies the normal full archive, including the old website
+files, SQL, Compose and scoped site environment. The explicit backup opt-out
+must leave no archive, old storage copy, private stack or recovery directory.
+A failed-backup case checks that no destructive write begins. Failed imports
+must report failure; once writes begin, the site's writers stay stopped.
+Successful import resumes only the services that were previously running.
+Neighboring sites and settings remain unchanged.
 
-A second export captures a renamed Joomla administrator with stale launch
-settings. The fixture checks the imported account's ID, groups and password,
-and Docker health after restart. Before the running replacement it installs
-the exact old generated Apache probe and requires restoration of the original
-curl healthcheck with the same timing options. Portable tests additionally
-verify that custom checks are unchanged. A separate offline export must fail
-HTTP verification without changing the original website or its settings.
+The fixture retains SQL numeric, binary and character-set checks and tests
+administrator changes against the imported account. Existing health probes
+are preserved. There is no separate website startup or verification stack,
+probe migration, offline-Joomla matrix or storage-retirement test.
 macOS and Windows run the portable Playground suites with Docker stand-ins.
 
 The database and backup matrix installs Joomla separately for each engine.
