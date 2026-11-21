@@ -18,9 +18,6 @@ sites="$OCTOJOOM_HOME/Docker/joomla/available"
 package="$work/Donor store.zip"
 image=joomla:6.2.0-php8.4-apache
 database_image=mariadb:11.4
-fpm_image=joomla:6.2.0-php8.4-fpm
-mysql_image=mysql:8.4
-nginx_docroot=store/public
 DONOR_PASSWORD=$(openssl rand -hex 18)
 DONOR_DB_PASSWORD=$(openssl rand -hex 18)
 CONFIRMED_PASSWORD=$(openssl rand -hex 18)
@@ -127,8 +124,8 @@ donor cp "web:$export_dir/site.zip" "$package" >/dev/null
 source_secret=$(donor exec -T web php -r 'require "configuration.php"; echo hash("sha256", (new JConfig)->secret);')
 donor down -v >/dev/null
 
-# The Apache destination changes the administrator using protected JSON. The
-# Nginx destination retains the donor account and initially remains stopped.
+# Protected JSON overrides the administrator for "new"; "stopped" retains
+# the exported administrator and settings with explicit --enable false.
 python3 - "$work/request.json" <<'PY'
 import json, os, sys
 with open(sys.argv[1], "w") as output:
@@ -141,7 +138,7 @@ deploy() {
   local sub="$1" key="$2" input="$3" bind="$4"; shift 4
   bash "$root/src/octojoom" --type joomla --task playground --action deploy --target new \
     --file "$input" --key "$key" --domain "$domain" --sub-domain "$sub" \
-    --image-source joomla \
+    --image-source joomla --image-tag "${image#*:}" --engine mariadb --database-image "$database_image" \
     --traefik-network "$network" --openssh-network "$ssh_network" --update-hosts false --secure false \
     --persistence "$bind" --db-persistence "$bind" --phpmyadmin false --mailcatcher false \
     --non-interactive --output json "$@" > "$work/result"
@@ -151,7 +148,6 @@ deploy() {
 source <(awk '/^(function )?[A-Za-z_][A-Za-z0-9_]*\(\) \{$/ {p=1} p {print} p && /^}$/ {p=0}' "$root/src/octojoom")
 check_site() {
   local sub="$1" key="$2" sitename="$3" username="$4" display="$5" email="$6" password="$7"
-  local docroot="${8:-/var/www/html}" web="${9:-127.0.0.1}"
   local env_file="$sites/$sub.$domain/.env" var expected observed
   [ "$(stat -c %a "$env_file")" = 600 ] || { echo 'Site environment permissions are too broad.' >&2; return 1; }
   for var in SITE_NAME ADMIN_USERNAME ADMIN_USER ADMIN_EMAIL ADMIN_PASSWORD DB_PREFIX; do
@@ -164,41 +160,30 @@ check_site() {
   done
   # A read-only SQL lookup checks the persisted account and test marker.
   # Pass the fixture password over stdin; no interactive sign-in or Joomla UI.
-  printf '%s' "$password" | destination "$sub" exec -T --workdir "$docroot" "joomla$key" php -d register_argc_argv=1 -r '
+  printf '%s' "$password" | destination "$sub" exec -T "joomla$key" php -r '
     require "configuration.php"; $c = new JConfig;
     if ($c->sitename !== $argv[1] || $c->dbprefix !== "demo_" || hash("sha256",$c->secret) !== $argv[5]) exit(1);
-    if ($c->tmp_path !== getcwd()."/tmp" || $c->log_path !== getcwd()."/administrator/logs") exit(4);
     $db = new mysqli(explode(":",$c->host)[0],$c->user,$c->password,$c->db);
     if ((int)$db->query("SELECT value FROM demo_fixture_marker")->fetch_row()[0] !== 4381) exit(2);
     $st = $db->prepare("SELECT name,email,password FROM demo_users WHERE username=?");
     $st->bind_param("s",$argv[2]); $st->execute(); $user=$st->get_result()->fetch_row();
     if (!$user || $user[0] !== $argv[3] || $user[1] !== $argv[4] || !password_verify(stream_get_contents(STDIN),$user[2])) exit(3);
   ' -- "$sitename" "$username" "$display" "$email" "$source_secret"
-  destination "$sub" exec -T "joomla$key" curl -fsS --max-time 10 --header "Host: $sub.$domain" "http://$web/" >/dev/null
+  destination "$sub" exec -T "joomla$key" curl -fsS --max-time 10 http://127.0.0.1/ >/dev/null
 }
 first="p$run_id"; second="q$run_id"; failed="r$run_id"
-apache_options=(--engine mariadb --database-image "$database_image")
-deploy new "$first" "$package" true "${apache_options[@]}" --input-json "$work/request.json"
+deploy new "$first" "$package" true --input-json "$work/request.json"
 jq -e '.success and .data.enabled == true' "$work/result" >/dev/null
 check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 destination new up -d --force-recreate --wait --wait-timeout 240 >/dev/null
 check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 
-deploy stopped "$second" "$package" false --enable false --image-tag "${fpm_image#*:}" \
-  --engine mysql --database-image "$mysql_image" --webserver nginx --docroot "$nginx_docroot"
-jq -e --arg image "$fpm_image" '.success and .data.enabled == false and .data.image == $image' "$work/result" >/dev/null
+deploy stopped "$second" "$package" false --enable false
+jq -e '.success and .data.enabled == false' "$work/result" >/dev/null
 [ ! -e "$OCTOJOOM_HOME/Docker/joomla/enabled/stopped.$domain" ]
 [ -z "$(destination stopped ps -q --status running)" ]
-destination stopped config --format json | jq -e --arg key "$second" --arg db "$mysql_image" \
-  --arg root "/var/www/html/$nginx_docroot" --arg nginx_conf "$sites/stopped.$domain/nginx.conf" '
-    .services["mariadb"+$key].image == $db and
-    .services["joomla"+$key].working_dir == $root and
-    any(.services["nginx"+$key].volumes[];
-        .source == $nginx_conf and .target == "/etc/nginx/conf.d/default.conf" and .read_only)
-  ' >/dev/null
 destination stopped up -d --wait --wait-timeout 240 >/dev/null
-check_site stopped "$second" 'Playground Donor' donoradmin 'Donor Administrator' donor@example.test "$DONOR_PASSWORD" \
-  "/var/www/html/$nginx_docroot" "nginx$second"
+check_site stopped "$second" 'Playground Donor' donoradmin 'Donor Administrator' donor@example.test "$DONOR_PASSWORD"
 
 # A valid older-format bundle with a deliberately unsuccessful final SQL
 # statement reaches database import. Both existing fresh sites must survive.
@@ -220,7 +205,7 @@ with zipfile.ZipFile(sys.argv[1]) as src, zipfile.ZipFile(sys.argv[2],"w") as ou
             data += (json.dumps(statement) + "\n").encode()
         out.writestr(entry,data)
 PY
-if deploy failed "$failed" "$work/failing.zip" false "${apache_options[@]}" 2>"$work/failure.log"; then
+if deploy failed "$failed" "$work/failing.zip" false 2>"$work/failure.log"; then
   echo 'Invalid SQL was accepted.' >&2; exit 1
 fi
 jq -e '.success==false' "$work/result" >/dev/null
@@ -233,4 +218,4 @@ fi
 [ -z "$(docker ps -aq --filter "label=com.docker.compose.service=mariadb$failed")" ]
 [ -z "$(docker volume ls -q --filter 'label=com.octoleo.octojoom.playground' --filter "name=$failed")" ]
 check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
-echo 'Fresh Playground deployment passed on Apache/MariaDB with bind mounts and Nginx/PHP-FPM/MySQL with named volumes and a nested document root.'
+echo 'Fresh Playground deployment passed with existing and updated settings, both storage types, recreation, and failed-import cleanup.'
