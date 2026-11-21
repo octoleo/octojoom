@@ -13256,22 +13256,14 @@ function joomlaPlaygroundStageReplacement() {
     umask 077
     local prepared="$1" site="$2" work="$3" info token image relative=. web driver mount db_mount file_bytes db_bytes
     local VDM_PUID='' VDM_PGID=''
-    local step='reading the candidate plan'
-    # An operator can see where staging stopped without exposing the private
-    # Compose model, installed configuration, account fields or database SQL.
-    trap 'if [ "$?" -ne 0 ]; then printf "Replacement candidate failed while %s.\n" "$step" >&2; fi' EXIT
     IFS= read -r token < "$work/token" && [[ "$token" =~ ^[a-f0-9]{32}$ ]] || exit 1
     info=$(cat "$work/services.json") || exit 1
     image=$(joomlaSiteJSON -er .image <<< "$info") && web=$(joomlaSiteJSON -er .web <<< "$info") &&
       driver=$(joomlaSiteJSON -er .driver <<< "$info") || exit 1
-    step='isolating the Compose services and storage'
     joomlaPlaygroundReplacementModel "$work" "$token" "$VDM_SITE_SERVICE" "$VDM_DB_SERVICE" "$web" "$info" || exit 1
-    step='copying the installed Joomla configuration'
     joomlaDatabaseCopyConfiguration "$site" "$work/target-configuration.php" || exit 1
-    step='reconciling the installed and imported Joomla configuration'
     joomlaPlaygroundConfigureReplace "$prepared" "$work/target-configuration.php" "$VDM_DB_HOST" "$driver" \
       "$vdm_database_name" "$vdm_database_user" "$vdm_database_pass" "$VDM_SITE_DOCROOT" || exit 1
-    step='resolving the private storage mounts'
     mount=$(joomlaPlaygroundReplacementMount "$work/storage.json" web /octojoom-joomla) &&
       db_mount=$(joomlaPlaygroundReplacementMount "$work/storage.json" db /octojoom-db) || exit 1
     file_bytes=$(joomlaSiteJSON -er .fileBytes < "$prepared/metadata.json") &&
@@ -13280,10 +13272,8 @@ function joomlaPlaygroundStageReplacement() {
     [ "$VDM_SITE_DOCROOT" = /var/www/html ] || relative="${VDM_SITE_DOCROOT#/var/www/html/}"
     migrationReadEnvValue "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_PUID" VDM_PUID || VDM_PUID=''
     migrationReadEnvValue "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_PGID" VDM_PGID || VDM_PGID=''
-    step='seeding the private website storage'
     : > "$work/seeding" || exit 1
     joomlaPlaygroundSeedWebsite "$prepared/site" "$mount" "$db_mount" "$image" "$relative" "$file_bytes" "$db_bytes" "$token" || exit 1
-    step='starting the private services and importing the database'
     joomlaPlaygroundImportCandidate "$prepared" "$site" "$work" "$VDM_SITE_SERVICE" "$VDM_DB_SERVICE" "$VDM_SITE_DOCROOT" "$web" "$VDM_DB_ENGINE" "$token" "$VDM_DB_PORT"
   )
 }
