@@ -190,7 +190,7 @@ setup() {
   joomlaPlaygroundPreparePackage "$package" "$prepared" "$digest" > /dev/null
   parseCLI --non-interactive --site-name "Reader's store"
   joomlaPlaygroundConfirmFreshSettings "$prepared"
-  run joomlaPlaygroundConfigureFresh "$prepared" mariadbshop mysqli shopdb shopuser 'private-fixture-new-db' /var/www/html/store
+  run joomlaPlaygroundConfigureImport "$prepared" '' mariadbshop mysqli shopdb shopuser 'private-fixture-new-db' /var/www/html/store
   assert_success
   refute_output_contains private-fixture
   assert_file_contains "$config" "public \$host = 'mariadbshop';"
@@ -234,13 +234,15 @@ fresh_setup_standins() {
   joomlaRuntimeIniTarget() { printf '%s\n' /usr/local/etc/php/conf.d/zz-octojoom.ini; }
   joomlaPlaygroundProvisionFresh() {
     [ -s "$1/database.sql" ] && [ -s "$1/account.json" ] || return 31
-    [ ! -e "$fixture_site_dir" ] || return 32
+    [ -f "$fixture_site_dir/docker-compose.yml" ] || return 32
+    mkdir -p "$1/runtime"
     printf '%s\n' "$2" >> "$SANDBOX/provision"
     return "${fixture_provision_status:-0}"
   }
-  joomlaPlaygroundStartFresh() {
-    [ -f "$fixture_site_dir/docker-compose.yml" ] || return 33
-    printf '%s\n' "$2" >> "$SANDBOX/started"
+  enableContainer() {
+    [ "$1" = joomla ] && [ -f "$fixture_site_dir/docker-compose.yml" ] || return 33
+    printf '%s\n' "$VDM_CONTAINER" >> "$SANDBOX/started"
+    mkdir -p "$VDM_REPO_PATH/joomla/enabled" && ln -s "$fixture_site_dir" "$VDM_REPO_PATH/joomla/enabled/$VDM_CONTAINER" || return 1
     return "${fixture_start_status:-0}"
   }
   joomlaPlaygroundCleanupFresh() { printf '%s\n' "$2" >> "$SANDBOX/cleanup"; }
@@ -416,23 +418,146 @@ fresh_command() {
   assert_equal "$(cat "$SANDBOX/removed")" shop_database
 }
 
-@test "the staging Compose model isolates services and preserves literal dollars from the rendered configuration" {
-  cat > "$SANDBOX/model.json" <<'MODEL'
-{"name":"shop","services":{
-  "joomlashop":{"image":"joomla","ports":[{"published":"80"}],"container_name":"shop",
-    "labels":{"traefik.enable":"true"},"environment":{"EXAMPLE":"$$HOME / $$$$"}},
-  "mariadbshop":{"image":"mariadb","healthcheck":{"test":["CMD-SHELL","echo $$MYSQL_USER"]}},
-  "viewer":{"image":"phpmyadmin"}},"networks":{"proxy":{"external":true}},
-  "volumes":{"db":{"name":"shop_database","driver":"local"}}}
-MODEL
-  run joomlaPlaygroundCandidateModel isolated joomlashop mariadbshop nginxshop < "$SANDBOX/model.json"
+@test "website seeding accepts stored Apache IDs, fresh numeric IDs and image defaults" {
+  local work="$SANDBOX/import" token=1234567890abcdef1234567890abcdef
+  mkdir -p "$work/website"
+  # The seeding helper invokes this test-local Docker stub indirectly.
+  # shellcheck disable=SC2317
+  docker() {
+    cat >/dev/null
+    # The guest shell receives root, UID, GID, file bytes and import mode.
+    printf '%s:%s\n' "${@: -4:1}" "${@: -3:1}"
+  }
+  local -a seed=(joomlaPlaygroundImportWebsite "$work/website" web image . 0 "$token" fresh)
+  VDM_PUID='#1234' VDM_PGID='#5678' run "${seed[@]}"
   assert_success
-  # shellcheck disable=SC2016 # These are the literal strings Compose serializes.
-  joomlaSiteJSON -e '.name=="isolated" and (.services|keys)==["joomlashop","mariadbshop"] and
-    (.services.joomlashop|(has("ports") or has("container_name"))|not) and
-    all(.services[]; .labels=={"traefik.enable":"false"} and .networks=={"default":{}}) and
-    .networks=={"default":{"internal":true}} and .volumes.db=={"name":"shop_database","external":true} and
-    .services.joomlashop.environment.EXAMPLE=="$$HOME / $$$$" and
-    .services.mariadbshop.healthcheck.test[1]=="echo $$MYSQL_USER"' <<< "$output"
-  refute_command '^docker '
+  assert_equal "$output" '1234:5678'
+  VDM_PUID=1234 VDM_PGID=5678 run "${seed[@]}"
+  assert_success
+  assert_equal "$output" '1234:5678'
+  VDM_PUID='' VDM_PGID='' run "${seed[@]}"
+  assert_success
+  assert_equal "$output" ':'
+}
+
+@test "fresh MySQL bootstrap provisions literal credentials without changing the final Compose model" {
+  local work="$SANDBOX/import"
+  mkdir "$work"
+  cat > "$work/rendered.json" <<'JSON'
+{"services":{"mysql":{"environment":{"MYSQL_DATABASE":"shop_data","MYSQL_USER":"shop","MYSQL_PASSWORD":"a'\\$$b","MYSQL_ROOT_PASSWORD":"root'credential","MYSQL_ROOT_HOST":"localhost"}}}}
+JSON
+  cp "$work/rendered.json" "$work/final.before"
+  run joomlaPlaygroundDatabaseBootstrap "$work" mysql mysql
+  assert_success
+  [ -z "$output" ]
+  cmp "$work/final.before" "$work/rendered.json"
+  joomlaSiteJSON -e '.services.mysql | (.environment | keys)==["MYSQL_ROOT_HOST","MYSQL_ROOT_PASSWORD"] and
+    (.environment.MYSQL_ROOT_PASSWORD | test("^[a-f0-9]{64}$")) and
+    (.volumes | length==1) and .volumes[0].read_only' < "$work/bootstrap.json" >/dev/null
+  local bootstrap_password
+  IFS= read -r bootstrap_password < "$work/bootstrap-root"
+  [[ "$bootstrap_password" =~ ^[a-f0-9]{64}$ ]]
+  [ "$(joomlaSiteJSON -r .services.mysql.environment.MYSQL_ROOT_PASSWORD < "$work/bootstrap.json")" = "$bootstrap_password" ]
+  assert_file_contains "$work/bootstrap-account.sql" "IDENTIFIED BY 'a''\\\$b'"
+  assert_file_contains "$work/bootstrap-root.sql" "ALTER USER 'root'@'localhost'"
+  refute_file_contains "$work/bootstrap-root.sql" "'root'@'%'"
+}
+
+@test "native database entrypoints retain their ordinary credential path" {
+  local work="$SANDBOX/import"
+  mkdir "$work"
+  printf '%s\n' '{"services":{"db":{"environment":{"MYSQL_DATABASE":"shop","MYSQL_USER":"shop","MYSQL_PASSWORD":"simple"}}}}' > "$work/rendered.json"
+  joomlaPlaygroundDatabaseBootstrap "$work" db mysql
+  refute_file_exists "$work/bootstrap.json"
+  joomlaSiteJSON '.services.db.environment.MYSQL_PASSWORD="a\u0027quote"' < "$work/rendered.json" > "$work/maria.json"
+  mv "$work/maria.json" "$work/rendered.json"
+  joomlaPlaygroundDatabaseBootstrap "$work" db mariadb
+  refute_file_exists "$work/bootstrap.json"
+}
+
+# Exercise the shared step against each destination. Files and native clients
+# are substituted here; the Docker fixture checks the resulting Joomla sites.
+shared_import_standins() {
+  joomlaPlaygroundPreparePackage "$package" "$prepared" >/dev/null
+  parseCLI --non-interactive
+  joomlaPlaygroundConfirmFreshSettings "$prepared"
+  work="$prepared/runtime"
+  mkdir "$work"
+  printf '%s\n' 1234567890abcdef1234567890abcdef > "$work/token"
+  VDM_DB_ENGINE=mariadb VDM_DB_HOST=db VDM_DB_DRIVER=mysqli VDM_DB_NAME=shop
+  VDM_DB_USER=shop VDM_DB_PASSWORD=private-fixture-db
+  joomlaDatabaseDiscoverClients() { :; }
+  joomlaPlaygroundWaitDatabase() { :; }
+  joomlaDatabaseTablesResolved() { printf '%s' "${fixture_tables:-}"; }
+  joomlaPlaygroundImportWebsite() {
+    assert_file_contains "$1/configuration.php" "public \$host = 'db';"
+    printf 'files:%s\n' "$7" >> "$SANDBOX/import-order"
+  }
+  joomlaDatabaseClient() {
+    if [ "$1" = query ]; then
+      cat > "$SANDBOX/reset-query"
+      # shellcheck disable=SC2016 # SQL identifier quoting, not shell substitution.
+      printf '%s\n' 'DROP TABLE IF EXISTS `old_only`;'
+    else
+      local sql
+      sql=$(cat)
+      if [[ "$sql" == 'SET FOREIGN_KEY_CHECKS=0;'* ]]; then
+        printf 'clear\n' >> "$SANDBOX/import-order"
+        printf '%s\n' "$sql" > "$SANDBOX/reset-statements"
+        return "${fixture_clear_status:-0}"
+      fi
+      printf 'sql\n' >> "$SANDBOX/import-order"
+      return "${fixture_sql_status:-0}"
+    fi
+  }
+  joomlaDatabaseCompose() {
+    [[ "$*" == 'run --rm --no-deps -T --label traefik.enable=false --entrypoint php '* ]] || return 91
+    cat >/dev/null
+    printf 'account\n' >> "$SANDBOX/import-order"
+  }
+}
+
+@test "both targets use the same files SQL and administrator import with only selected-database reset" {
+  shared_import_standins
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount fresh
+  assert_success
+  assert_equal "$(cat "$SANDBOX/import-order")" $'files:fresh\nsql\naccount'
+  refute_file_exists "$SANDBOX/reset-query"
+  : > "$SANDBOX/import-order"
+  cp "$prepared/site/configuration.php" "$work/existing.php"
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace "$work/existing.php"
+  assert_success
+  assert_equal "$(cat "$SANDBOX/import-order")" $'files:replace\nclear\nsql\naccount'
+  assert_file_contains "$SANDBOX/reset-query" 'WHERE TABLE_SCHEMA=DATABASE()'
+  assert_equal "$(cat "$SANDBOX/reset-statements")" $'SET FOREIGN_KEY_CHECKS=0;\nDROP TABLE IF EXISTS `old_only`;\nSET FOREIGN_KEY_CHECKS=1;'
+  assert_file_exists "$work/import-writing"
+  assert_equal "$(cat "$work/import-stage")" administrator
+  refute_command '^docker .* (up|create|start|restart|down)( |$)'
+}
+
+@test "shared fresh import refuses a populated database before changing its website files" {
+  shared_import_standins
+  fixture_tables=existing_table
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount fresh
+  assert_failure
+  assert_output_contains 'already contains tables'
+  refute_file_exists "$SANDBOX/import-order"
+  refute_file_exists "$work/import-writing"
+}
+
+@test "a failed selected-database reset or SQL import cannot reach administrator setup" {
+  shared_import_standins
+  cp "$prepared/site/configuration.php" "$work/existing.php"
+  fixture_clear_status=1
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace "$work/existing.php"
+  assert_failure
+  assert_equal "$(cat "$SANDBOX/import-order")" $'files:replace\nclear'
+  assert_equal "$(cat "$work/import-stage")" database-clear
+  : > "$SANDBOX/import-order"
+  fixture_clear_status=0 fixture_sql_status=1
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace "$work/existing.php"
+  assert_failure
+  assert_output_contains 'database import failed'
+  assert_equal "$(cat "$SANDBOX/import-order")" $'files:replace\nclear\nsql'
+  assert_equal "$(cat "$work/import-stage")" database-import
 }
