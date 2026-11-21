@@ -12847,8 +12847,19 @@ function joomlaPlaygroundImportWebsite() {
           [ -z "$(ls -A "$base")" ] || { echo "Website storage is already populated." >&2; exit 1; }
         fi
         free=$(df -Pk "$base" | awk "END{print \$4}")
-        [ "$free" -ge "$(( ($4 + 1023) / 1024 ))" ] || { echo "Insufficient space for the website files." >&2; exit 1; }
-        if [ "$5" = replace ]; then find "$base" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; fi
+        required=$(( ($4 + 1023) / 1024 ))
+        if [ "$5" = replace ]; then
+          usage=$(du -sk "$base")
+          reclaim=${usage%%[!0-9]*}
+          [ -n "$reclaim" ] && [ "$((free + reclaim))" -ge "$required" ] || {
+            echo "Insufficient space for the replacement website files." >&2; exit 1;
+          }
+          find "$base" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          # Other hard links or filesystem reservations can reduce reclaimed
+          # space. Confirm actual capacity after the deliberate in-place clear.
+          free=$(df -Pk "$base" | awk "END{print \$4}")
+        fi
+        [ "$free" -ge "$required" ] || { echo "Insufficient space for the website files." >&2; exit 1; }
         root=$base
         if [ "$1" != . ]; then root="$base/$1"; mkdir -p "$root"; fi
         uid=${2:-$(id -u www-data)}; gid=${3:-$(id -g www-data)}
@@ -13061,6 +13072,11 @@ function joomlaPlaygroundProvisionFresh() {
     local VDM_DB_COMPOSE="$VDM_SITE_COMPOSE" VDM_DB_ENV="$VDM_SITE_ENV" VDM_DB_PROJECT_DIR="$VDM_SITE_DIR" VDM_DB_SITE="$site"
     local VDM_DB_SERVICE="$database" VDM_DB_NAME="$vdm_database_name" VDM_DB_USER="$vdm_database_user" VDM_DB_PASSWORD="$vdm_database_pass"
     local VDM_DB_HOST="$app_host" VDM_DB_PORT=3306 VDM_DB_DRIVER="${VDM_DATABASE_DRIVER:-mysqli}" VDM_DB_ENGINE="$engine"
+    local MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' compose
+    VDM_DB_COMPOSE=$(joomlaWebHostPath "$VDM_DB_COMPOSE") && VDM_DB_PROJECT_DIR=$(joomlaWebHostPath "$VDM_DB_PROJECT_DIR") || exit 1
+    [ -z "$VDM_DB_ENV" ] || VDM_DB_ENV=$(joomlaWebHostPath "$VDM_DB_ENV") || exit 1
+    compose="$VDM_DB_COMPOSE"
+    export MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL
     export -n VDM_DB_PASSWORD
     # Initialize only the normal database service. No Joomla web process runs
     # until the imported files, SQL and account have completed successfully.
@@ -13077,7 +13093,7 @@ function joomlaPlaygroundProvisionFresh() {
             joomlaDatabaseClient sql --protocol=SOCKET --host=localhost --connect-expired-password < "$work/bootstrap-root.sql" >/dev/null
         ) || exit 1
       fi
-      VDM_DB_COMPOSE="$VDM_SITE_COMPOSE"
+      VDM_DB_COMPOSE="$compose"
       joomlaDatabaseCompose up -d --force-recreate --no-deps "$database" >/dev/null && joomlaPlaygroundWaitDatabase || exit 1
       rm -f -- "$work/bootstrap.json" "$work/bootstrap-account.sql" "$work/bootstrap-root" "$work/bootstrap-root.sql" || exit 1
     fi
@@ -13182,16 +13198,27 @@ function joomlaPlaygroundWaitDatabase() {
   return 1
 }
 
-# Build statements from the selected schema only. SQL-quoted identifiers handle
-# literal table names; one session disables foreign-key checks across the reset.
+# Remove objects only from the selected schema. Events are removed before
+# importing files so no old scheduled job can target the incoming tables.
+# Raw native-client output and NO_BACKSLASH_ESCAPES preserve quoted identifiers,
+# including literal backslashes, backticks and line breaks.
 function joomlaPlaygroundClearDatabase() {
-  local statements="$1/clear-database.sql"
+  local scope="${2:-tables}" statements="$1/clear-${2:-tables}.sql"
   case "$VDM_DB_ENGINE" in mariadb|mysql) ;; *) return 1;; esac
-  printf 'SET FOREIGN_KEY_CHECKS=0;\n' > "$statements" || return 1
-  joomlaDatabaseClient query >> "$statements" <<'SQL' || return 1
+  case "$scope" in programs|tables) ;; *) return 1;; esac
+  printf "SET SESSION sql_mode='NO_BACKSLASH_ESCAPES';\n" > "$statements" || return 1
+  if [ "$scope" = programs ]; then
+    joomlaDatabaseClient query >> "$statements" <<'SQL' || return 1
+SELECT CONCAT('DROP EVENT IF EXISTS `', REPLACE(EVENT_NAME,'`','``'), '`;') FROM information_schema.EVENTS WHERE EVENT_SCHEMA=DATABASE();
+SELECT CONCAT('DROP ', ROUTINE_TYPE, ' IF EXISTS `', REPLACE(ROUTINE_NAME,'`','``'), '`;') FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=DATABASE() AND ROUTINE_TYPE IN ('FUNCTION','PROCEDURE');
+SQL
+  else
+    printf 'SET FOREIGN_KEY_CHECKS=0;\n' >> "$statements" || return 1
+    joomlaDatabaseClient query >> "$statements" <<'SQL' || return 1
 SELECT CONCAT('DROP ', IF(TABLE_TYPE='VIEW','VIEW','TABLE'), ' IF EXISTS `', REPLACE(TABLE_NAME,'`','``'), '`;') FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() ORDER BY TABLE_TYPE DESC, TABLE_NAME;
 SQL
-  printf 'SET FOREIGN_KEY_CHECKS=1;\n' >> "$statements" || return 1
+    printf 'SET FOREIGN_KEY_CHECKS=1;\n' >> "$statements" || return 1
+  fi
   joomlaDatabaseClient sql < "$statements" >/dev/null
 }
 
@@ -13203,11 +13230,46 @@ function joomlaPlaygroundImportPackage() {
     set +x
     umask 077
     local prepared="$1" site="$2" work="$3" app="$4" root="$5" image="$6" mount="$7" mode="$8" original="${9:-}"
-    local engine="$VDM_DB_ENGINE" relative=. bytes token tables
+    local engine="$VDM_DB_ENGINE" relative=. bytes token tables ini_host status ids child helpers_started=false
+    local VDM_DB_COMPOSE="${VDM_DB_COMPOSE:-}" VDM_DB_ENV="${VDM_DB_ENV:-}" VDM_DB_PROJECT_DIR="${VDM_DB_PROJECT_DIR:-}"
+    local MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+    local -a account_options=()
     [[ "$mode" = fresh || "$mode" = replace ]] || exit 1
     case "$root" in /var/www/html) ;; /var/www/html/*) relative="${root#/var/www/html/}";; *) exit 1;; esac
     joomlaValidateDocumentRoot "$relative" || exit 1
     IFS= read -r token < "$work/token" && [[ "$token" =~ ^[0-9a-f]{32}$ ]] || exit 1
+    # Host paths are converted explicitly before disabling Git Bash conversion
+    # of container paths passed to PHP and the native database client.
+    [ -z "$VDM_DB_COMPOSE" ] || VDM_DB_COMPOSE=$(joomlaWebHostPath "$VDM_DB_COMPOSE") || exit 1
+    [ -z "$VDM_DB_ENV" ] || VDM_DB_ENV=$(joomlaWebHostPath "$VDM_DB_ENV") || exit 1
+    [ -z "$VDM_DB_PROJECT_DIR" ] || VDM_DB_PROJECT_DIR=$(joomlaWebHostPath "$VDM_DB_PROJECT_DIR") || exit 1
+    export MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    trap '
+      status=$?
+      trap - EXIT
+      trap "" INT TERM HUP
+      if "$helpers_started"; then
+        if ids=$(docker ps -aq --filter "label=com.octoleo.octojoom.playground=$token"); then
+          while IFS= read -r child; do
+            [ -z "$child" ] || docker rm -f "$child" >/dev/null || status=1
+          done <<< "$ids"
+        else
+          printf "Could not confirm cleanup of the import helper containers.\n" >&2
+          status=1
+        fi
+      fi
+      exit "$status"
+    ' EXIT
+    account_options=(run --rm --no-deps -T --label traefik.enable=false
+      --label "com.octoleo.octojoom.playground=$token" --entrypoint php)
+    if [ -f "$work/candidate.ini" ]; then
+      [ ! -L "$work/candidate.ini" ] && [[ "${VDM_PHP_INI_TARGET:-}" == /* &&
+        "$VDM_PHP_INI_TARGET" != *'..'* && "$VDM_PHP_INI_TARGET" != *[!a-zA-Z0-9_./-]* ]] || exit 1
+      ini_host=$(joomlaWebHostPath "$work/candidate.ini") || exit 1
+      account_options+=(--volume "$ini_host:$VDM_PHP_INI_TARGET:ro")
+    fi
     bytes=$(joomlaSiteJSON -er .fileBytes < "$prepared/metadata.json") && [[ "$bytes" =~ ^[0-9]+$ ]] || exit 1
     printf 'configuration\n' > "$work/import-stage" || exit 1
     joomlaPlaygroundConfigureImport "$prepared" "$original" "$VDM_DB_HOST" "$VDM_DB_DRIVER" \
@@ -13217,8 +13279,13 @@ function joomlaPlaygroundImportPackage() {
       tables=$(joomlaDatabaseTablesResolved) || exit 1
       [ -z "$tables" ] || { printf 'The destination database already contains tables.\n' >&2; exit 1; }
     fi
-    printf 'files\n' > "$work/import-stage" || exit 1
     : > "$work/import-writing" || exit 1
+    if [ "$mode" = replace ]; then
+      printf 'database-programs\n' > "$work/import-stage" || exit 1
+      joomlaPlaygroundClearDatabase "$work" programs || exit 1
+    fi
+    printf 'files\n' > "$work/import-stage" || exit 1
+    helpers_started=true
     joomlaPlaygroundImportWebsite "$prepared/site" "$mount" "$image" "$relative" "$bytes" "$token" "$mode" || exit 1
     if [ "$mode" = replace ]; then
       printf 'database-clear\n' > "$work/import-stage" || exit 1
@@ -13239,7 +13306,7 @@ function joomlaPlaygroundImportPackage() {
       'checking whether the account is blocked' 'confirming Joomla administrator permission')
     printf 'administrator\n' > "$work/import-stage" || exit 1
     account_code=$(joomlaPlaygroundImportAccountCode) || exit 1
-    joomlaDatabaseCompose run --rm --no-deps -T --label traefik.enable=false --entrypoint php \
+    joomlaDatabaseCompose "${account_options[@]}" \
       "$app" -d register_argc_argv=1 -r "$account_code" -- "$root" "$site" < "$prepared/account.json" >/dev/null 2>&1 || {
       account_status=$?
       account_stage='starting PHP in the selected Joomla service'

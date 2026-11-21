@@ -492,26 +492,38 @@ shared_import_standins() {
   joomlaPlaygroundImportWebsite() {
     assert_file_contains "$1/configuration.php" "public \$host = 'db';"
     printf 'files:%s\n' "$7" >> "$SANDBOX/import-order"
+    return "${fixture_files_status:-0}"
   }
   joomlaDatabaseClient() {
+    local sql
+    sql=$(cat)
     if [ "$1" = query ]; then
-      cat > "$SANDBOX/reset-query"
-      # shellcheck disable=SC2016 # SQL identifier quoting, not shell substitution.
-      printf '%s\n' 'DROP TABLE IF EXISTS `old_only`;'
-    else
-      local sql
-      sql=$(cat)
-      if [[ "$sql" == 'SET FOREIGN_KEY_CHECKS=0;'* ]]; then
-        printf 'clear\n' >> "$SANDBOX/import-order"
-        printf '%s\n' "$sql" > "$SANDBOX/reset-statements"
-        return "${fixture_clear_status:-0}"
+      if [[ "$sql" == *information_schema.EVENTS* ]]; then
+        printf '%s\n' "$sql" > "$SANDBOX/programs-query"
+        # shellcheck disable=SC2016 # SQL identifier quoting.
+        printf '%s\n' 'DROP EVENT IF EXISTS `old_job`;' 'DROP PROCEDURE IF EXISTS `old_task`;'
+      else
+        printf '%s\n' "$sql" > "$SANDBOX/reset-query"
+        # shellcheck disable=SC2016 # SQL identifier quoting.
+        printf '%s\n' 'DROP TABLE IF EXISTS `old_only`;'
       fi
+    elif [[ "$sql" == *'SET FOREIGN_KEY_CHECKS=0;'* ]]; then
+      printf 'clear\n' >> "$SANDBOX/import-order"
+      printf '%s\n' "$sql" > "$SANDBOX/reset-statements"
+      return "${fixture_clear_status:-0}"
+    elif [[ "$sql" == *'DROP EVENT'* ]]; then
+      printf 'programs\n' >> "$SANDBOX/import-order"
+      printf '%s\n' "$sql" > "$SANDBOX/program-statements"
+      return "${fixture_program_status:-0}"
+    else
       printf 'sql\n' >> "$SANDBOX/import-order"
       return "${fixture_sql_status:-0}"
     fi
   }
   joomlaDatabaseCompose() {
-    [[ "$*" == 'run --rm --no-deps -T --label traefik.enable=false --entrypoint php '* ]] || return 91
+    [[ "$*" == 'run --rm --no-deps -T --label traefik.enable=false --label com.octoleo.octojoom.playground=1234567890abcdef1234567890abcdef --entrypoint php '* ]] || return 91
+    [ "$MSYS_NO_PATHCONV" = 1 ] && [ "$MSYS2_ARG_CONV_EXCL" = '*' ] || return 92
+    printf '%s\n' "$@" > "$SANDBOX/account-args"
     cat >/dev/null
     printf 'account\n' >> "$SANDBOX/import-order"
   }
@@ -527,9 +539,11 @@ shared_import_standins() {
   cp "$prepared/site/configuration.php" "$work/existing.php"
   run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace "$work/existing.php"
   assert_success
-  assert_equal "$(cat "$SANDBOX/import-order")" $'files:replace\nclear\nsql\naccount'
+  assert_equal "$(cat "$SANDBOX/import-order")" $'programs\nfiles:replace\nclear\nsql\naccount'
+  assert_file_contains "$SANDBOX/programs-query" 'WHERE EVENT_SCHEMA=DATABASE()'
+  assert_file_contains "$SANDBOX/programs-query" 'WHERE ROUTINE_SCHEMA=DATABASE()'
   assert_file_contains "$SANDBOX/reset-query" 'WHERE TABLE_SCHEMA=DATABASE()'
-  assert_equal "$(cat "$SANDBOX/reset-statements")" $'SET FOREIGN_KEY_CHECKS=0;\nDROP TABLE IF EXISTS `old_only`;\nSET FOREIGN_KEY_CHECKS=1;'
+  assert_equal "$(cat "$SANDBOX/reset-statements")" $'SET SESSION sql_mode=\'NO_BACKSLASH_ESCAPES\';\nSET FOREIGN_KEY_CHECKS=0;\nDROP TABLE IF EXISTS `old_only`;\nSET FOREIGN_KEY_CHECKS=1;'
   assert_file_exists "$work/import-writing"
   assert_equal "$(cat "$work/import-stage")" administrator
   refute_command '^docker .* (up|create|start|restart|down)( |$)'
@@ -551,13 +565,84 @@ shared_import_standins() {
   fixture_clear_status=1
   run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace "$work/existing.php"
   assert_failure
-  assert_equal "$(cat "$SANDBOX/import-order")" $'files:replace\nclear'
+  assert_equal "$(cat "$SANDBOX/import-order")" $'programs\nfiles:replace\nclear'
   assert_equal "$(cat "$work/import-stage")" database-clear
   : > "$SANDBOX/import-order"
   fixture_clear_status=0 fixture_sql_status=1
   run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace "$work/existing.php"
   assert_failure
   assert_output_contains 'database import failed'
-  assert_equal "$(cat "$SANDBOX/import-order")" $'files:replace\nclear\nsql'
+  assert_equal "$(cat "$SANDBOX/import-order")" $'programs\nfiles:replace\nclear\nsql'
   assert_equal "$(cat "$work/import-stage")" database-import
+}
+
+@test "failed file copy cannot import SQL and removes only operation-owned helper containers" {
+  shared_import_standins
+  fixture_files_status=1
+  docker() {
+    case "$1 $2" in
+      'ps -aq')
+        [ "$3" = --filter ] && [ "$4" = label=com.octoleo.octojoom.playground=1234567890abcdef1234567890abcdef ] || return 94
+        printf 'owned-helper\n';;
+      'rm -f')
+        [ "$3" = owned-helper ] || return 95
+        printf '%s\n' "$3" >> "$SANDBOX/removed-helpers";;
+      *) return 96;;
+    esac
+  }
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount fresh
+  assert_failure
+  assert_equal "$(cat "$SANDBOX/import-order")" files:fresh
+  assert_equal "$(cat "$SANDBOX/removed-helpers")" owned-helper
+  assert_equal "$(cat "$work/import-stage")" files
+  assert_file_exists "$work/import-writing"
+  refute_file_exists "$SANDBOX/account-args"
+}
+
+@test "old schema program removal must succeed before website files are replaced" {
+  shared_import_standins
+  fixture_program_status=1
+  cp "$prepared/site/configuration.php" "$work/existing.php"
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace "$work/existing.php"
+  assert_failure
+  assert_equal "$(cat "$SANDBOX/import-order")" programs
+  assert_equal "$(cat "$work/import-stage")" database-programs
+  assert_file_exists "$work/import-writing"
+  refute_file_exists "$SANDBOX/reset-query"
+}
+
+@test "administrator one-shot uses the prepared PHP settings without publishing the new INI" {
+  shared_import_standins
+  printf 'memory_limit=768M\n' > "$work/candidate.ini"
+  local VDM_PHP_INI_TARGET=/usr/local/etc/php/conf.d/zz-octojoom.ini
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount fresh
+  assert_success
+  assert_file_contains "$SANDBOX/account-args" --volume
+  assert_file_contains "$SANDBOX/account-args" "$(joomlaWebHostPath "$work/candidate.ini"):$VDM_PHP_INI_TARGET:ro"
+  assert_file_contains "$work/candidate.ini" 'memory_limit=768M'
+}
+
+@test "database reset retains literal identifier bytes and confines its SQL mode to the reset session" {
+  local VDM_DB_ENGINE=mysql scope statements
+  mkdir -p "$SANDBOX/reset"
+  # Model the native client's --raw rows with names containing a backtick,
+  # backslash and newline. The helper must not split, decode or shell-evaluate them.
+  # shellcheck disable=SC2016 # SQL names are literal test data.
+  printf 'DROP TABLE IF EXISTS `old``quote\\name\nnext`;\n' > "$SANDBOX/raw-identifiers"
+  joomlaDatabaseClient() {
+    if [ "$1" = query ]; then
+      cat > "$SANDBOX/object-query"
+      cat "$SANDBOX/raw-identifiers"
+    else cat > "$SANDBOX/object-statements"; fi
+  }
+  for scope in programs tables; do
+    run joomlaPlaygroundClearDatabase "$SANDBOX/reset" "$scope"
+    assert_success
+    statements=$(cat "$SANDBOX/object-statements")
+    [[ "$statements" == "SET SESSION sql_mode='NO_BACKSLASH_ESCAPES';"$'\n'* ]]
+    [[ "$statements" == *"$(cat "$SANDBOX/raw-identifiers")"* ]]
+    assert_file_contains "$SANDBOX/object-query" 'DATABASE()'
+    assert_file_contains "$SANDBOX/object-query" "REPLACE("
+    refute_file_contains "$SANDBOX/object-statements" 'SET GLOBAL'
+  done
 }
