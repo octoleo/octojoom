@@ -13868,6 +13868,10 @@ function joomlaPlaygroundReplaceSite() {
       root=$(joomlaSiteJSON -er .root < "$work/services.json") && image=$(joomlaSiteJSON -er .image < "$work/services.json") &&
       project=$(joomlaSiteJSON -er .project < "$work/services.json") || exit 1
     kind=$(joomlaSiteJSON -er .type < "$work/web/mount.json") && source=$(joomlaSiteJSON -er .source < "$work/web/mount.json") || exit 1
+    if [ "$kind" = bind ] && { [[ "$work/" == "$source/"* || "$prepared/" == "$source/"* ||
+      "$directory/" == "$source/"* || "$old_env" == "$source/"* ]]; }; then
+      printf 'The website data mount overlaps its import inputs or deployment configuration.\n' >&2; exit 1
+    fi
     [ "$kind" != bind ] || source=$(joomlaWebHostPath "$source") || exit 1
     mount="type=$kind,src=$source,dst=/octojoom-joomla"
     joomlaDatabaseCopyConfiguration "$site" "$work/target-configuration.php" &&
@@ -13969,8 +13973,10 @@ function joomlaPlaygroundDeployCurrent() {
     if [ -z "$result" ]; then
       [ "$status" -ne 0 ] || status=1
       result=$(joomlaSiteJSON -nc --arg site "$site" --arg stage "$stage" '
-        {target:"current",status:"failed",site:$site,$stage,running:null,destructive_started:false,backup:null,
-          reason:(if $stage=="package" then "The package could not be prepared for import." else "The import could not start; inspect the diagnostic." end)}') || exit 1
+        {target:"current",status:"failed",site:$site,$stage,running:null,
+          destructive_started:(if $stage=="package" then false else null end),backup:null,
+          reason:(if $stage=="package" then "The package could not be prepared for import."
+            else "The import result is unavailable. Inspect the selected site before restarting; the import may be partial." end)}') || exit 1
     fi
     if [ "$(joomlaSiteJSON -r .status <<< "$result")" != deployed ] && [ "$status" -eq 0 ]; then status=1; fi
     if [ "$format" = json ]; then

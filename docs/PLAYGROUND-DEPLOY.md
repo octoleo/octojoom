@@ -205,7 +205,7 @@ The command returns a nonzero exit status for a failed import.
 | `target`, `site` | `current` and the selected managed hostname |
 | `status` | `deployed` on success or `failed` when the operation did not complete |
 | `stage`, `reason` | The completed or failed step and its explanation |
-| `destructive_started` | Whether writes that can replace existing website or database data began |
+| `destructive_started` | Whether writes that can replace existing data began; `null` means the operation result could not be read and the site must be inspected |
 | `enabled` | The site's enabled registration |
 | `running` | The observed running state, or `null` if it could not be established |
 | `backup` | The verified normal backup archive path, or `null` when none was created |
