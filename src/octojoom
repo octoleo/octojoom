@@ -12035,7 +12035,7 @@ def validate_stage_paths(entries):
 
 def staged_file(directory, entry):
     name = entry.filename
-    if not directory or (name not in ("database.sql", "database.ndjson") and not name.startswith("site/")):
+    if not directory or (name != "database.sql" and not name.startswith("site/")):
         return contextlib.nullcontext()
     path = os.path.join(directory, *name.rstrip("/").split("/"))
     if entry.is_dir():
@@ -12097,8 +12097,7 @@ def inspect(path, directory, preview_digest):
                         "Invalid inspected archive fingerprint.")
                 validate_stage_paths(archive.infolist())
                 settings = private_settings(configuration, database)
-                required_space = result["fileBytes"] + result["databaseBytes"] + files["database.ndjson"].file_size
-                require(shutil.disk_usage(os.path.dirname(directory)).free >= required_space,
+                require(shutil.disk_usage(os.path.dirname(directory)).free >= result["fileBytes"] + result["databaseBytes"],
                         "Insufficient space to stage the website and database dump.")
                 os.umask(0o077)
                 os.mkdir(directory, 0o700)
@@ -12536,13 +12535,8 @@ function joomlaPlaygroundFreshAccountCode() {
       if (!$account->id) {
           throw new RuntimeException();
       }
-      if ($account->block) {
-          $stage = 31;
-          throw new RuntimeException();
-      }
       $stage = 26;
-      if (!$account->authorise('core.login.admin')) {
-          $stage = 32;
+      if ($account->block || !$account->authorise('core.login.admin')) {
           throw new RuntimeException();
       }
       $stage = 27;
@@ -12713,164 +12707,6 @@ function joomlaPlaygroundWaitFresh() {
 }
 
 # shellcheck disable=SC2016 # Dollar expressions belong to jq or the container.
-# The Playground exporter represents scalar bytes as X'...'. MySQL interprets
-# a bare hex literal assigned to a numeric field as a number; MariaDB treats
-# the same X'...' as a string. Only adapt canonical Playground row tuples.
-function joomlaPlaygroundMySQLImportStream() {
-  local sql="$1"
-  case "${OSTYPE:-}:$sql" in msys*:/*|cygwin*:/*) sql=$(cygpath -am -- "$sql") || return 1;; esac
-  python3 -I -B - "$sql" <<'PYTHON'
-import json
-from pathlib import Path
-import re
-import sys
-
-# The exporter bounds an individual statement to 4 MiB. JSON escaping can
-# expand a byte to six characters, including control bytes in quoted names.
-MAX_STATEMENT = 4 * 1024 * 1024
-MAX_RECORD = 6 * MAX_STATEMENT + 4
-IDENT = rb"`(?:[^`]|``)*`"
-CREATE = re.compile(rb"CREATE TABLE (" + IDENT + rb")\s*\(")
-INSERT = re.compile(rb"INSERT INTO (" + IDENT + rb") \((" + IDENT + rb"(?:," + IDENT + rb")*)\) VALUES ")
-IDENTIFIER = re.compile(IDENT)
-# Skip quoted strings and comments whole when locating top-level definitions.
-TOKENS = re.compile(IDENT + rb"""|'(?:''|\\.|[^'\\])*'|"(?:""|\\.|[^"\\])*"|/\*.*?\*/|--(?=\s)[^\n]*|\#[^\n]*|[a-zA-Z0-9_]+|[^\s]""", re.S)
-NUMERIC = set(b"TINYINT SMALLINT MEDIUMINT INT INTEGER BIGINT FLOAT DOUBLE REAL DECIMAL NUMERIC YEAR".split())
-VAR = rb"@__joomengine_export_[0-9]+"
-CELL = re.compile(rb"NULL|X'([0-9a-fA-F]*)'|(" + VAR + rb")|UNHEX\(" + VAR +
-                  rb"\)|ST_GeomFromWKB\((?:X'[0-9a-fA-F]*'|" + VAR + rb"),(?:[0-9]+|" + VAR + rb")\)")
-
-
-def column_types(statement, start):
-    types = {}
-    depth = 1
-    field = None
-    at_start = True
-    for match in TOKENS.finditer(statement, start):
-        token = match[0]
-        if token.startswith((b"/*", b"--", b"#")):
-            continue
-        if depth == 1 and field is not None:
-            types[field] = token.upper()
-            field = None
-        if token == b"(":
-            depth += 1
-        elif token == b")":
-            depth -= 1
-            if not depth:
-                break
-        elif depth == 1 and token == b",":
-            at_start = True
-            continue
-        elif depth == 1 and at_start and token.startswith(b"`"):
-            field = token
-        at_start = False
-    return types
-
-
-def mysql_values(statement, schemas):
-    create = CREATE.match(statement)
-    if create:
-        schemas[create[1]] = column_types(statement, create.end())
-        return statement
-    insert = INSERT.match(statement)
-    if not insert or insert[1] not in schemas:
-        return statement
-    types = [schemas[insert[1]].get(name) for name in IDENTIFIER.findall(insert[2])]
-    if not any(kind in NUMERIC or kind == b"JSON" for kind in types):
-        return statement
-    # Match the complete VALUES grammar before committing any edits. A user
-    # query, DDL, wrapper expression or non-exporter INSERT passes unchanged.
-    edits = []
-    pos = insert.end()
-    while statement[pos:pos+1] == b"(":
-        pos += 1
-        for index, kind in enumerate(types):
-            if index:
-                if statement[pos:pos+1] != b",":
-                    return statement
-                pos += 1
-            cell = CELL.match(statement, pos)
-            if cell is None:
-                return statement
-            value = None
-            if cell[1] is not None and (kind in NUMERIC or kind == b"JSON"):
-                value = b"UNHEX('" + cell[1] + b"')"
-            elif kind == b"JSON" and cell[2] is not None:
-                # Large values arrive in binary session variables.
-                value = cell[2]
-            if value is not None:
-                if kind == b"JSON":
-                    value = b"CONVERT(" + value + b" USING utf8mb4)"
-                edits.append((pos, cell.end(), value))
-            pos = cell.end()
-        if statement[pos:pos+1] != b")":
-            return statement
-        pos += 1
-        if statement[pos:pos+2] != b",(":
-            break
-        pos += 1
-    if statement[pos:] != b";" or not edits:
-        return statement
-    result = bytearray()
-    start = 0
-    for left, right, value in edits:
-        result.extend(statement[start:left])
-        result.extend(value)
-        start = right
-    result.extend(statement[start:])
-    return result
-
-
-def next_sql_line(source, output):
-    while True:
-        line = source.readline(MAX_STATEMENT + 4)
-        if len(line) > MAX_STATEMENT + 3:
-            raise ValueError()
-        stripped = line.lstrip()
-        if line and (not stripped or stripped.startswith((b"-- ", b"--\t", b"#"))):
-            output.write(line)
-        else:
-            return line
-
-
-def import_stream(path, output):
-    # The native SQL supplies every output byte. Match its records to the
-    # companion NDJSON to distinguish row INSERTs from text inside triggers,
-    # DDL or quoted defaults, including statements that span multiple lines.
-    schemas = {}
-    with path.open("rb") as source, path.with_name("database.ndjson").open("rb") as records:
-        while True:
-            record = records.readline(MAX_RECORD + 1)
-            if not record:
-                break
-            if len(record) > MAX_RECORD:
-                raise ValueError()
-            value = json.loads(record)
-            if not isinstance(value, str) or not value:
-                raise ValueError()
-            expected = value.encode("utf-8")
-            if len(expected) > MAX_STATEMENT:
-                raise ValueError()
-            if not expected.endswith(b";"):
-                expected += b";"
-            line = next_sql_line(source, output)
-            native = line + source.read(max(0, len(expected) - len(line)))
-            if native[:len(expected)] != expected or native[len(expected):].strip():
-                raise ValueError()
-            output.write(mysql_values(native[:len(expected)], schemas))
-            output.write(native[len(expected):])
-        if next_sql_line(source, output):
-            raise ValueError()
-
-try:
-    import_stream(Path(sys.argv[1]), sys.stdout.buffer)
-except (ValueError, OSError, RecursionError):
-    sys.exit("The native Playground SQL could not be matched to its statement records for MySQL.")
-PYTHON
-}
-
-
 function joomlaPlaygroundProvisionFresh() {
   (
     set +x
@@ -12933,28 +12769,19 @@ function joomlaPlaygroundProvisionFresh() {
     "$ready" || { printf 'The new database did not accept the configured site credentials.\n' >&2; exit 1; }
     tables=$(joomlaDatabaseTablesResolved) || exit 1
     [ -z "$tables" ] || { printf 'The destination database already contains tables.\n' >&2; exit 1; }
-    local import_status=0
-    local -a import_client=(joomlaDatabaseClient sql --local-infile=0 --max-allowed-packet=1G)
-    if [ "$engine" = mysql ]; then
-      (
-        set -o pipefail
-        joomlaPlaygroundMySQLImportStream "$prepared/database.sql" | "${import_client[@]}"
-      ) >/dev/null || import_status=$?
-    else
-      "${import_client[@]}" < "$prepared/database.sql" >/dev/null || import_status=$?
-    fi
-    if [ "$import_status" -ne 0 ]; then printf 'The Playground database import failed.\n' >&2; exit 1; fi
+    joomlaDatabaseClient sql --local-infile=0 --max-allowed-packet=1G < "$prepared/database.sql" >/dev/null || {
+      printf 'The Playground database import failed.\n' >&2; exit 1;
+    }
     local account_code account_status account_stage
     local -a account_stages=('reading the confirmed settings' 'loading the Joomla framework' 'reading the application secret'
-      'initializing Joomla CLI services' 'finding the imported account' 'evaluating Joomla administrator access'
-      'reconciling the account fields' 'verifying the password' 'applying the account update' 'saving the account'
-      'checking whether the account is blocked' 'confirming Joomla administrator permission')
+      'initializing Joomla CLI services' 'finding the imported account' 'resolving administrator privileges'
+      'reconciling the account fields' 'verifying the password' 'applying the account update' 'saving the account')
     account_code=$(joomlaPlaygroundFreshAccountCode) || exit 1
     joomlaDatabaseCompose run --rm --no-deps -T --entrypoint php \
       "$app" -d register_argc_argv=1 -r "$account_code" -- "$root" "$site" < "$prepared/account.json" >/dev/null 2>&1 || {
       account_status=$?
       account_stage='starting PHP in the selected Joomla service'
-      if ((account_status >= 21 && account_status <= 32)); then account_stage="${account_stages[account_status-21]}"; fi
+      if ((account_status >= 21 && account_status <= 30)); then account_stage="${account_stages[account_status-21]}"; fi
       printf 'Could not apply the confirmed Joomla administrator while %s (status %d).\n' "$account_stage" "$account_status" >&2
       exit 1
     }
