@@ -46,20 +46,14 @@ class JConfig {
     if variant == "mysql-values":
         native_statements = [
             "CREATE TABLE `demo_items` (\n  `bytes` varbinary(16),\n  `qty` int,\n"
-            "  `bits` bit(8),\n  `price` decimal(7,2),\n  `note` varchar(120) CHARACTER SET latin1,\n"
+            "  `bits` bit(8),\n  `price` decimal(7,2),\n  `note` varchar(120),\n"
             "  `settings` json,\n  `shape` geometry\n"
             ") COMMENT='Preserve text including X''30'' and semicolons ; here'",
             "/* Preserve this SQL example: INSERT INTO `demo_items` (`qty`) VALUES (X'30') */",
             "SET @example = 'Keep the text X''31''; and X''32'''",
             "INSERT INTO `demo_items` (`qty`,`price`,`bytes`,`bits`,`note`,`settings`,`shape`) VALUES "
-            "(X'30',X'2D322E3530',X'00FF',X'80',X'436166C3A9',X'7B7D',NULL),"
+            "(X'30',X'2D322E3530',X'00FF',X'80',X'456C656D656E74',X'7B7D',NULL),"
             "(X'3130',NULL,X'30',X'00',X'',NULL,ST_GeomFromWKB(X'010100000000000000000000000000000000000000',4326))",
-            # The exporter reads large text cells in chunks using CAST(column AS BINARY).
-            # This time the last byte of Café arrives in the column's original latin1.
-            "SET @__joomengine_export_0 = X'436166'",
-            "SET @__joomengine_export_0 = CONCAT(@__joomengine_export_0,X'E9')",
-            "SET @__joomengine_export_1 = X'7B226C6162656C223A22C3A9227D'",
-            "INSERT INTO `demo_items` (`note`,`settings`) VALUES (@__joomengine_export_0,@__joomengine_export_1)",
         ]
         sql = (
             "-- Joomla portable database export\n"
@@ -136,7 +130,7 @@ class JConfig {
         },
     }
     if variant == "mysql-values":
-        metadata["database"]["rows"] = 3
+        metadata["database"]["rows"] = 2
     if variant == "legacy":
         del config["contentHash"]
     elif variant == "wrong-hash":

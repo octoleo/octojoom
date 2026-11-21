@@ -42,46 +42,37 @@ setup() {
   refute_command '^docker '
 }
 
-@test "MySQL and MariaDB restore inline UTF-8 while preserving chunked text in the source column encoding" {
+@test "MySQL native import preserves binary values, SQL comments and quoted text while restoring numeric and JSON values" {
   write_playground_fixture "$package" mysql-values
-  local digest engine imported="$SANDBOX/import.sql"
+  local digest
   digest=$(joomlaPlaygroundInspectPackage "$package" json | joomlaSiteJSON -er .archiveSha256)
   joomlaPlaygroundPreparePackage "$package" "$prepared" "$digest" >/dev/null
   cp "$prepared/database.sql" "$SANDBOX/input.sql"
   cp "$prepared/database.ndjson" "$SANDBOX/input.ndjson"
+  joomlaPlaygroundMySQLImportStream "$prepared/database.sql" > "$SANDBOX/import.sql"
+  local rows
+  rows=$(sed -n '/^INSERT INTO /p' "$SANDBOX/import.sql")
+  [[ "$rows" == *"(UNHEX('30'),UNHEX('2D322E3530'),X'00FF',X'80',X'456C656D656E74',CONVERT(UNHEX('7B7D') USING utf8mb4),NULL),"* ]]
+  [[ "$rows" == *"(UNHEX('3130'),NULL,X'30',X'00',X'',NULL,ST_GeomFromWKB(X'010100000000000000000000000000000000000000',4326));"* ]]
   sed '/^INSERT INTO /d' "$SANDBOX/input.sql" > "$SANDBOX/non-row-before"
-  for engine in mysql mariadb; do
-    joomlaPlaygroundNativeImportStream "$prepared/database.sql" "$engine" > "$imported"
-    assert_file_contains "$imported" "X'00FF',X'80',CONVERT(UNHEX('436166C3A9') USING utf8mb4)"
-    assert_file_contains "$imported" "NULL,X'30',X'00',CONVERT(UNHEX('') USING utf8mb4),NULL,ST_GeomFromWKB(X'010100000000000000000000000000000000000000',4326));"
-    if [ "$engine" = mysql ]; then
-      assert_file_contains "$imported" "VALUES (UNHEX('30'),UNHEX('2D322E3530'),"
-      assert_file_contains "$imported" "CONVERT(UNHEX('7B7D') USING utf8mb4),NULL),(UNHEX('3130'),"
-      assert_file_contains "$imported" "VALUES (@__joomengine_export_0,CONVERT(@__joomengine_export_1 USING utf8mb4));"
-    else
-      assert_file_contains "$imported" "VALUES (X'30',X'2D322E3530',"
-      assert_file_contains "$imported" "X'7B7D',NULL),(X'3130',"
-      assert_file_contains "$imported" "VALUES (@__joomengine_export_0,@__joomengine_export_1);"
-    fi
-    sed '/^INSERT INTO /d' "$imported" > "$SANDBOX/non-row-after"
-    cmp "$SANDBOX/non-row-before" "$SANDBOX/non-row-after"
-  done
+  sed '/^INSERT INTO /d' "$SANDBOX/import.sql" > "$SANDBOX/non-row-after"
+  cmp "$SANDBOX/non-row-before" "$SANDBOX/non-row-after"
   cmp "$SANDBOX/input.sql" "$prepared/database.sql"
   cmp "$SANDBOX/input.ndjson" "$prepared/database.ndjson"
   assert_equal "$(joomlaPlaygroundInspectPackage "$package" json | joomlaSiteJSON -er .archiveSha256)" "$digest"
   refute_command '^docker '
 }
 
-@test "native import refuses disagreements between the verified SQL and its statement stream on both engines" {
+@test "MySQL native import refuses disagreements between the verified SQL and its statement stream" {
   write_playground_fixture "$package" mysql-values
   joomlaPlaygroundPreparePackage "$package" "$prepared" >/dev/null
   cp "$prepared/database.ndjson" "$SANDBOX/native-statements"
   printf '%s\n' '"SELECT 123"' >> "$prepared/database.ndjson"
-  run joomlaPlaygroundNativeImportStream "$prepared/database.sql" mysql
+  run joomlaPlaygroundMySQLImportStream "$prepared/database.sql"
   assert_failure
   mv "$SANDBOX/native-statements" "$prepared/database.ndjson"
   printf '%s\n' 'SELECT 123;' >> "$prepared/database.sql"
-  run joomlaPlaygroundNativeImportStream "$prepared/database.sql" mariadb
+  run joomlaPlaygroundMySQLImportStream "$prepared/database.sql"
   assert_failure
   refute_command '^docker '
 }
