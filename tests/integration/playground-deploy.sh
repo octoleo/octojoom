@@ -333,7 +333,7 @@ if deploy failed "$failed" "$work/failing.zip" false "${apache_options[@]}" 2>"$
   echo 'Invalid SQL was accepted.' >&2; exit 1
 fi
 jq -e '.success==false' "$work/result" >/dev/null
-grep -q 'database sql failed' "$work/failure.log" || { echo 'Failure did not reach the native SQL import.' >&2; exit 1; }
+grep -Fq 'The Playground database import failed.' "$work/failure.log" || { echo 'Failure did not reach the native SQL import.' >&2; exit 1; }
 [ ! -e "$sites/failed.$domain" ]
 [ ! -e "$OCTOJOOM_HOME/Projects/$failed" ]
 if docker container inspect "joomla$failed" >/dev/null 2>&1 || docker container inspect "mariadb$failed" >/dev/null 2>&1; then
@@ -644,7 +644,7 @@ if replace_site new "$work/failing.zip" "${without_backup[@]}" 2> "$work/failed-
   echo 'An in-place SQL failure was reported as successful.' >&2; exit 1
 fi
 jq -e '.success==false and .data.destructive_started==true and .data.backup==null' "$work/result" >/dev/null
-grep -q 'database sql failed' "$work/failed-in-place.log"
+grep -Fq 'The Playground database import failed.' "$work/failed-in-place.log"
 [ -z "$(destination new ps -q --status running "joomla$first")" ]
 [ "$backup_listing" = "$(find "${backup%/*}" -maxdepth 1 -type f -print | sort)" ]
 resource_inventory > "$work/current-resources"
