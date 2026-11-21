@@ -128,11 +128,8 @@ or ordinary local Docker volumes for its website and database. The web root
 can be a subdirectory of `/var/www/html`.
 
 The Docker Engine must support an internal bridge with IPv4 gateway mode
-`isolated`, introduced in Docker Engine 28.0. Octojoom uses it during staging,
-while the original site is still in its previous state. See the
-[Docker Engine 28.0 release notes](https://docs.docker.com/engine/release-notes/28/#2800).
-
-Private verification runs Joomla, its database and,
+`isolated`. Octojoom uses it during staging, while the original site is still
+in its previous state. Private verification runs Joomla, its database and,
 for PHP-FPM, its Nginx service. Custom service commands, extra mounts or a
 required dependency outside those services can prevent Octojoom from isolating
 the site. Octojoom rejects such configurations before cutover.
