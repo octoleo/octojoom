@@ -42,24 +42,6 @@ inspect_cli() {
   jq -e '.payloadChecksum == "absent" and .fileCount == 7' <<<"$output"
 }
 
-@test "playground CLI preserves typographic spaces and rejects line separators" {
-  local OCTOJOOM_HOME="$SANDBOX/uninitialized" prepared="$SANDBOX/prepared"
-  fixture unicode-spaces
-  inspect_cli "$package"
-  assert_success
-  jq -e '.data | .siteName == "Maison\u00a0Neuve" and .administratorUsername == "Marie\u00a0Anne"
-    and .payloadChecksum == "verified"' <<< "$output"
-  refute_output_contains password
-  joomlaPlaygroundPreparePackage "$package" "$prepared" >/dev/null
-  jq -e '.admin.name == "Marie\u202fAnne" and .admin.password == "fixture\u00a0password"' < "$prepared/metadata.json"
-  (cd "$prepared/site/media" && python3 -I -B -c 'from pathlib import Path; assert Path("fiche\u202fproduit.txt").is_file()')
-
-  fixture line-separator
-  inspect_cli "$package"
-  assert_failure
-  [[ "${stderr:-}" == *'Invalid Joomla site name'* ]]
-}
-
 @test "playground inspect reports the installed Joomla manifest PHP minimum when supplied" {
   fixture minimum-php
   run joomlaPlaygroundInspectPackage "$package" json

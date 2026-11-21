@@ -11925,13 +11925,6 @@ def matches(pattern, value):
     return isinstance(value, str) and re.fullmatch(pattern, value, flags=re.ASCII) is not None
 
 
-def printable_text(value):
-    # Python treats typographic spaces as non-printable. Keep these ordinary
-    # characters without allowing line breaks, controls or formatting codes.
-    return isinstance(value, str) and (value.isprintable() or all(
-        char.isprintable() or unicodedata.category(char) == "Zs" for char in value))
-
-
 def index_members(archive):
     entries = archive.infolist()
     require(len(entries) <= MAX_ENTRIES, "Too many entries in the Playground ZIP.")
@@ -11945,7 +11938,7 @@ def index_members(archive):
         path = name[:-1] if name.endswith("/") else name
         parts = path.split("/")
         require(name == entry.filename and len(name.encode("utf-8")) <= 4096
-                and printable_text(name) and "\\" not in name and ":" not in name
+                and name.isprintable() and "\\" not in name and ":" not in name
                 and all(part not in ("", ".", "..") for part in parts),
                 "Unsafe path in the Playground ZIP.")
         require(path not in paths, "Duplicate path in the Playground ZIP.")
@@ -12008,10 +12001,10 @@ def read_metadata(archive, files):
     preferred = configuration.get("phpVersion", ".".join(php.split(".")[:2]))
     require(matches(r"[0-9]+\.[0-9]+", preferred), "Invalid preferred PHP series.")
     title = metadata.get("siteName") or configuration.get("siteName") or "Imported Joomla site"
-    require(printable_text(title) and len(title) <= 512, "Invalid Joomla site name.")
+    require(isinstance(title, str) and title.isprintable() and len(title) <= 512, "Invalid Joomla site name.")
     admin = configuration.get("admin")
     username = admin.get("username") if isinstance(admin, dict) else None
-    if not printable_text(username) or len(username) > 150:
+    if not isinstance(username, str) or not username.isprintable() or len(username) > 150:
         username = None
     database = metadata.get("database")
     require(isinstance(database, dict) and database.get("format") == "mysql", "Unsupported Playground database format.")
@@ -12042,7 +12035,8 @@ def read_metadata(archive, files):
 def private_settings(configuration, database):
     def field(mapping, key):
         value = mapping.get(key, "")
-        require(printable_text(value), "Invalid text in the package's deployment settings.")
+        require(isinstance(value, str) and (not value or value.isprintable()),
+                "Invalid text in the package's deployment settings.")
         return value
 
     admin = configuration.get("admin") or {}
