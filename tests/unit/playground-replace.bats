@@ -113,113 +113,95 @@ record_yes_no_dialogs() {
   refute_command '^docker '
 }
 
-@test "replacement revalidates the previewed archive before invoking the site transaction" {
+@test "replacement revalidates the previewed archive before invoking the importer" {
   OCTOJOOM_OUTPUT=json
   local wrong_digest
   printf -v wrong_digest '%064d' 0
-  joomlaPlaygroundReplaceSite() { touch "$SANDBOX/transaction-started"; }
+  joomlaPlaygroundReplaceSite() { touch "$SANDBOX/import-started"; }
   run --separate-stderr joomlaPlaygroundDeployCurrent "$package" "$site" true "$wrong_digest"
   assert_failure
   joomlaSiteJSON -e '.status=="failed" and .stage=="package" and .target=="current" and
-    .outcome=="not_committed" and .committed==false and .running==null and .recovery==null' <<< "$output"
-  refute_file_exists "$SANDBOX/transaction-started"
+    .destructive_started==false and .running==null and .backup==null' <<< "$output"
+  refute_file_exists "$SANDBOX/import-started"
   refute_command '^docker '
 }
 
-# Stub only the transaction; exercise package preparation, receipt formatting
+# Stub only the importer; exercise package preparation, receipt formatting
 # and both entry points without changing service state.
 # shellcheck disable=SC2016
-record_outcome() {
-  fixture_outcome="$1" fixture_status="$2"
+record_import_result() {
+  fixture_result="$1" fixture_exit="$2"
   joomlaPlaygroundReplaceSite() {
-    printf '%s\n' 'private transaction diagnostic' >&2
-    joomlaSiteJSON -nc --arg site "$2" --arg outcome "$fixture_outcome" \
-      --arg recovery "$SANDBOX/private recovery" --arg backup "$SANDBOX/verified backup.tar.gz" '
-      {target:"current",$site,$outcome,committed:($outcome|startswith("committed")),
-        status:(if $outcome=="committed" then "deployed" elif $outcome=="committed_with_followup" then $outcome else "failed" end),
-        stage:"cleanup",reason:"Review the cleanup receipt.",running:null,$backup,$recovery}' > "$1/result.json"
-    return "$fixture_status"
+    printf '%s\n' 'private import diagnostic' >&2
+    joomlaSiteJSON -nc --arg site "$2" --arg status "$fixture_result" \
+      --arg backup "$SANDBOX/verified backup.tar.gz" '
+      {target:"current",$site,$status,destructive_started:true,enabled:"enabled",
+        stage:"database-import",reason:"Fixture import report.",running:false,$backup}' > "$1/result.json"
+    return "$fixture_exit"
   }
 }
 
 # shellcheck disable=SC2016
-@test "replacement CLI distinguishes committed follow-up and incomplete recovery and preserves their paths" {
-  local state committed
-  for state in committed_with_followup recovery_incomplete; do
-    committed=false
-    [ "$state" != committed_with_followup ] || committed=true
-    record_outcome "$state" 7
-    run --separate-stderr replace_cli --container "$site" --confirm yes
-    assert_status 7
-    joomlaSiteJSON -e --arg outcome "$state" --argjson committed "$committed" \
-      --arg backup "$SANDBOX/verified backup.tar.gz" --arg recovery "$SANDBOX/private recovery" '
-      .success==false and .exit_status==7 and .data.outcome==$outcome and .data.committed==$committed and
-      .data.status==(if $committed then $outcome else "failed" end) and .data.stage=="cleanup" and
-      .data.reason=="Review the cleanup receipt." and .data.running==null and .data.backup==$backup and .data.recovery==$recovery and
-      (.data.archiveSha256|length)==64 and
-      (.error|contains(if $committed then "was committed" else "recovery is incomplete" end))' <<< "$output"
-    refute_output_contains 'private transaction diagnostic'
-  done
+@test "replacement CLI reports failed writes and the verified archive without exposing internal diagnostics" {
+  record_import_result failed 7
+  run --separate-stderr replace_cli --container "$site" --confirm yes
+  assert_status 7
+  joomlaSiteJSON -e --arg backup "$SANDBOX/verified backup.tar.gz" '
+    .success==false and .exit_status==7 and .data.status=="failed" and .data.destructive_started and
+    .data.stage=="database-import" and .data.reason=="Fixture import report." and
+    .data.running==false and .data.backup==$backup and (.data.archiveSha256|length)==64' <<< "$output"
+  refute_output_contains 'private import diagnostic'
+}
 
-  record_outcome committed_with_followup 0
+@test "a failed import receipt cannot be presented as success when its worker returns zero" {
+  record_import_result failed 0
   run --separate-stderr replace_cli --container "$site" --confirm yes
   assert_status 1
-  joomlaSiteJSON -e '.success==false and .exit_status==1 and .data.committed' <<< "$output"
+  joomlaSiteJSON -e '.success==false and .data.status=="failed"' <<< "$output"
+}
 
-  record_outcome committed 0
+@test "a successful replacement CLI preserves the public package summary" {
+  record_import_result deployed 0
   run --separate-stderr replace_cli --container "$site" --confirm yes
   assert_success
   joomlaSiteJSON -e '.success and .exit_status==0 and .error==null and
-    .data.status=="deployed" and .data.outcome=="committed" and .data.committed' <<< "$output"
+    .data.status=="deployed" and .data.site=="shop.example.test" and
+    (.data.archiveSha256|length)==64 and .data.databasePrefix=="demo_"' <<< "$output"
+  refute_output_contains 'private import diagnostic'
 }
 
-@test "replacement menu shows the public committed result and retained paths even if interrupted" {
-  record_outcome committed_with_followup 130
+@test "replacement menu reports an interrupted import and its verified backup" {
+  record_import_result failed 130
   answers "$package" current "$site" yes yes
   run showJoomlaPlayground
   assert_status 130
   assert_answers_used
-  assert_dialog "The replacement of $site was committed. Follow-up is required at stage cleanup."
-  assert_dialog 'The running state of the website is unconfirmed.'
-  assert_dialog 'Review the cleanup receipt.'
+  assert_dialog 'Fixture import report.'
   assert_dialog "$SANDBOX/verified backup.tar.gz"
-  assert_dialog "$SANDBOX/private recovery"
-  refute_dialog 'private transaction diagnostic'
-  refute_dialog 'Playground deployment did not complete'
+  refute_dialog 'private import diagnostic'
 }
 
 # Bats fills stderr when run uses --separate-stderr.
 # shellcheck disable=SC2154
-@test "replacement text distinguishes incomplete recovery and keeps errors on stderr" {
-  record_outcome recovery_incomplete 1
+@test "replacement text sends failed import details to stderr" {
+  record_import_result failed 1
   run --separate-stderr joomlaPlaygroundDeployCurrent "$package" "$site" true
   assert_failure
   assert_equal "$output" ''
-  [[ "$stderr" == *"The replacement of $site was not committed. Automatic recovery is incomplete"* ]]
-  [[ "$stderr" == *"$SANDBOX/private recovery"* && "$stderr" == *"$SANDBOX/verified backup.tar.gz"* ]]
+  [[ "$stderr" == *'Fixture import report.'* && "$stderr" == *"$SANDBOX/verified backup.tar.gz"* ]]
 }
 
-# shellcheck disable=SC2016
-@test "replacement CLI checks the commit marker if a transaction receipt is missing or unreadable" {
-  local fixture_journal="$VDM_REPO_PATH/joomla/available/$site/.playground-replace.12345678" mode
-  mkdir "$fixture_journal"
-  printf '%s\n' "$SANDBOX/verified backup.tar.gz" > "$fixture_journal/verified-backup"
+@test "replacement CLI fails conservatively if the importer receipt is missing or invalid" {
+  local mode
   joomlaPlaygroundReplaceSite() {
-    printf '%s\n' "$fixture_journal" > "$1/transaction.path"
-    case "$mode" in
-      uncommitted) printf '{' > "$1/result.json";;
-      prepared) touch "$1/committed";;
-      journal) touch "$fixture_journal/committed"; printf '{}' > "$1/result.json";;
-    esac
+    [ "$mode" != invalid ] || printf '{' > "$1/result.json"
     return 1
   }
-  for mode in uncommitted prepared journal; do
+  for mode in missing invalid; do
     run --separate-stderr replace_cli --container "$site" --confirm yes
     assert_failure
-    joomlaSiteJSON -e --arg recovery "$fixture_journal" --arg mode "$mode" --arg backup "$SANDBOX/verified backup.tar.gz" '
-      .success==false and .data.stage=="report" and .data.recovery==$recovery and .data.backup==$backup and .data.running==null and
-      (if $mode=="uncommitted" then .data.committed==false and .data.outcome=="recovery_incomplete"
-       else .data.committed==true and .data.outcome=="committed_with_followup" end)' <<< "$output"
+    joomlaSiteJSON -e '.success==false and .data.status=="failed" and
+      .data.running==null and .data.backup==null' <<< "$output"
   done
 }
 
@@ -254,7 +236,7 @@ PHP
   assert_equal "$vdm_database_user" app_user
   assert_equal "$vdm_database_pass" private-new-db-password
 
-  run joomlaPlaygroundConfigureReplace "$prepared" "$original" mariadbshop mysqli \
+  run joomlaPlaygroundConfigureImport "$prepared" "$original" mariadbshop mysqli \
     "$vdm_database_name" "$vdm_database_user" "$vdm_database_pass" /var/www/html/public
   assert_success
   refute_output_contains private-
@@ -275,15 +257,14 @@ PHP
   refute_file_contains "$candidate" 'private-new-admin-password'
 }
 
-@test "candidate environment stores the confirmed administrator and database values privately" {
+@test "proposed environment keeps database identity and stores confirmed administrator values privately" {
   local shared="$VDM_REPO_PATH/joomla/.env" candidate="$SANDBOX/site.env" value
   cp "$shared" "$SANDBOX/shared.before"
   printf 'VDM_SHOP_DOCROOT="public"\nVDM_SHOP_DB_ROOT="private-db-root"\n' > "$candidate"
   joomlaPlaygroundPreparePackage "$package" "$prepared" >/dev/null
   local VDM_DB_NAME=old_db VDM_DB_USER=old_user VDM_DB_PASSWORD=private-old-db-password VDM_DB_DRIVER=mysqli
   parseCLI --non-interactive --site-name 'Replaced shop' --admin-user 'New owner' --admin-username administrator \
-    --admin-email owner@example.test --admin-password 'private-new-admin-password' \
-    --db-name shop_data --db-user shop_sql --db-password "private-\$site-password"
+    --admin-email owner@example.test --admin-password 'private-new-admin-password'
   joomlaPlaygroundConfirmReplaceSettings "$prepared"
   run joomlaPlaygroundReplaceEnv "$candidate" SHOP
   assert_success
@@ -301,13 +282,27 @@ PHP
   migrationReadEnvValue "$candidate" VDM_SHOP_JOOMLA_DB_PREFIX value
   assert_equal "$value" demo_
   migrationReadEnvValue "$candidate" VDM_SHOP_DB value
-  assert_equal "$value" shop_data
+  assert_equal "$value" old_db
   migrationReadEnvValue "$candidate" VDM_SHOP_DB_USER value
-  assert_equal "$value" shop_sql
+  assert_equal "$value" old_user
   migrationReadEnvValue "$candidate" VDM_SHOP_DB_PASS value
   # shellcheck disable=SC2016
-  assert_equal "$value" 'private-$site-password'
+  assert_equal "$value" private-old-db-password
   assert_file_contains "$candidate" private-db-root
   assert_file_contains "$candidate" public
   cmp "$shared" "$SANDBOX/shared.before"
+}
+
+@test "existing-site import refuses a different database identity or password" {
+  joomlaPlaygroundPreparePackage "$package" "$prepared" >/dev/null
+  local VDM_DB_NAME=shop_db VDM_DB_USER=shop_user VDM_DB_PASSWORD=private-existing-password
+  local option value
+  for option in --db-name --db-user --db-password; do
+    value=changed
+    parseCLI --non-interactive "$option" "$value"
+    run joomlaPlaygroundConfirmReplaceSettings "$prepared"
+    assert_status 17
+    refute_output_contains private-existing-password
+  done
+  refute_command '^docker '
 }
