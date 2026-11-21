@@ -298,26 +298,11 @@ assert_original() {
 if replace_site new "$package" --pre-backup no; then echo 'One refusal bypassed the backup confirmation.' >&2; exit 1; fi
 jq -e '.success==false' "$work/result" >/dev/null
 assert_original
-# Record source locations for an unexpected early return. Never trace command
-# arguments: Compose configuration, administrator details and SQL are private.
-cat > "$work/trace-replacement.bash" <<'BASH'
-set -T
-trap 'case "$BASH_COMMAND" in
-  "return 1"|"exit 1"|"return \$?"|"exit \$?")
-    if [[ " ${FUNCNAME[*]} " == *" joomlaPlaygroundReplaceSite "* && ${BASH_SOURCE[0]} == */src/octojoom ]]; then
-      printf "Replacement location: %s:%s\n" "${FUNCNAME[0]}" "$LINENO" >&2
-    fi;;
-esac' DEBUG
-BASH
-if BASH_ENV="$work/trace-replacement.bash" replace_site new "$work/failing.zip" "${without_backup[@]}" 2>"$work/bad-replacement.log"; then
+if replace_site new "$work/failing.zip" "${without_backup[@]}" 2>"$work/bad-replacement.log"; then
   echo 'Replacement accepted a failing SQL import.' >&2; exit 1
 fi
 jq -e '.success==false' "$work/result" >/dev/null
-if ! grep -q 'database sql failed' "$work/bad-replacement.log"; then
-  jq -r '"Unexpected replacement failure at stage " + (.data.stage // "unknown")' "$work/result" >&2
-  grep -E '^Replacement location: [a-zA-Z_][a-zA-Z0-9_]*:[0-9]+$' "$work/bad-replacement.log" | tail -n 20 >&2 || :
-  echo 'Replacement did not reach the native import.' >&2; exit 1
-fi
+grep -q 'database sql failed' "$work/bad-replacement.log" || { echo 'Replacement did not reach the native import.' >&2; exit 1; }
 assert_original
 
 # Make the selected backup destination unusable. The default backup policy
