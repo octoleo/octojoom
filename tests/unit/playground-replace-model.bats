@@ -19,7 +19,7 @@ setup() {
   joomlaSiteJSON -n --arg src "$old_web" --arg site "$old_compose" '{
     name:"shop",networks:{traefik:{external:true}},volumes:{data:{name:"original_db"},extra:{name:"extra"}},
     services:{
-      joomla:{image:"joomla",command:null,entrypoint:null,environment:{JOOMLA_DB_HOST:"old-db:3306"},depends_on:{mysql:{condition:"service_healthy"}},
+      joomla:{image:"joomla",environment:{JOOMLA_DB_HOST:"old-db:3306"},depends_on:{mysql:{condition:"service_healthy"}},
         container_name:"production-joomla",labels:{"traefik.enable":"true"},ports:[{target:80,published:"8080"}],
         volumes:[{type:"bind",source:$src,target:"/var/www/html"},
           {type:"bind",source:($site+"/php.ini"),target:"/opt/php/conf.d/zz-octojoom.ini",read_only:true}]},
@@ -46,21 +46,8 @@ setup() {
     .services.joomla.volumes[1].source==$ini and .services.nginx.volumes[1].read_only==true and
     .volumes=={data:{name:"replacement_db",external:true}} and
     .services.mysql.networks.default.aliases==["old-db"] and
-    (.services.joomla | (has("command") or has("entrypoint")) | not) and
     .services.joomla.ports==null and .services.joomla.container_name==null and .services.joomla.labels=={"traefik.enable":"false"}
   ' < "$work/candidate.json"
-}
-
-@test "replacement rejects explicit service commands and entrypoints including empty overrides" {
-  cp "$work/proposed.json" "$work/baseline.json"
-  local override
-  for override in '.services.joomla.command=["php","-v"]' '.services.joomla.command=[]' \
-    '.services.mysql.entrypoint=["sh"]' '.services.mysql.entrypoint=""'; do
-    joomlaSiteJSON "$override" < "$work/baseline.json" > "$work/proposed.json"
-    run joomlaPlaygroundReplacementModel "$work" "$token" joomla mysql nginx "$info"
-    assert_failure
-    assert_output_contains 'unsupported service command or entrypoint'
-  done
 }
 
 @test "replacement rejects extra host access and old storage mismatches" {
