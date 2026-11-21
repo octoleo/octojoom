@@ -55,7 +55,7 @@ On Linux, installed Docker Compose also validates generated configuration.
 | Configuration and dialogs | Secret persistence, literal input, permissions, validation, random values, and prompt cancellation |
 | Joomla setup | Single and bulk project-folder defaults, explicit named-volume opt-out, cancellation, generated Compose, environment values, and feature options |
 | Guided setup and defaults | One customization fork, saved-default precedence, manual versus automatic installation, headless preflight, and staged publication failures |
-| Playground packages | Offline inspection, archive validation, menu and CLI consent, isolated staging, cutover and recovery |
+| Playground packages | Offline inspection, archive validation, menu and CLI consent, isolated staging, cutover and recovery, existing environment location, neighboring-setting preservation, interrupted environment writes, original healthcheck restoration, and unresolved storage configuration refusal |
 | Configuration alignment | Effective Compose equivalence, complete scoped ENV, custom-field preservation, idempotence, per-site batch failure reporting, and recoverable publication |
 | PHP runtime | Published-tag compatibility, measured runtime checks, selective INI changes, custom-directive preservation, stopped-site handling, and rollback |
 | Webserver and document root | Apache/Nginx configuration, companion mounts, routing preservation, supported root selection/moves, custom-layout refusal, and failed-change recovery |
@@ -176,10 +176,22 @@ retiring an original volume covers the `committed_with_followup` result. After
 publication, a request writes a fixture value through Traefik and a second
 request reads it through the host port.
 
-The fixture also checks that neighboring containers keep running. A second export
-captures a renamed Joomla administrator with stale launch settings. The fixture
-checks the imported account's ID, groups and password, the unchanged Apache
-healthcheck, and Docker health after restart. A separate offline export must fail
+The running Apache fixture uses a shared `joomla/.env` for its replacement
+tests. Failed import, failed backup and failed verification must restore the
+original settings. A successful replacement with the default backup and another
+with an explicit backup opt-out must keep that environment location, preserve
+unrelated assignments and comments, and leave the running neighboring site
+untouched. A configured but never-started neighbor with an obsolete Compose
+`version` remains unchanged and stopped; successful replacement must not emit
+obsolete-version or missing-variable warnings. The stopped Nginx/PHP-FPM fixture
+continues exercising its private environment file and named volumes.
+
+A second export captures a renamed Joomla administrator with stale launch
+settings. The fixture checks the imported account's ID, groups and password,
+and Docker health after restart. Before the running replacement it installs
+the exact old generated Apache probe and requires restoration of the original
+curl healthcheck with the same timing options. Portable tests additionally
+verify that custom checks are unchanged. A separate offline export must fail
 HTTP verification without changing the original website or its settings.
 macOS and Windows run the portable Playground suites with Docker stand-ins.
 

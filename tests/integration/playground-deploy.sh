@@ -18,6 +18,7 @@ route_file="octojoom-$run_id.txt"
 write_file="octojoom-$run_id.php"
 export OCTOJOOM_HOME="$work/home"
 sites="$OCTOJOOM_HOME/Docker/joomla/available"
+shared_env="$OCTOJOOM_HOME/Docker/joomla/.env"
 package="$work/Donor store.zip"
 renamed_package="$work/Renamed donor store.zip"
 offline_package="$work/Offline donor store.zip"
@@ -33,9 +34,17 @@ CONFIRMED_PASSWORD=$(openssl rand -hex 18)
 CONFIRMED_PASSWORD+='$literal!'
 export DONOR_PASSWORD DONOR_DB_PASSWORD CONFIRMED_PASSWORD
 donor() { docker compose -p "pgdonor$run_id" -f "$work/donor.yml" "$@"; }
+destination_env() {
+  local site="$sites/$1.$domain"
+  if [ -f "$site/.env" ]; then printf '%s\n' "$site/.env"
+  elif [ -f "$shared_env" ]; then printf '%s\n' "$shared_env"
+  else return 1; fi
+}
 destination() {
-  local site="$sites/$1.$domain"; shift
-  docker compose --env-file "$site/.env" -f "$site/docker-compose.yml" "$@"
+  local site="$sites/$1.$domain" env_file
+  env_file=$(destination_env "$1") || return 1
+  shift
+  docker compose --env-file "$env_file" -f "$site/docker-compose.yml" "$@"
 }
 cleanup() {
   local status=$? sub site
@@ -43,7 +52,7 @@ cleanup() {
   set +e
   for sub in new stopped failed; do
     site="$sites/$sub.$domain"
-    if [ -f "$site/.env" ] && [ -f "$site/docker-compose.yml" ]; then
+    if [ -f "$site/docker-compose.yml" ] && destination_env "$sub" >/dev/null; then
       destination "$sub" down -v --remove-orphans >/dev/null
     fi
   done
@@ -239,7 +248,8 @@ check_http() {
 check_site() {
   local sub="$1" key="$2" mode="$3" sitename="$4" username="$5" display="$6" email="$7" password="$8"
   local docroot="${9:-/var/www/html}" web="${10:-127.0.0.1}"
-  local env_file="$sites/$sub.$domain/.env" var expected observed expected_hash_digest=''
+  local env_file var expected observed expected_hash_digest=''
+  env_file=$(destination_env "$sub") || return 1
   [ "$(stat -c %a "$env_file")" = 600 ] || { echo 'Site environment permissions are too broad.' >&2; return 1; }
   for var in SITE_NAME ADMIN_USERNAME ADMIN_USER ADMIN_EMAIL ADMIN_PASSWORD DB_PREFIX; do
     case "$var" in
@@ -247,7 +257,7 @@ check_site() {
       ADMIN_EMAIL) expected="$email";; ADMIN_PASSWORD) expected="$password";; DB_PREFIX) expected=demo_;;
     esac
     migrationReadEnvValue "$env_file" "VDM_${key^^}_JOOMLA_$var" observed
-    [ "$observed" = "$expected" ] || { echo "Unexpected per-site environment field: $var" >&2; return 1; }
+    [ "$observed" = "$expected" ] || { echo "Unexpected effective environment field: $var" >&2; return 1; }
   done
   # Check the original donor ID, groups and Joomla permissions independently
   # of CLI output. The confirmed password travels through standard input.
@@ -345,6 +355,50 @@ fi
 check_site new "$first" online 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 echo 'Fresh Playground deployment preserved the renamed Apache/MariaDB site and the Nginx/PHP-FPM/MySQL site.'
 
+# Reproduce a long-lived installation whose Apache site uses the shared ENV.
+# The stopped/FPM site keeps its private ENV throughout the remaining tests.
+cp "$sites/new.$domain/.env" "$shared_env"
+chmod 600 "$shared_env"
+cat >> "$shared_env" <<'ENV'
+
+# Keep unrelated site settings and comments exactly as the operator wrote them.
+VDM_RETIRED_DB="retired_fixture"
+VDM_RETIRED_NOTE='literal $value # preserved'
+ENV
+rm "$sites/new.$domain/.env"
+retired_dir="$sites/retired.$domain"
+mkdir "$retired_dir"
+cat > "$retired_dir/docker-compose.yml" <<YAML
+version: '3.8'
+services:
+  retired:
+    image: nginx:alpine
+    container_name: retired$run_id
+    environment:
+      RETIRED_DATABASE: \${VDM_RETIRED_DB}
+    volumes:
+      - "\${VDM_PROJECT_PATH}/retired-$run_id:/fixture:ro"
+YAML
+cp "$retired_dir/docker-compose.yml" "$work/retired-before.yml"
+sed "/^VDM_${first^^}_/d" "$shared_env" > "$work/shared-unrelated.env"
+assert_shared_environment() {
+  [ "$(destination_env new)" = "$shared_env" ]
+  [ ! -e "$sites/new.$domain/.env" ]
+  sed "/^VDM_${first^^}_/d" "$shared_env" > "$work/shared-unrelated.current"
+  cmp "$work/shared-unrelated.env" "$work/shared-unrelated.current"
+  cmp "$work/retired-before.yml" "$retired_dir/docker-compose.yml"
+  if docker container inspect "retired$run_id" >/dev/null 2>&1; then
+    echo 'A configured but retired neighbor was started.' >&2; return 1
+  fi
+}
+assert_clean_replacement_log() {
+  if grep -Eq 'the attribute .version. is obsolete|variable is not set|Defaulting to a blank string' "$1"; then
+    echo 'Replacement emitted an obsolete Compose version or missing-variable warning.' >&2
+    return 1
+  fi
+}
+assert_shared_environment
+
 # Mark the disposable destination so replacement can prove that only its
 # files, database and application secret changed. A custom hosting property
 # and mail host in its original JConfig must carry forward to the new site.
@@ -434,12 +488,13 @@ destination new exec -T --user 0 "joomla$first" sh -c 'echo "$1" > "$2"' sh "pre
 apache_port=$(publish_fixture_port new "joomla$first")
 for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "previous-new-$run_id"; done
 mkdir "$work/before"
-cp "$sites/new.$domain/.env" "$sites/new.$domain/docker-compose.yml" "$work/before/"
+cp "$(destination_env new)" "$sites/new.$domain/docker-compose.yml" "$work/before/"
 printf '\nprecision = 15\n' >> "$OCTOJOOM_HOME/Projects/$first/php.ini"
 neighbor_ids=$(destination stopped ps --status running -q | sort)
 assert_original() {
-  cmp "$sites/new.$domain/.env" "$work/before/.env"
+  cmp "$(destination_env new)" "$work/before/.env"
   cmp "$sites/new.$domain/docker-compose.yml" "$work/before/docker-compose.yml"
+  assert_shared_environment
   check_http new "$first" 127.0.0.1
   replacement_state new "$first" original
   [ "$(destination stopped ps --status running -q | sort)" = "$neighbor_ids" ]
@@ -481,12 +536,12 @@ assert_original
 # Make the selected backup destination unusable. The default backup policy
 # must stop publication even after the replacement candidate is ready.
 touch "$work/blocked-backup"
-writeEnvVariable "$sites/new.$domain/.env" "VDM_${first^^}_BACKUP_PATH=$work/blocked-backup" true
-cp -p "$sites/new.$domain/.env" "$work/before/blocked.env"
+writeEnvVariable "$(destination_env new)" "VDM_${first^^}_BACKUP_PATH=$work/blocked-backup" true
+cp -p "$(destination_env new)" "$work/before/blocked.env"
 if replace_site new "$package"; then echo 'A failed required backup allowed replacement.' >&2; exit 1; fi
 jq -e '.success==false and .data.stage=="backup" and .data.backup==null' "$work/result" >/dev/null
-cmp "$sites/new.$domain/.env" "$work/before/blocked.env"
-cp -p "$work/before/.env" "$sites/new.$domain/.env"
+cmp "$(destination_env new)" "$work/before/blocked.env"
+cp -p "$work/before/.env" "$(destination_env new)"
 assert_original
 
 # Fail the final private readiness check after independently observing the
@@ -500,19 +555,32 @@ jq -e '.success==false and .data.stage=="verify" and .data.committed==false' "$w
 assert_original
 for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "previous-new-$run_id"; done
 
-# Default-on backup captures the old website and SQL. Replacement restarts
-# the already enabled site and preserves its original Apache healthcheck.
+# Default-on backup captures the old website and SQL. Seed the exact rejected
+# probe from the earlier implementation, then require the original check back.
 apache_health() {
   destination new config --format json | jq -cSe --arg app "joomla$first" '.services[$app].healthcheck'
 }
 original_health=$(apache_health)
 jq -e '.test==["CMD","curl","-f","http://localhost/"] and .interval=="30s" and .timeout=="5s" and .retries==5' \
   <<< "$original_health" >/dev/null
+legacy_health=$(jq -nc --argjson original "$original_health" \
+  --slurpfile legacy "$root/tests/helpers/playground-legacy-healthcheck.json" \
+  '$original | .test=$legacy[0].test | walk(if type=="string" then gsub("\\$"; "$$") else . end)')
+printf '    healthcheck: %s\n' "$legacy_health" > "$work/legacy-health.property"
+joomlaSetServiceProperty "$sites/new.$domain/docker-compose.yml" "$work/legacy-health.yml" \
+  "joomla$first" healthcheck "$work/legacy-health.property"
+cat "$work/legacy-health.yml" > "$sites/new.$domain/docker-compose.yml"
 old_web=$(destination new ps -q "joomla$first")
 old_db=$(destination new ps -q "mariadb$first")
-observe_replacement running new "$first" "$apache_port" "previous-new-$run_id" "exported-online-$run_id" "$package"
+if ! observe_replacement running new "$first" "$apache_port" "previous-new-$run_id" "exported-online-$run_id" "$package" \
+  2> "$work/running-replacement.log"; then
+  jq -r '"Running replacement failed at " + (.data.stage // "unknown") + ": " + (.data.reason // "no result")' "$work/result" >&2 || :
+  exit 1
+fi
 [ -f "$work/ingress-running/observed" ]
 jq -e '.success and .data.committed==true' "$work/result" >/dev/null
+assert_clean_replacement_log "$work/running-replacement.log"
+assert_shared_environment
 for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "exported-online-$run_id"; done
 require_routed_text new "$proxy_port" "$write_file" 'committed fixture write' POST
 require_routed_text new "$apache_port" "$write_file" 'committed fixture write'
@@ -540,6 +608,31 @@ PY
 check_site new "$first" online 'Playground Donor' donoradmin 'Donor Administrator' donor@example.test "$DONOR_PASSWORD"
 replacement_state new "$first" replaced
 [ "$(destination new exec -T "joomla$first" php -r 'echo ini_get("precision");')" = 15 ]
+
+# The reported operator path: replace a running shared-ENV site and explicitly
+# skip the backup. Confirm the newly selected identity without creating .env.
+backup_listing=$(find "${backup%/*}" -maxdepth 1 -name '*.sha256' -print | sort)
+old_web=$(destination new ps -q "joomla$first")
+old_db=$(destination new ps -q "mariadb$first")
+if ! replace_site new "$renamed_package" "${without_backup[@]}" --input-json "$work/request.json" \
+  2> "$work/running-no-backup.log"; then
+  jq -r '"Running replacement without backup failed at " + (.data.stage // "unknown") + ": " + (.data.reason // "no result")' "$work/result" >&2 || :
+  exit 1
+fi
+jq -e '.success and .data.committed and .data.outcome=="committed" and
+  .data.backup==null and .data.running==true' "$work/result" >/dev/null
+assert_clean_replacement_log "$work/running-no-backup.log"
+assert_shared_environment
+[ "$backup_listing" = "$(find "${backup%/*}" -maxdepth 1 -name '*.sha256' -print | sort)" ]
+[ "$(apache_health)" = "$original_health" ]
+[ "$(destination new ps -q "joomla$first")" != "$old_web" ]
+[ "$(destination new ps -q "mariadb$first")" != "$old_db" ]
+[ "$(destination stopped ps --status running -q | sort)" = "$neighbor_ids" ]
+check_site new "$first" online 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+replacement_state new "$first" replaced
+for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "exported-renamed-$run_id"; done
+require_routed_text new "$proxy_port" "$write_file" 'committed fixture write' POST
+require_routed_text new "$apache_port" "$write_file" 'committed fixture write'
 
 # Replace the named-volume site from a deliberately stopped, disabled state.
 # A successful opt-out must leave only the active volume set and prior backup.
@@ -645,4 +738,5 @@ require_routed_text stopped "$proxy_port" "$write_file" 'committed fixture write
 require_routed_text stopped "$nginx_port" "$write_file" 'committed fixture write'
 require_routed_text new "$proxy_port" "$write_file" 'committed fixture write'
 [ "$(destination new ps --status running -q | sort)" = "$new_neighbor_ids" ]
-echo 'Existing-site replacement passed for backup, opt-out, SQL and HTTP failures, rollback, preserved administrator, unchanged healthcheck and restart.'
+assert_shared_environment
+echo 'Existing-site replacement passed for shared and private ENV, backup, running and stopped opt-out, rollback, administrator, restored healthcheck and restart.'
