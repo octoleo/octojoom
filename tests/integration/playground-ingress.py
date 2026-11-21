@@ -28,7 +28,7 @@ def docker_shim(args):
     if model and "exec" in args:
         if (case / "reject").exists():
             return 1
-        if "sh" in args and "-c" in args and not (case / "verified").exists():
+        if "curl" in args and "--fail" in args and not (case / "verified").exists():
             result = subprocess.run([real, *args], check=False)
             if result.returncode:
                 return result.returncode

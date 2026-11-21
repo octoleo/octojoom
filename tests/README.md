@@ -177,10 +177,11 @@ publication, a request writes a fixture value through Traefik and a second
 request reads it through the host port.
 
 The fixture also checks that neighboring containers keep running. A second export
-captures a renamed Joomla administrator and a site in offline mode. The fixture
-checks the imported account's ID, groups and password, the visitor-facing 503
-page, and Docker health after restart. macOS and Windows run the portable
-Playground suites with Docker stand-ins.
+captures a renamed Joomla administrator with stale launch settings. The fixture
+checks the imported account's ID, groups and password, the unchanged Apache
+healthcheck, and Docker health after restart. A separate offline export must fail
+HTTP verification without changing the original website or its settings.
+macOS and Windows run the portable Playground suites with Docker stand-ins.
 
 The database and backup matrix installs Joomla separately for each engine.
 It exports and imports actual SQL, checks selected-table operations, Unicode

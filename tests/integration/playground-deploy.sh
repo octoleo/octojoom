@@ -19,6 +19,7 @@ write_file="octojoom-$run_id.php"
 export OCTOJOOM_HOME="$work/home"
 sites="$OCTOJOOM_HOME/Docker/joomla/available"
 package="$work/Donor store.zip"
+renamed_package="$work/Renamed donor store.zip"
 offline_package="$work/Offline donor store.zip"
 offline_message='The donor shop is closed for inventory.'
 image=joomla:6.2.0-php8.4-apache
@@ -181,6 +182,12 @@ donor exec -T --user 0 web php -r '
   $changed->bind_param("s", $hash);
   $changed->execute();
   if ($changed->affected_rows !== 1 || password_verify(getenv("JOOMLA_ADMIN_PASSWORD"), $hash)) exit(1);
+'
+donor exec -T web sh -c 'echo "$1" > "$2"' sh "exported-renamed-$run_id" "$route_file"
+export_package "$renamed_package"
+# Keep a separate offline export to verify that an HTTP error rejects a
+# replacement without changing the original website or its healthcheck.
+donor exec -T --user 0 web php -r '
   $raw = file_get_contents("configuration.php");
   foreach (["offline"=>true, "display_offline_message"=>1, "offline_message"=>$argv[1]] as $key=>$value) {
       $raw = preg_replace_callback("/^(\\h*public\\s+\\$".$key."\\s*=).*?;\\h*$/ms",
@@ -217,18 +224,16 @@ deploy() {
 # shellcheck disable=SC1090
 source <(awk '/^(function )?[A-Za-z_][A-Za-z0-9_]*\(\) \{$/ {p=1} p {print} p && /^}$/ {p=0}' "$root/src/octojoom")
 check_http() {
-  local sub="$1" key="$2" mode="$3" web="$4" attempt expected=200
-  [ "$mode" != offline ] || expected=503
+  local sub="$1" key="$2" web="$3" attempt
   for ((attempt=0; attempt<20; attempt++)); do
     if destination "$sub" exec -T "joomla$key" curl --silent --max-time 5 --include \
         --header "Host: $sub.$domain" "http://$web/" > "$work/homepage" &&
-      awk -v expected="$expected" 'NR==1 {ok=($2==expected)} END {exit !ok}' "$work/homepage" &&
-      { [ "$mode" != offline ] || grep -Fq -- "$offline_message" "$work/homepage"; }; then
+      awk 'NR==1 {ok=($2==200)} END {exit !ok}' "$work/homepage"; then
       return 0
     fi
     sleep 1
   done
-  printf 'The %s Joomla home page did not return its expected HTTP %s response.\n' "$mode" "$expected" >&2
+  printf 'The Joomla home page did not return its expected HTTP 200 response.\n' >&2
   return 1
 }
 check_site() {
@@ -279,15 +284,15 @@ check_site() {
     echo "Account verified\n";
   ' -- "$sitename" "$username" "$display" "$email" "$source_secret" "$donor_id" "$donor_groups" "$mode" "$sub.$domain" > "$work/account-check"
   grep -Fxq 'Account verified' "$work/account-check"
-  check_http "$sub" "$key" "$mode" "$web"
+  check_http "$sub" "$key" "$web"
 }
 first="p$run_id"; second="q$run_id"; failed="r$run_id"
 apache_options=(--engine mariadb --database-image "$database_image")
-deploy new "$first" "$offline_package" true "${apache_options[@]}" --input-json "$work/request.json"
+deploy new "$first" "$renamed_package" true "${apache_options[@]}" --input-json "$work/request.json"
 jq -e '.success and .data.enabled == true' "$work/result" >/dev/null
-check_site new "$first" offline 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+check_site new "$first" online 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 destination new up -d --force-recreate --wait --wait-timeout 240 >/dev/null
-check_site new "$first" offline 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+check_site new "$first" online 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 
 deploy stopped "$second" "$package" false --enable false --image-tag "${fpm_image#*:}" \
   --engine mysql --database-image "$mysql_image" --webserver nginx --docroot "$nginx_docroot"
@@ -337,8 +342,8 @@ if docker container inspect "joomla$failed" >/dev/null 2>&1 || docker container 
 fi
 [ -z "$(docker ps -aq --filter "label=com.docker.compose.service=mariadb$failed")" ]
 [ -z "$(docker volume ls -q --filter 'label=com.octoleo.octojoom.playground' --filter "name=$failed")" ]
-check_site new "$first" offline 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
-echo 'Fresh Playground deployment preserved the renamed offline Apache/MariaDB site and the online Nginx/PHP-FPM/MySQL site.'
+check_site new "$first" online 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+echo 'Fresh Playground deployment preserved the renamed Apache/MariaDB site and the Nginx/PHP-FPM/MySQL site.'
 
 # Mark the disposable destination so replacement can prove that only its
 # files, database and application secret changed. A custom hosting property
@@ -435,10 +440,20 @@ neighbor_ids=$(destination stopped ps --status running -q | sort)
 assert_original() {
   cmp "$sites/new.$domain/.env" "$work/before/.env"
   cmp "$sites/new.$domain/docker-compose.yml" "$work/before/docker-compose.yml"
-  check_http new "$first" offline 127.0.0.1
+  check_http new "$first" 127.0.0.1
   replacement_state new "$first" original
   [ "$(destination stopped ps --status running -q | sort)" = "$neighbor_ids" ]
 }
+
+# The original curl-based readiness check rejects the offline page's HTTP 503.
+# The running destination and its settings must remain untouched.
+if replace_site new "$offline_package" "${without_backup[@]}" --input-json "$work/request.json" 2>"$work/offline-replacement.log"; then
+  echo 'An HTTP 503 was accepted during replacement.' >&2; exit 1
+fi
+jq -e '.success==false and .data.stage=="candidate" and .data.committed==false' "$work/result" >/dev/null
+grep -Fq 'Joomla did not establish its database connection and serve the website after startup.' "$work/offline-replacement.log"
+assert_original
+for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "previous-new-$run_id"; done
 
 # Neither a single backup refusal nor a failed SQL import may publish data.
 if replace_site new "$package" --pre-backup no; then echo 'One refusal bypassed the backup confirmation.' >&2; exit 1; fi
@@ -486,25 +501,13 @@ assert_original
 for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "previous-new-$run_id"; done
 
 # Default-on backup captures the old website and SQL. Replacement restarts
-# the already enabled site and upgrades a previous Octojoom Apache healthcheck.
-new_compose="$sites/new.$domain/docker-compose.yml"
-enabled_compose="$OCTOJOOM_HOME/Docker/joomla/enabled/new.$domain/docker-compose.yml"
+# the already enabled site and preserves its original Apache healthcheck.
 apache_health() {
-  destination new config --format json | jq -ce --arg app "joomla$first" '.services[$app].healthcheck.test'
+  destination new config --format json | jq -cSe --arg app "joomla$first" '.services[$app].healthcheck'
 }
-managed_health=$(apache_health)
-cat > "$work/legacy-health.yml" <<'YAML'
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-YAML
-joomlaSetServiceProperty "$new_compose" "$work/legacy-compose.yml" "joomla$first" healthcheck "$work/legacy-health.yml"
-cat "$work/legacy-compose.yml" > "$new_compose"
-if ! [ "$enabled_compose" -ef "$new_compose" ]; then cp -- "$new_compose" "$enabled_compose"; fi
-[ "$(apache_health)" = '["CMD","curl","-f","http://localhost/"]' ]
-[ "$(apache_health)" != "$managed_health" ]
+original_health=$(apache_health)
+jq -e '.test==["CMD","curl","-f","http://localhost/"] and .interval=="30s" and .timeout=="5s" and .retries==5' \
+  <<< "$original_health" >/dev/null
 old_web=$(destination new ps -q "joomla$first")
 old_db=$(destination new ps -q "mariadb$first")
 observe_replacement running new "$first" "$apache_port" "previous-new-$run_id" "exported-online-$run_id" "$package"
@@ -513,7 +516,7 @@ jq -e '.success and .data.committed==true' "$work/result" >/dev/null
 for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "exported-online-$run_id"; done
 require_routed_text new "$proxy_port" "$write_file" 'committed fixture write' POST
 require_routed_text new "$apache_port" "$write_file" 'committed fixture write'
-[ "$(apache_health)" = "$managed_health" ]
+[ "$(apache_health)" = "$original_health" ]
 backup=$(jq -er '.data | select(.target=="current" and .status=="deployed" and .running==true) | .backup' "$work/result")
 [ -f "$backup" ]
 [ -f "$backup.sha256" ]
@@ -568,8 +571,8 @@ with open(sys.argv[2], "w") as output:
     json.dump(request, output)
 PY
 started_after=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
-observe_replacement stopped stopped "$second" "$nginx_port" "previous-stopped-$run_id" "exported-offline-$run_id" \
-  "$offline_package" "${without_backup[@]}" --input-json "$work/replace-request.json"
+observe_replacement stopped stopped "$second" "$nginx_port" "previous-stopped-$run_id" "exported-renamed-$run_id" \
+  "$renamed_package" "${without_backup[@]}" --input-json "$work/replace-request.json"
 [ -f "$work/ingress-stopped/observed" ]
 jq -e '.success and .data.target=="current" and .data.backup==null and .data.running==false' "$work/result" >/dev/null
 # Include every public start event, even if the container was removed
@@ -601,7 +604,7 @@ for volume in "$old_web_volume" "$old_db_volume"; do
   fi
 done
 destination stopped up -d --wait --wait-timeout 240 >/dev/null
-check_site stopped "$second" offline 'Imported Shop' replacedmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD" \
+check_site stopped "$second" online 'Imported Shop' replacedmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD" \
   "/var/www/html/$nginx_docroot" "nginx$second"
 replacement_state stopped "$second" replaced "/var/www/html/$nginx_docroot"
 # Read the protected request locally and pass it to PHP over stdin so the
@@ -620,13 +623,13 @@ destination stopped exec -T --workdir "/var/www/html/$nginx_docroot" "joomla$sec
   if ($name !== $c->db || explode("@",$account)[0] !== $c->user) exit(2);
 ' < "$work/replace-request.json"
 [ "$(destination new ps --status running -q | sort)" = "$new_neighbor_ids" ]
-for port in "$proxy_port" "$nginx_port"; do require_routed_text stopped "$port" "$route_file" "exported-offline-$run_id"; done
+for port in "$proxy_port" "$nginx_port"; do require_routed_text stopped "$port" "$route_file" "exported-renamed-$run_id"; done
 # The manually restarted MySQL site is now serving. Force the first old
 # named volume retirement to fail after commit, leaving its original data
 # available and its verified replacement serving both normal routes.
 printf '%s\n' "$active_web_volume" "$active_db_volume" > "$work/retained-volumes"
 if INGRESS_RETAIN_VOLUME="$active_web_volume" observe_replacement cleanup stopped "$second" "$nginx_port" \
-  "exported-offline-$run_id" "exported-online-$run_id" "$package" "${without_backup[@]}"; then
+  "exported-renamed-$run_id" "exported-online-$run_id" "$package" "${without_backup[@]}"; then
   echo 'A failed old-volume retirement was reported as fully successful.' >&2; exit 1
 fi
 [ -f "$work/ingress-cleanup/observed" ]
@@ -636,10 +639,10 @@ journal=$(jq -er '.data | select(.committed and .outcome=="committed_with_follow
 [ "$(cat "$sites/stopped.$domain/.octojoom-change.lock/recovery.path")" = "$journal" ]
 docker volume inspect "$active_web_volume" "$active_db_volume" >/dev/null
 [ "$(docker run --rm --network none --read-only --entrypoint cat \
-  --mount "type=volume,src=$active_web_volume,dst=/retained,readonly" "$image" "/retained/$nginx_docroot/$route_file")" = "exported-offline-$run_id" ]
+  --mount "type=volume,src=$active_web_volume,dst=/retained,readonly" "$image" "/retained/$nginx_docroot/$route_file")" = "exported-renamed-$run_id" ]
 for port in "$proxy_port" "$nginx_port"; do require_routed_text stopped "$port" "$route_file" "exported-online-$run_id"; done
 require_routed_text stopped "$proxy_port" "$write_file" 'committed fixture write'
 require_routed_text stopped "$nginx_port" "$write_file" 'committed fixture write'
 require_routed_text new "$proxy_port" "$write_file" 'committed fixture write'
 [ "$(destination new ps --status running -q | sort)" = "$new_neighbor_ids" ]
-echo 'Existing-site replacement passed for backup, opt-out, SQL failure, rollback, preserved administrator, offline page and restart.'
+echo 'Existing-site replacement passed for backup, opt-out, SQL and HTTP failures, rollback, preserved administrator, unchanged healthcheck and restart.'
