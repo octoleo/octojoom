@@ -15,6 +15,8 @@ setup() {
   TX_FAULT=''
   mkdir "$TX_PACKAGE"
   make_joomla_container shop SHOP shop example.test
+  TX_ENV="$VDM_REPO_PATH/joomla/.env"
+  VDM_SITE_ENV_KEY=SHOP
   cp "$TX_DIR/docker-compose.yml" "$SANDBOX/original.yml"
   cp "$VDM_REPO_PATH/joomla/.env" "$SANDBOX/shared.env"
   printf 'original web' > "$TX_PROJECT/joomla/content"
@@ -33,6 +35,7 @@ setup() {
       db:{volumes:[{type:"bind",source:$db,target:"/var/lib/mysql"}]}}}' > "$SANDBOX/model.json"
 
   joomlaDatabaseContext() { return 0; }
+  joomlaStorageComposeModel() { joomlaSiteCompose "$1" config --format json; }
   joomlaPlaygroundConfirmReplaceSettings() { return 0; }
   joomlaDatabaseCopyConfiguration() { cp "$TX_PROJECT/joomla/content" "$2"; }
   joomlaPHPIniDestination() { printf '%s\n' "${TX_INI_DESTINATION:-$TX_PROJECT/php.ini}"; }
@@ -68,6 +71,7 @@ setup() {
     case "$TX_FAULT" in
       compose) echo 'name: other-project' >> "$TX_DIR/docker-compose.yml";;
       registration) link_enabled joomla "$TX_SITE";;
+      shared-env) printf 'VDM_OTHER_NOTE="completed while staging"\n' >> "$TX_ENV";;
     esac
     echo staged >> "$TX_EVENTS"
   }
@@ -159,16 +163,17 @@ setup() {
     [ "$TX_FAULT" != backup ]
   }
   joomlaPlaygroundWaitFresh() {
+    [ -s "${TX_ENV}.octojoom-change.lock/recovery.path" ] || return 1
     if [[ "$2" == */verify.json ]]; then
       [ -z "$1" ] && [ -f "$SANDBOX/gate-live" ] && assert_registration_gated && assert_candidate_storage || return 1
       [ "$3" = app ] && [ "$4" = "$TX_SITE" ] && [ "$5" = /var/www/html ] && [ "$6" = "$TX_WEB" ] || return 1
       echo 'gate ready' >> "$TX_EVENTS"
       [ "$TX_FAULT" != ready ]
-    elif [ "$1" = "$VDM_REPO_PATH/joomla/.env" ]; then
+    elif [ "$1" = "$TX_ENV" ] && ! grep -qF '# candidate compose' "$TX_DIR/docker-compose.yml"; then
       assert_original_site || return 1
       echo 'original ready' >> "$TX_EVENTS"
     else
-      [ "$2" = "$TX_DIR/docker-compose.yml" ] && assert_candidate_storage || return 1
+      [ "$1" = "$TX_ENV" ] && [ "$2" = "$TX_DIR/docker-compose.yml" ] && assert_candidate_storage || return 1
       echo 'public ready' >> "$TX_EVENTS"
     fi
   }
@@ -190,7 +195,7 @@ assert_registration_gated() {
 assert_candidate_storage() {
   assert_equal "$(cat "$TX_PROJECT/joomla/content")" 'candidate web' &&
     assert_equal "$(cat "$TX_PROJECT/db/content")" 'candidate db' &&
-    assert_file_contains "$TX_DIR/.env" candidate && assert_file_contains "$TX_PROJECT/php.ini" 'candidate ini'
+    assert_file_contains "$TX_ENV" candidate && assert_file_contains "$TX_PROJECT/php.ini" 'candidate ini'
 }
 
 assert_public_lifecycle() {
@@ -215,11 +220,13 @@ assert_original_site() {
   assert_equal "$(cat "$TX_PROJECT/adjacent-file")" untouched
   cmp "$TX_DIR/docker-compose.yml" "$SANDBOX/original.yml"
   cmp "$VDM_REPO_PATH/joomla/.env" "$SANDBOX/shared.env"
-  refute_file_exists "$TX_DIR/.env"
+  if [ "$TX_ENV" = "$TX_DIR/.env" ]; then cmp "$TX_ENV" "$SANDBOX/private.env"
+  else refute_file_exists "$TX_DIR/.env"; fi
 }
 
 assert_transaction_cleaned() {
   [ ! -e "$TX_DIR/.octojoom-change.lock" ]
+  [ ! -e "${TX_ENV}.octojoom-change.lock" ]
   assert_equal "$(find "$TX_PROJECT" -name '.octojoom-*' -print)" ''
   assert_equal "$(find "$TX_DIR" -name '.playground-replace.*' -print)" ''
 }
@@ -396,7 +403,8 @@ assert_transaction_cleaned() {
     'candidate up --no-start --no-deps --pull never app db helper'
   assert_candidate_storage
   assert_equal "$(cat "$TX_PROJECT/adjacent-file")" untouched
-  cmp "$VDM_REPO_PATH/joomla/.env" "$SANDBOX/shared.env"
+  assert_file_contains "$VDM_REPO_PATH/joomla/.env" 'VDM_SHOP_DB="candidate"'
+  refute_file_exists "$TX_DIR/.env"
   assert_transaction_cleaned
 }
 
@@ -471,7 +479,8 @@ assert_transaction_cleaned() {
   assert_candidate_storage
   assert_file_contains "$TX_DIR/docker-compose.yml" '# candidate compose'
   cmp "$TX_DIR/docker-compose.yml" "$mirror/docker-compose.yml"
-  cmp "$TX_DIR/.env" "$mirror/.env"
+  refute_file_exists "$TX_DIR/.env"
+  refute_file_exists "$mirror/.env"
 }
 
 @test "failed retirement of offline storage keeps the committed site and the original storage receipt" {
@@ -514,4 +523,150 @@ assert_transaction_cleaned() {
   assert_failure
   joomlaSiteJSON -e '.stage=="verify" and .committed==false and .outcome=="recovery_incomplete" and has("running") and .running==null and .recovery!=null' < "$TX_PACKAGE/result.json"
   [ -s "$TX_DIR/.octojoom-change.lock/recovery.path" ]
+}
+
+@test "a shared environment stays shared and keeps neighboring entries comments and its file mode" {
+  cat >> "$TX_ENV" <<'ENV'
+# A different website retains its settings.
+VDM_OTHER_DB="neighbor" # Keep this note.
+ENV
+  if ! is_windows; then chmod 640 "$TX_ENV"; fi
+  cp -p "$TX_ENV" "$SANDBOX/shared.env"
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
+  assert_success
+  sed 's/^VDM_SHOP_DB="shop_db"$/VDM_SHOP_DB="candidate"/' "$SANDBOX/shared.env" > "$SANDBOX/expected.env"
+  cmp "$TX_ENV" "$SANDBOX/expected.env"
+  refute_file_exists "$TX_DIR/.env"
+  assert_equal "$(getContainerEnvFile joomla "$TX_SITE" available)" "$TX_ENV"
+  if ! is_windows; then assert_equal "$(file_mode "$TX_ENV")" 640; fi
+  assert_transaction_cleaned
+}
+
+@test "an existing site environment stays local and its copied enabled registration is updated without changing shared settings" {
+  TX_ENV="$TX_DIR/.env"
+  cp "$SANDBOX/shared.env" "$TX_ENV"
+  printf '# Keep the private environment note.\n' >> "$TX_ENV"
+  if ! is_windows; then chmod 640 "$TX_ENV"; fi
+  cp -p "$TX_ENV" "$SANDBOX/private.env"
+  local mirror="$VDM_REPO_PATH/joomla/enabled/$TX_SITE"
+  mkdir -p "$mirror"
+  cp "$TX_DIR/docker-compose.yml" "$mirror/docker-compose.yml"
+  cp "$TX_ENV" "$mirror/.env"
+  chmod 600 "$mirror/.env"
+  getJoomlaSiteEnabledState() { printf 'enabled\n'; }
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
+  assert_success
+  cmp "$VDM_REPO_PATH/joomla/.env" "$SANDBOX/shared.env"
+  cmp "$TX_ENV" "$mirror/.env"
+  assert_file_contains "$TX_ENV" '# Keep the private environment note.'
+  assert_candidate_storage
+  if ! is_windows; then
+    assert_equal "$(file_mode "$TX_ENV")" 640
+    assert_equal "$(file_mode "$mirror/.env")" 600
+  fi
+  assert_transaction_cleaned
+}
+
+@test "failed readiness restores both original private environment copies and their individual modes" {
+  TX_ENV="$TX_DIR/.env"
+  cp "$SANDBOX/shared.env" "$TX_ENV"
+  printf '# Private environment retained exactly.\n' >> "$TX_ENV"
+  if ! is_windows; then chmod 640 "$TX_ENV"; fi
+  cp -p "$TX_ENV" "$SANDBOX/private.env"
+  local mirror="$VDM_REPO_PATH/joomla/enabled/$TX_SITE"
+  mkdir -p "$mirror"
+  cp "$TX_DIR/docker-compose.yml" "$mirror/docker-compose.yml"
+  cp "$TX_ENV" "$mirror/.env"
+  chmod 600 "$mirror/.env"
+  getJoomlaSiteEnabledState() { printf 'enabled\n'; }
+  TX_FAULT=ready
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
+  assert_failure
+  assert_original_site
+  cmp "$mirror/.env" "$SANDBOX/private.env"
+  cmp "$mirror/docker-compose.yml" "$SANDBOX/original.yml"
+  if ! is_windows; then
+    assert_equal "$(file_mode "$TX_ENV")" 640
+    assert_equal "$(file_mode "$mirror/.env")" 600
+  fi
+  assert_transaction_cleaned
+}
+
+@test "a shared environment edit after publication survives failed readiness and retains recovery evidence" {
+  joomlaPlaygroundWaitFresh() {
+    [[ "$2" == */verify.json ]] || return 1
+    printf 'VDM_OTHER_NOTE="operator edit"\n' >> "$TX_ENV"
+    return 1
+  }
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
+  assert_failure
+  assert_output_contains 'environment changed after publication'
+  assert_file_contains "$TX_ENV" 'VDM_OTHER_NOTE="operator edit"'
+  joomlaSiteJSON -e '.outcome=="recovery_incomplete" and .committed==false and .recovery!=null' < "$TX_PACKAGE/result.json"
+  local recovery
+  recovery=$(joomlaSiteJSON -er .recovery < "$TX_PACKAGE/result.json")
+  assert_file_exists "$recovery/environment/files.journal"
+  assert_file_exists "$recovery/published.env"
+  assert_equal "$(cat "${TX_ENV}.octojoom-change.lock/recovery.path")" "$recovery"
+  assert_registration_gated
+}
+
+@test "another site's shared environment lock prevents quiesce and is never released by the blocked replacement" {
+  local environment_lock="${TX_ENV}.octojoom-change.lock"
+  mkdir "$environment_lock"
+  printf 'another-site-recovery\n' > "$environment_lock/recovery.path"
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
+  assert_failure
+  assert_output_contains 'Another operation is changing the website environment'
+  assert_equal "$(cat "$environment_lock/recovery.path")" another-site-recovery
+  assert_original_site
+  [ ! -e "$TX_DIR/.octojoom-change.lock" ]
+  assert_equal "$(find "$TX_DIR" -name '.playground-replace.*' -print)" ''
+  run grep -Eq '^(stop|rm|original up|candidate up)' "$TX_EVENTS"
+  assert_failure
+}
+
+@test "a shared environment update completed during staging is rejected under the lock before quiesce" {
+  TX_FAULT=shared-env
+  cp "$SANDBOX/shared.env" "$SANDBOX/expected.env"
+  printf 'VDM_OTHER_NOTE="completed while staging"\n' >> "$SANDBOX/expected.env"
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
+  assert_failure
+  assert_output_contains 'original Compose settings or site registration changed'
+  cmp "$TX_ENV" "$SANDBOX/expected.env"
+  cmp "$TX_DIR/docker-compose.yml" "$SANDBOX/original.yml"
+  assert_equal "$(cat "$TX_PROJECT/joomla/content")" 'original web'
+  assert_equal "$(cat "$TX_PROJECT/db/content")" 'original db'
+  run grep -Eq '^(stop|rm|original up|candidate up)' "$TX_EVENTS"
+  assert_failure
+  assert_transaction_cleaned
+}
+
+@test "an interrupted environment publication restores the complete original transaction" {
+  runPrivileged() {
+    if [ "$1" = cp ] && [[ "${*: -2:1}" == */published.env ]]; then
+      printf 'interrupted copy' > "${*: -1}"
+      return 1
+    fi
+    "$@"
+  }
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
+  assert_failure
+  assert_original_site
+  joomlaSiteJSON -e '.outcome=="not_committed" and .committed==false and .recovery==null' < "$TX_PACKAGE/result.json"
+  assert_equal "$(find "${TX_ENV%/*}" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
+  assert_transaction_cleaned
+}
+
+@test "replacement without an existing effective environment fails before changing original services or files" {
+  rm "$TX_ENV"
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
+  assert_failure
+  assert_output_contains 'requires the existing website environment file'
+  [ ! -s "$TX_EVENTS" ]
+  refute_file_exists "$TX_DIR/.env"
+  refute_file_exists "$TX_ENV"
+  assert_equal "$(cat "$TX_PROJECT/joomla/content")" 'original web'
+  assert_equal "$(cat "$TX_PROJECT/db/content")" 'original db'
+  assert_transaction_cleaned
 }

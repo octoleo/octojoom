@@ -283,10 +283,15 @@ original_volume_fixture() {
   echo '{"original":"old_web"}' > "$work/web/mount.json"
   echo '{"volumes":{"web":{"name":"old_web"}},"services":{"app":{"volumes":[{"type":"volume","source":"web","target":"/var/www/html"}]}}}' > "$work/selected.json"
   echo '{"services":{}}' > "$work/neighbor.json"
+  joomlaStorageComposeModel() {
+    case "$1" in
+      shop.example.test) cat "$work/selected.json";;
+      other.example.test) cat "$work/neighbor.json";;
+      *) return 1;;
+    esac
+  }
   joomlaSiteCompose() {
     case "$*" in
-      'shop.example.test config --format json') cat "$work/selected.json";;
-      'other.example.test config --format json') cat "$work/neighbor.json";;
       'shop.example.test ps -aq') return 0;;
       *) return 1;;
     esac

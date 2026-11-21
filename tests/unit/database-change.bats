@@ -427,8 +427,7 @@ transaction_doubles() {
   stage_doubles
   make_joomla_container beta BETA beta
   printf original > "$VDM_PROJECT_PATH/alpha/db/sentinel"
-  joomlaSiteCompose() {
-    [ "$2" = config ] || return 1
+  joomlaStorageComposeModel() {
     jq -n --arg source "$VDM_PROJECT_PATH/alpha/db" \
       '{services:{db:{volumes:[{type:"bind",source:$source,target:"/var/lib/mysql"}]}}}'
   }
@@ -443,8 +442,7 @@ transaction_doubles() {
 @test "a stopped configured parent mount prevents database directory replacement" {
   stage_doubles
   make_joomla_container beta BETA beta
-  joomlaSiteCompose() {
-    [ "$2" = config ] || return 1
+  joomlaStorageComposeModel() {
     local source="$VDM_PROJECT_PATH/alpha/db"
     [ "$1" != beta.vdm.dev ] || source="$VDM_PROJECT_PATH/alpha"
     jq -n --arg source "$source" \
@@ -461,8 +459,7 @@ transaction_doubles() {
   make_joomla_container beta BETA beta
   ln -s "$VDM_PROJECT_PATH/alpha" "$work/alias"
   [ -L "$work/alias" ] || skip 'Symbolic links are unavailable'
-  joomlaSiteCompose() {
-    [ "$2" = config ] || return 1
+  joomlaStorageComposeModel() {
     local source="$VDM_PROJECT_PATH/alpha/db"
     [ "$1" != beta.vdm.dev ] || source="$work/alias/db"
     jq -n --arg source "$source" \

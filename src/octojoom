@@ -6,8 +6,8 @@
 # shellcheck disable=SC2030,SC2031
 
 # The most recent program version.
-_VERSION="3.9.2"
-_V="3.9"
+_VERSION="4.0.0"
+_V="4.0"
 
 # Bash version required
 _bash_v=4
@@ -11325,17 +11325,89 @@ function joomlaPersistenceCanonicalPath() {
   if [ "$path" = / ] && [ -z "$suffix" ]; then printf '/\n'; else printf '%s%s\n' "${path%/}" "$suffix"; fi
 }
 
+# Render storage facts without accepting Compose's empty substitution for a
+# missing variable. Keep native diagnostics private: they can contain secrets,
+# and an unrelated obsolete version field does not affect mount ownership.
+# shellcheck disable=SC2016 # jq expressions belong to jq, not the shell.
+function joomlaStorageComposeModel() {
+  (
+    set +x
+    umask 077
+    local site="$1" env_file="$2" compose_file="$3" directory="${4:-}" diagnostic model raw missing value status=0
+    local description="${2:-Compose defaults}"
+    local -a arguments=(compose)
+    diagnostic=$(mktemp "${TMPDIR:-/tmp}/octojoom-storage.XXXXXXXX") || exit 1
+    trap 'rm -f -- "$diagnostic"' EXIT
+    joomlaUnexportComposeEnvironment "$compose_file" || exit 1
+    [ -z "$env_file" ] || arguments+=(--env-file "$env_file")
+    arguments+=(--file "$compose_file")
+    [ -z "$directory" ] || arguments+=(--project-directory "$directory")
+    model=$(LC_ALL=C runComposeProgress "$compose_file" "${arguments[@]}" config --format json 2>"$diagnostic") || status=$?
+    if grep -q 'variable is not set' "$diagnostic"; then
+      missing=$(sed -nE 's/\\"/"/g; s/.*The[[:space:]]+"?([A-Za-z_][A-Za-z0-9_]*)"?[[:space:]]+variable is not set.*/\1/p' "$diagnostic" |
+        sort -u | awk '{printf "%s%s", separator, $0; separator=", "} END {if(NR) print ""}')
+      printf 'Cannot verify storage for %s using %s: Compose variables are unset (%s).\n' "$site" "$description" "${missing:-unknown}" >&2
+      exit 1
+    fi
+    if [ "$status" -ne 0 ]; then
+      printf 'Cannot verify storage for %s using %s: Compose configuration could not be rendered.\n' "$site" "$description" >&2
+      exit 1
+    fi
+    # An explicitly empty project base produces no Compose warning. Inspect
+    # unexpanded storage references only in that case, preserving intentional
+    # default expressions and literal dollar signs in customized paths.
+    if [ -n "$env_file" ] && migrationReadEnvValue "$env_file" VDM_PROJECT_PATH value && [ -z "$value" ]; then
+      if ! raw=$(LC_ALL=C runComposeProgress "$compose_file" "${arguments[@]}" config --no-interpolate --format json 2>"$diagnostic") ||
+        ! joomlaSiteJSON -e '(.services | type)=="object"' >/dev/null 2>&1 <<< "$raw"; then
+        printf 'Cannot verify storage for %s using %s: unexpanded storage references could not be read.\n' "$site" "$description" >&2
+        exit 1
+      fi
+      status=0
+      joomlaSiteJSON -e '[.services[].volumes[]?.source, (.volumes//{})[].name] |
+        any(.[]; type=="string" and (gsub("\\$\\$"; "") |
+          test("\\$VDM_PROJECT_PATH([^A-Za-z0-9_]|$)|\\$\\{VDM_PROJECT_PATH[}?-]")))' >/dev/null 2>&1 <<< "$raw" || status=$?
+      if [ "$status" -eq 0 ]; then
+        printf 'Cannot verify storage for %s using %s: VDM_PROJECT_PATH is empty but is required by a storage path.\n' "$site" "$description" >&2
+        exit 1
+      elif [ "$status" -ne 1 ]; then
+        printf 'Cannot verify storage for %s using %s: unexpanded storage references could not be read.\n' "$site" "$description" >&2
+        exit 1
+      fi
+    fi
+    # The selected site has an empty services map while replacement gates its
+    # public project. Every actual bind or named volume still needs a concrete
+    # source and target before the caller can compare ownership.
+    if ! joomlaSiteJSON -e '. as $model | (.services | type)=="object" and
+      all(.services[]; type=="object" and ((.volumes//[]) | type)=="array" and
+        all(.volumes[]?; (.target | type)=="string" and (.target | length)>0 and
+          if .type=="bind" then (.source | type)=="string" and (.source | length)>0
+          elif .type=="volume" then if has("source") then
+            (.source | type)=="string" and (.source | length)>0 and
+              ($model.volumes[.source].name | type)=="string" and ($model.volumes[.source].name | length)>0
+            else true end
+          else .type=="tmpfs" end))' >/dev/null 2>&1 <<< "$model"; then
+      printf 'Cannot verify storage for %s using %s: Compose returned incomplete storage information.\n' "$site" "$description" >&2
+      exit 1
+    fi
+    printf '%s\n' "$model"
+  )
+}
+
 # Check configured and live storage independently. Exact same-site consumers
 # such as Nginx are moved together; overlapping or foreign users are refused.
 # shellcheck disable=SC2016
 function joomlaPersistenceCheckShared() {
-  local site="$1" kind="$2" storage="$3" target="$4" other model type path mount ids containers own rows container owned id
+  local site="$1" kind="$2" storage="$3" target="$4" other model type path mount ids containers own rows container owned id env_file compose_file
   [ "$kind" != bind ] || storage=$(joomlaPersistenceCanonicalPath "$storage") || return 1
   for other in "$VDM_REPO_PATH/joomla/available/"*/docker-compose.yml; do
     [ -f "$other" ] || continue
+    compose_file="$other"
     other="${other%/*}"; other="${other##*/}"
-    model=$(joomlaSiteCompose "$other" config --format json) || return 1
-    rows=$(printf '%s' "$model" | joomlaSiteJSON -er 'walk(if type=="string" then gsub("\\$\\$"; "$") else . end) | . as $m|[.services[].volumes[]?|[.type,(if .type=="volume" then $m.volumes[.source].name else .source end),.target]|@tsv]|join("\n")') || return 1
+    env_file=$(getContainerEnvFile joomla "$other" available)
+    model=$(joomlaStorageComposeModel "$other" "$env_file" "$compose_file") || return 1
+    # Anonymous volumes have no configured source to compare. Their actual
+    # Docker-assigned names are inspected with all live container mounts below.
+    rows=$(printf '%s' "$model" | joomlaSiteJSON -er 'walk(if type=="string" then gsub("\\$\\$"; "$") else . end) | . as $m|[.services[].volumes[]?|select(.type!="volume" or has("source"))|[.type,(if .type=="volume" then $m.volumes[.source].name else .source end),.target]|@tsv]|join("\n")') || return 1
     while IFS=$'\t' read -r type path mount; do
       [ -n "$type" ] || continue
       [ "$type" != bind ] || path=$(joomlaPersistenceCanonicalPath "$path") || return 1
@@ -13314,6 +13386,53 @@ function joomlaPlaygroundReplacementProject() {
   done <<< "$ids"
 }
 
+# Undo only the exact Apache probe emitted by the reverted Playground code.
+# Its digest identifies the old command without retaining executable probe code.
+# Custom checks and existing timing options remain the operator's configuration.
+function joomlaPlaygroundRestoreApacheHealthcheck() {
+  local work="$1" app="$2"
+  (
+    cd -- "$work" || exit 1
+    python3 -I -B - "$app" <<'PYTHON' || exit 1
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+
+output = Path("restored-healthcheck.property")
+output.unlink(missing_ok=True)
+model = json.loads(Path("original-model.json").read_text())
+health = model["services"][sys.argv[1]].get("healthcheck")
+test = health.get("test") if isinstance(health, dict) else None
+if (not isinstance(test, list) or len(test) != 8 or test[:3] != ["CMD", "sh", "-c"]
+        or test[4] != "sh" or test[6:] != ["localhost", "127.0.0.1"]
+        or not isinstance(test[3], str) or not isinstance(test[5], str)):
+    sys.exit(0)
+if hashlib.sha256(test[3].encode()).hexdigest() != "ef1f727764af80cf0b5b416d215a095010aa786b47536524d21a3e3824576cc6":
+    sys.exit(0)
+
+lines = ['    healthcheck:', '      test: ["CMD", "curl", "-f", "http://localhost/"]']
+ordered = [key for key in ("interval", "timeout", "retries") if key in health]
+ordered += [key for key in health if key not in ("test", "interval", "timeout", "retries")]
+for key in ordered:
+    value = health[key]
+    if not re.fullmatch(r"[a-z_]+", key):
+        sys.exit(1)
+    # Compose duration strings are safe plain YAML; serialize other values as
+    # JSON scalars/collections, which are also valid YAML, without evaluation.
+    duration = key in ("interval", "timeout", "start_period", "start_interval")
+    scalar = value if duration and isinstance(value, str) and re.fullmatch(r"[0-9.a-z]+", value) else json.dumps(value)
+    lines.append(f"      {key}: {scalar}")
+output.write_text("\n".join(lines) + "\n")
+PYTHON
+    if [ -f restored-healthcheck.property ]; then
+      joomlaSetServiceProperty with-env.yml with-health.yml "$app" healthcheck restored-healthcheck.property &&
+        mv -- with-health.yml with-env.yml || exit 1
+    fi
+  )
+}
+
 # The transaction has already read the destination database context and
 # collected the operator's choices. Prepare changes in its private directory.
 # shellcheck disable=SC2016
@@ -13330,7 +13449,7 @@ function joomlaPlaygroundPlanReplacement() {
   case "$VDM_DB_DRIVER" in mysql) VDM_DB_DRIVER=mysqli;; pdo_mysql) VDM_DB_DRIVER=pdomysql;; mysqli|pdomysql) ;; *) return 1;; esac
   case "$VDM_SITE_DOCROOT" in /var/www/html) relative=.;; /var/www/html/*) relative="${VDM_SITE_DOCROOT#/var/www/html/}";; *) return 1;; esac
   joomlaValidateDocumentRoot "$relative" || return 1
-  joomlaSiteCompose "$site" config --format json > "$work/rendered.json" || return 1
+  joomlaStorageComposeModel "$site" "$VDM_SITE_ENV" "$VDM_SITE_COMPOSE" > "$work/rendered.json" || return 1
   joomlaSiteJSON 'walk(if type=="string" then gsub("\\$\\$"; "$") else . end)' < "$work/rendered.json" > "$work/original-model.json" || return 1
   project=$(joomlaSiteJSON -er '.name | select(test("^[a-z0-9][a-z0-9_-]*$"))' < "$work/original-model.json") || return 1
   joomlaPlaygroundReplacementProject "$site" "$project" || return 1
@@ -13359,18 +13478,16 @@ function joomlaPlaygroundPlanReplacement() {
   if cliHasValue vdm_database_rootpass; then root_override=true; fi
   joomlaPlaygroundReplacementEnvironment "$work/with-app.yml" "$VDM_DB_SERVICE" db "$VDM_SITE_ENV_KEY" "$VDM_DB_ENGINE" "$work/db-env" "$root_override" &&
     joomlaSetServiceProperty "$work/with-app.yml" "$work/with-env.yml" "$VDM_DB_SERVICE" environment "$work/db-env" || return 1
-  if [ "$VDM_SITE_ENV" = "$VDM_SITE_DIR/.env" ]; then
-    [ -f "$VDM_SITE_ENV" ] && [ ! -L "$VDM_SITE_ENV" ] && cp "$VDM_SITE_ENV" "$work/candidate.env" &&
-      chmod 600 "$work/candidate.env" || return 1
-  else
-    siteWriteScopedEnv "$VDM_SITE_COMPOSE" "$VDM_SITE_ENV" "$VDM_SITE_ENV_KEY" "$work/candidate.env" || return 1
+  if [ "$VDM_WEBSERVER" = apache ]; then
+    joomlaPlaygroundRestoreApacheHealthcheck "$work" "$VDM_SITE_SERVICE" || return 1
   fi
+  siteWriteScopedEnv "$VDM_SITE_COMPOSE" "$VDM_SITE_ENV" "$VDM_SITE_ENV_KEY" "$work/candidate.env" || return 1
   joomlaPlaygroundReplaceEnv "$work/candidate.env" "$VDM_SITE_ENV_KEY" || return 1
   writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE=$image" true &&
     writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE_SOURCE=$VDM_J_REPO" true &&
     writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE_TAG=$VDM_JV" true || return 1
   joomlaPlaygroundReplacementIni "$site" "$work" "$image" "${4:-}" || return 1
-  migrationRunCompose "$work/candidate.env" "$work/candidate.yml" --project-directory "$VDM_SITE_DIR" config --format json > "$work/proposed.json" || return 1
+  joomlaStorageComposeModel "$site" "$work/candidate.env" "$work/candidate.yml" "$VDM_SITE_DIR" > "$work/proposed.json" || return 1
   model=$(joomlaSiteJSON 'walk(if type=="string" then gsub("\\$\\$"; "$") else . end)' < "$work/proposed.json") || return 1
   joomlaBackupValidateDestination "$model" "$project_dir" "$VDM_SITE_DIR" false "${project_dir%/*}/bulk" || return 1
   # Never start a candidate with a replayed installer, or silently switch
@@ -13667,6 +13784,147 @@ function joomlaPlaygroundReplaceEnv() {
   writeEnvVariable "$file" "VDM_${key}_AUTO_INSTALL=false" true &&
     writeEnvVariable "$file" "VDM_${key}_EXTENSIONS_URLS=\"\"" true &&
     writeEnvVariable "$file" "VDM_${key}_CLI_COMMANDS=\"\"" true
+}
+
+# Keep the installed site's environment location and unrelated settings. The
+# isolated candidate never receives the complete shared environment; only this
+# publication copy contains the other sites' original assignments and comments.
+function joomlaPlaygroundPreparePublishedEnvironment() {
+  local original="$1" candidate="$2" key="$3" destination="$4"
+  [[ "$key" =~ ^[A-Za-z]+$ ]] && [ -f "$original" ] && [ ! -L "$original" ] &&
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ ! -e "$destination" ] || return 1
+  (loadEnvFile "$original" && loadEnvFile "$candidate") || return 1
+  case "${OSTYPE:-}" in
+    msys*|cygwin*)
+      original=$(cygpath -am -- "$original") && candidate=$(cygpath -am -- "$candidate") &&
+        destination=$(cygpath -am -- "$destination") || return 1;;
+  esac
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' python3 -I -B - "$original" "$candidate" "$key" "$destination" <<'PYTHON'
+from pathlib import Path
+import re
+import shutil
+import sys
+
+original, candidate, key, destination = sys.argv[1:]
+assignment = re.compile(rb'([ \t]*(?:export[ \t]+)?)(VDM_[A-Za-z0-9_]+)([ \t]*=[ \t]*)(.*)')
+prefix = ('VDM_' + key + '_').encode('ascii')
+
+def comment(value):
+    if value[:1] not in (b'"', b"'"):
+        offset = value.find(b' #')
+        return value[offset:] if offset >= 0 else value[len(value.rstrip(b' \t')):]
+    quote = value[0]
+    index = 1
+    while index < len(value):
+        if value[index] == quote:
+            return value[index + 1:]
+        if value[index] == 92 and index + 1 < len(value):
+            escaped = value[index + 1]
+            if escaped == quote or (quote == 34 and escaped in b'\\$`nrt'):
+                index += 1
+        index += 1
+    raise ValueError()
+
+try:
+    updates = {}
+    for line in Path(candidate).read_bytes().splitlines():
+        match = assignment.fullmatch(line)
+        if match and match[2].startswith(prefix):
+            if match[2] in updates:
+                raise ValueError()
+            value = match[4]
+            suffix = comment(value)
+            updates[match[2]] = value[:-len(suffix)] if suffix else value
+    if not updates:
+        raise ValueError()
+    source = Path(original).read_bytes()
+    newline = b'\r\n' if b'\r\n' in source else b'\n'
+    result = []
+    replaced = set()
+    for line in source.splitlines(keepends=True):
+        body = line.rstrip(b'\r\n')
+        ending = line[len(body):]
+        match = assignment.fullmatch(body)
+        if match and match[2] in updates:
+            result.append(match[1] + match[2] + match[3] + updates[match[2]] + comment(match[4]) + ending)
+            replaced.add(match[2])
+        else:
+            result.append(line)
+    missing = [name + b'=' + value + newline for name, value in updates.items() if name not in replaced]
+    if missing and result and not result[-1].endswith(b'\n'):
+        result.append(newline)
+    with open(destination, 'xb') as output:
+        output.write(b''.join(result + missing))
+    shutil.copymode(original, destination)
+except (OSError, ValueError):
+    sys.exit('Could not prepare the selected website environment for publication.')
+PYTHON
+}
+
+# Write beside the destination so a failed copy cannot truncate the installed
+# environment. The private directory also protects a replacement whose final
+# permissions allow other users to read it. Recheck the expected bytes before
+# the same-filesystem rename; callers serialize replacements with the env lock.
+function joomlaPlaygroundInstallEnvironment() {
+  (
+    set +x
+    umask 077
+    local source="$1" destination="$2" expected="$3" metadata="${4:-$1}" temporary='' status
+    [ -f "$source" ] && [ ! -L "$source" ] && [ -f "$expected" ] && [ ! -L "$expected" ] &&
+      [ -f "$metadata" ] && [ ! -L "$metadata" ] && [ -f "$destination" ] && [ ! -L "$destination" ] || exit 1
+    temporary=$(mktemp -d "${destination%/*}/.octojoom-env.XXXXXXXX") || exit 1
+    trap 'status=$?; trap - EXIT; runPrivileged rm -rf -- "$temporary" || status=1; exit "$status"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    runPrivileged cp -a -- "$metadata" "$temporary/environment" &&
+      runPrivileged cp -- "$source" "$temporary/environment" || exit 1
+    if [ -L "$destination" ] || ! cmp -s "$expected" "$destination"; then
+      printf 'The website environment changed before its atomic update: %s\n' "$destination" >&2
+      exit 1
+    fi
+    runPrivileged mv -f -- "$temporary/environment" "$destination"
+  )
+}
+
+# The environment journal precedes publication. Unlike the general file
+# publisher, both this update and its rollback replace the file atomically.
+function joomlaPlaygroundPublishEnvironment() {
+  local source="$1" destination="$2" work="$3" expected="$4" index saved
+  [[ "$destination" != *[![:print:]]* ]] && [ -f "$destination" ] && [ ! -L "$destination" ] &&
+    [ -f "$expected" ] && [ ! -L "$expected" ] || return 1
+  mkdir -p "$work/original-files" || return 1
+  index=$(find "$work/original-files" -type f | wc -l)
+  saved="$work/original-files/$index"
+  runPrivileged cp -a -- "$destination" "$saved" || return 1
+  cmp -s "$expected" "$saved" || {
+    printf 'The original website environment changed before publication. Retry against the new settings.\n' >&2
+    return 1
+  }
+  printf '%s\t%s\n' "$destination" "$saved" >> "$work/files.journal" || return 1
+  joomlaPlaygroundInstallEnvironment "$source" "$destination" "$saved" "$saved"
+}
+
+# An operator may edit another site in the shared file during verification.
+# Do not restore our snapshot over that edit; retain the journal for recovery.
+function joomlaPlaygroundRollbackEnvironment() {
+  local work="$1" mirror="${2:-}" destination saved published expected
+  [ -f "$work/environment/files.journal" ] || return 0
+  while IFS=$'\t' read -r destination saved; do
+    published="$work/published.env"
+    [ -z "$mirror" ] || [ "$destination" != "$mirror/.env" ] || published="$work/published-mirror.env"
+    if [ -L "$destination" ] || { ! cmp -s "$published" "$destination" &&
+      { [ "$saved" = - ] || ! cmp -s "$saved" "$destination"; }; }; then
+      printf 'The website environment changed after publication; preserve it and inspect the recovery journal: %s\n' "$destination" >&2
+      return 1
+    fi
+  done < "$work/environment/files.journal"
+  while IFS=$'\t' read -r destination saved; do
+    published="$work/published.env"
+    [ -z "$mirror" ] || [ "$destination" != "$mirror/.env" ] || published="$work/published-mirror.env"
+    expected="$published"
+    if cmp -s "$saved" "$destination"; then expected="$saved"; fi
+    joomlaPlaygroundInstallEnvironment "$saved" "$destination" "$expected" || return 1
+  done < "$work/environment/files.journal"
 }
 
 # The installed destination supplies hosting, mail, routing, TLS, and custom
@@ -14132,7 +14390,7 @@ function joomlaPlaygroundReplaceSite() {
     set +x
     umask 077
     local prepared="$1" site="$2" backup="$3" stage=preflight reason='' recovery='' verified='' enabled='' running='' existing=''
-    local token='' work='' lock='' paused=false removed=false committed=false recovered=true status=1 public_running=null
+    local token='' work='' lock='' environment_lock='' environment_locked=false paused=false removed=false committed=false recovered=true status=1 public_running=null
     local directory compose mirror='' database app web root role original candidate target ini service old_env='' old_digest='' project='' kind was_running outcome=not_committed result_status=failed
     local -a before=() previous_running=()
     case "$backup" in true|false) ;; *) exit 17;; esac
@@ -14161,6 +14419,7 @@ function joomlaPlaygroundReplaceSite() {
                 joomlaBackupRollbackWebsite "$work/$role" || recovered=false
             fi
           done
+          if "$recovered"; then joomlaPlaygroundRollbackEnvironment "$work" "$mirror" || recovered=false; fi
           if "$recovered"; then joomlaBackupRollbackFiles "$work" || recovered=false; fi
           if "$recovered"; then joomlaBackupRollbackFiles "$work/ingress" || recovered=false; fi
           if "$recovered"; then joomlaPlaygroundReplacementProject "$site" "$project" || recovered=false; fi
@@ -14197,6 +14456,13 @@ function joomlaPlaygroundReplaceSite() {
         "$committed" || recovered=false
       fi
       if "$recovered" && { ! "$committed" || [ "$status" -eq 0 ]; }; then
+        if "$environment_locked" && ! { rm -f -- "$environment_lock/recovery.path" && rmdir "$environment_lock"; }; then
+          reason="Inspect and release the retained environment change lock at $environment_lock." status=1
+          [ -n "$recovery" ] || recovery="$environment_lock"
+          "$committed" || recovered=false
+        fi
+      fi
+      if "$recovered" && { ! "$committed" || [ "$status" -eq 0 ]; }; then
         if ! { rm -f -- "$lock/recovery.path" && rmdir "$lock"; }; then
           reason="Inspect and release the retained site change lock at $lock." status=1
           [ -n "$recovery" ] || recovery="$lock"
@@ -14225,9 +14491,18 @@ function joomlaPlaygroundReplaceSite() {
     token="${token%$'\r'}"; [[ "$token" =~ ^[0-9a-f]{32}$ ]] || exit 1
     printf '%s\n' "$token" > "$work/token" || exit 1
     cp -- "$compose" "$work/initial-compose" || exit 1
-    if [ -f "$old_env" ]; then old_digest=$(migrationArchiveDigest "$old_env") || exit 1; fi
+    if [ -z "$old_env" ] || [ ! -f "$old_env" ] || [ -L "$old_env" ]; then
+      printf 'Replacement requires the existing website environment file. Restore that file before retrying.\n' >&2
+      exit 1
+    fi
+    old_digest=$(migrationArchiveDigest "$old_env") && cp -p "$old_env" "$work/initial.env" || exit 1
     joomlaDatabaseContext "$site" && joomlaPlaygroundConfirmReplaceSettings "$prepared" || exit $?
     joomlaPlaygroundPlanReplacement "$prepared" "$site" "$work" "$mirror" || exit $?
+    joomlaPlaygroundPreparePublishedEnvironment "$work/initial.env" "$work/candidate.env" "$VDM_SITE_ENV_KEY" "$work/published.env" || exit 1
+    if [ -n "$mirror" ] && [ "$old_env" = "$directory/.env" ]; then
+      cp -p "$mirror/.env" "$work/initial-mirror.env" &&
+        joomlaPlaygroundPreparePublishedEnvironment "$work/initial-mirror.env" "$work/candidate.env" "$VDM_SITE_ENV_KEY" "$work/published-mirror.env" || exit 1
+    fi
     joomlaPlaygroundAllocateReplacement "$site" "$work" || exit 1
     stage=candidate
     printf '%s\n' "$stage" > "$work/stage" || exit 1
@@ -14237,6 +14512,15 @@ function joomlaPlaygroundReplaceSite() {
     app=$(joomlaSiteJSON -er .app < "$work/services.json") && database=$(joomlaSiteJSON -er .db < "$work/services.json") &&
       root=$(joomlaSiteJSON -er .root < "$work/services.json") && web=$(joomlaSiteJSON -er .web < "$work/services.json") || exit 1
     project=$(joomlaSiteJSON -er .project < "$work/services.json") || exit 1
+    # Different websites may share this file. Reserve it before stopping any
+    # original service, then reject a snapshot made stale by an earlier writer.
+    environment_lock="${old_env}.octojoom-change.lock"
+    mkdir "$environment_lock" 2>/dev/null || {
+      printf 'Another operation is changing the website environment: %s\n' "$old_env" >&2
+      exit 1
+    }
+    environment_locked=true
+    printf '%s\n' "$work" > "$environment_lock/recovery.path" || exit 1
     joomlaPlaygroundCheckOriginalSite "$site" "$work" "$compose" "$old_env" "$old_digest" "$enabled" "$mirror" "$project" || exit 1
     running=$(joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" ps --status running --services) &&
       existing=$(joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" ps --all --services) || exit 1
@@ -14290,13 +14574,23 @@ function joomlaPlaygroundReplaceSite() {
         joomlaPlaygroundCheckOriginalVolume "$site" "$original" "$work/$role" "$target" || exit 1
       fi
     done
-    joomlaBackupPublishFile "$work/candidate.env" "$directory/.env" "$work" || exit 1
+    if [ "$(getContainerEnvFile joomla "$site" available)" != "$old_env" ] || ! cmp -s "$work/initial.env" "$old_env"; then
+      printf 'The original website environment changed before publication. Retry against the new settings.\n' >&2
+      exit 1
+    fi
+    if [ -n "$mirror" ] && [ "$old_env" = "$directory/.env" ] && ! cmp -s "$work/initial-mirror.env" "$mirror/.env"; then
+      printf 'The enabled website environment changed before publication. Retry against the new settings.\n' >&2
+      exit 1
+    fi
+    joomlaPlaygroundPublishEnvironment "$work/published.env" "$old_env" "$work/environment" "$work/initial.env" || exit 1
     if [ -f "$work/candidate.ini" ]; then
       joomlaPlaygroundCheckIni "$work"/ini-*.path && IFS= read -r ini < "$work/ini-destination.path" &&
         joomlaBackupPublishFile "$work/candidate.ini" "$ini" "$work" || exit 1
     fi
     if [ -n "$mirror" ]; then
-      joomlaBackupPublishFile "$work/candidate.env" "$mirror/.env" "$work" || exit 1
+      if [ "$old_env" = "$directory/.env" ]; then
+        joomlaPlaygroundPublishEnvironment "$work/published-mirror.env" "$mirror/.env" "$work/environment" "$work/initial-mirror.env" || exit 1
+      fi
       if [[ -n "${ini:-}" && "$ini" == "$directory/"* ]]; then
         joomlaPlaygroundCheckIni "$work/ini-mirror.path" &&
           joomlaBackupPublishFile "$work/candidate.ini" "$mirror/${ini#"$directory/"}" "$work" || exit 1
@@ -14336,7 +14630,7 @@ function joomlaPlaygroundReplaceSite() {
       joomlaSiteCompose "$site" up -d --no-recreate --no-deps --pull never "${previous_running[@]}" >/dev/null || exit 1
     fi
     if [ "$was_running" = true ]; then
-      joomlaPlaygroundWaitFresh "$directory/.env" "$compose" "$app" "$site" "$root" "$web" || exit 1
+      joomlaPlaygroundWaitFresh "$old_env" "$compose" "$app" "$site" "$root" "$web" || exit 1
     fi
     public_running="$was_running"
     stage=cleanup
