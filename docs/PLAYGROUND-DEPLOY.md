@@ -127,11 +127,9 @@ state after this check. The website keeps its enabled or disabled registration.
 
 If a switch fails, Octojoom restores the previous files, database, configuration
 and running services. If recovery requires manual intervention, the error gives
-the private recovery location. When a backup was selected, the successful result reports both the verified
-archive and the private recovery directory. The directory records where the
-original website files and database storage were retained. These can occupy
-substantial disk space. Completing a replacement without a backup discards
-the old data held temporarily for rollback.
+the private recovery location. On success, the result identifies the full
+backup when one was selected. Completing a replacement without a backup
+discards the old data held temporarily for rollback.
 
 ## Inspect an existing host
 

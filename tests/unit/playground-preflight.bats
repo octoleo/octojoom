@@ -121,41 +121,6 @@ modify_model() {
   assert_output_contains 'overlapping document-root mounts'
 }
 
-@test "Playground inspection accepts a site-owned legacy PHP INI bind and rejects foreign or non-file mounts" {
-  local available="$VDM_REPO_PATH/joomla/available/$site" ini
-  ini=$(joomlaWebHostPath "$available/php.ini")
-  printf 'memory_limit=256M\n' > "$available/php.ini"
-  joomlaSiteJSON --arg ini "$ini" '.services.app.volumes += [{type:"bind",source:$ini,target:"/var/www/html/php.ini"}]' \
-    < "$SANDBOX/model" > "$SANDBOX/legacy"
-  cp "$SANDBOX/legacy" "$SANDBOX/model"
-  run joomlaPlaygroundTargetPreflight "$site" "$summary"
-  assert_success
-
-  mkdir -p "$VDM_PROJECT_PATH/store"
-  printf 'memory_limit=256M\n' > "$VDM_PROJECT_PATH/store/php.ini"
-  getJoomlaComposeEnvKey() { echo STORE; }
-  ini=$(joomlaWebHostPath "$VDM_PROJECT_PATH/store/php.ini")
-  joomlaSiteJSON --arg ini "$ini" '.services.app.volumes[-1].source=$ini' < "$SANDBOX/legacy" > "$SANDBOX/model"
-  run joomlaPlaygroundTargetPreflight "$site" "$summary"
-  assert_success
-
-  printf 'memory_limit=256M\n' > "$SANDBOX/foreign.ini"
-  ini=$(joomlaWebHostPath "$SANDBOX/foreign.ini")
-  joomlaSiteJSON --arg ini "$ini" '.services.app.volumes[-1].source=$ini' < "$SANDBOX/legacy" > "$SANDBOX/model"
-  run joomlaPlaygroundTargetPreflight "$site" "$summary"
-  assert_failure
-  assert_output_contains 'outside the selected site'
-  cp "$SANDBOX/legacy" "$SANDBOX/model"
-  rm "$available/php.ini" && mkdir "$available/php.ini"
-  run joomlaPlaygroundTargetPreflight "$site" "$summary"
-  assert_failure
-  assert_output_contains 'must be a regular file'
-  modify_model '.services.app.volumes[-1].type="volume"'
-  run joomlaPlaygroundTargetPreflight "$site" "$summary"
-  assert_failure
-  assert_output_contains 'overlapping document-root mounts'
-}
-
 @test "Playground runtime chooses JoomEngine candidates by Joomla base label or qualified tag" {
   docker() { echo 'joomla:6.2.0-php8.4-apache'; }
   run joomlaPlaygroundRuntimeCandidate octoleo/joomengine:6.2.2-dev 6.2.0 8.4 apache
