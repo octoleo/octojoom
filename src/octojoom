@@ -13550,23 +13550,19 @@ function joomlaPlaygroundReplaceableDirectory() {
   # Refuse mounts nested anywhere in a bind tree, including same-device Linux
   # bind mounts that df and st_dev alone cannot distinguish. Cleanup must never
   # descend into another host filesystem.
-  local host_path
-  host_path=$(joomlaWebHostPath "$1") || return 1
-  python3 -I -B - "$host_path" <<'PYMOUNT'
+  python3 -I -B - "$1" <<'PYMOUNT'
 import os
 import re
 import sys
 
-path = os.path.realpath(sys.argv[1])
-if not os.path.isdir(path) or os.path.ismount(path):
+path = os.fsencode(os.path.realpath(sys.argv[1]))
+if os.path.ismount(path):
     sys.exit(1)
 if os.path.exists("/proc/self/mountinfo"):
-    # Linux mountinfo escapes the raw bytes of a mount path.
-    path_bytes = os.fsencode(path)
     with open("/proc/self/mountinfo", "rb") as mounts:
         for record in mounts:
             mount = re.sub(rb"\\([0-7]{3})", lambda match: bytes([int(match[1], 8)]), record.split()[4])
-            if mount == path_bytes or mount.startswith(path_bytes.rstrip(b"/") + b"/"):
+            if mount == path or mount.startswith(path.rstrip(b"/") + b"/"):
                 sys.exit(1)
 PYMOUNT
 }
