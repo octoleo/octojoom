@@ -10,11 +10,7 @@ setup() {
 }
 
 fixture() {
-  local script="$HELPERS_DIR/playground-fixture.py" destination="$package"
-  if is_windows; then
-    script=$(cygpath -am -- "$script") && destination=$(cygpath -am -- "$destination") || return 1
-  fi
-  python3 "$script" "$destination" "${1:-valid}"
+  python3 "$HELPERS_DIR/playground-fixture.py" "$package" "${1:-valid}"
 }
 
 inspect_cli() {
