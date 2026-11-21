@@ -133,7 +133,7 @@ Each new feature extends these same handlers and completion discovery.
 | Joomla → Setup new container | `joomla setup` | `--key`, domain explicit/saved; optional `--env-key`, `--sub-domain`, `--image-source`, `--image-tag`, `--customize`, `--auto-install`, `--enable` | Same questionnaire/defaults/generator; image, runtime and boolean options |
 | Joomla → Bulk setup | `joomla bulk` | domain, subdomain prefix; optional `--number` (2–99) and setup choices | Same bulk generator; individual deployment outcomes |
 | Joomla → Website Information | `joomla list`, `info` | `info`: `--container`; list: optional `--short`, `--version-prefix` | Inventory/details; available website names |
-| Joomla → Deploy Joomengine Playground packages | `joomla playground` | `--action inspect --file` or `--action deploy --file` with `--target new --key --domain` or `--target current --container --confirm yes` | [Inspect, launch or replace a site, with backup choices](PLAYGROUND-DEPLOY.md) |
+| Joomla → Deploy Joomengine Playground packages | `joomla playground` | `--action inspect --file` or `--action deploy --target new --file --key --domain` | [Inspect a complete local ZIP or launch a fresh site](PLAYGROUND-DEPLOY.md) |
 | Selected website lifecycle | `joomla start`, `stop`, `restart`, `redeploy` | `--container`; optional service where supported | Preserves enabled state; affected services/status |
 | Existing enable/disable | `joomla` or `openssh`, `enable` / `disable` | `--container` | Original enable/disable semantics and status |
 | Existing all-enabled start/stop | `joomla` or `openssh`, `up` / `down` | No individual target | Original batch behavior and status |

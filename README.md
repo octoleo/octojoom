@@ -248,7 +248,7 @@ retains its single cold archive of the project files and raw database data.
 | [7. Database engines](docs/DATABASE-ENGINES.md) | Select a supported database engine during setup or change an existing site's database with an explicit data choice |
 | [8. Database tools](docs/DATABASE-TOOLS.md) | Export/import SQL, select tables, open the native SQL console, and export multiple sites |
 | [9. Backups and restore points](docs/BACKUPS.md) | Create, verify, restore, and manage database and website backups |
-| [Playground packages](docs/PLAYGROUND-DEPLOY.md) | Inspect a complete JoomEngine Playground ZIP, launch a new Joomla site or replace a managed site |
+| [Playground packages](docs/PLAYGROUND-DEPLOY.md) | Inspect a complete JoomEngine Playground ZIP or launch it as a new Joomla site |
 | [12. Local HTTPS](docs/LOCAL-HTTPS.md) | Select existing websites for trusted local HTTPS, renew certificates, or change their connection mode |
 
 See [test coverage and validation limits](tests/README.md) for the portable suite
