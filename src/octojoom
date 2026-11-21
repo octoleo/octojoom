@@ -11280,15 +11280,14 @@ function joomlaPersistenceCanonicalPath() {
   if [ "$path" = / ] && [ -z "$suffix" ]; then printf '/\n'; else printf '%s%s\n' "${path%/}" "$suffix"; fi
 }
 
-# Render storage facts without accepting Compose's empty substitution for a
-# missing variable. Keep native diagnostics private: they can contain secrets,
-# and an unrelated obsolete version field does not affect mount ownership.
+# Render concrete storage identities. Missing variables only block this check
+# when storage or project identity uses them; unrelated warnings remain private.
 # shellcheck disable=SC2016 # jq expressions belong to jq, not the shell.
 function joomlaStorageComposeModel() {
   (
     set +x
     umask 077
-    local site="$1" env_file="$2" compose_file="$3" directory="${4:-}" diagnostic model raw missing value status=0
+    local site="$1" env_file="$2" compose_file="$3" directory="${4:-}" diagnostic model raw missing variable value status=0
     local description="${2:-Compose defaults}"
     local -a arguments=(compose)
     diagnostic=$(mktemp "${TMPDIR:-/tmp}/octojoom-storage.XXXXXXXX") || exit 1
@@ -11298,15 +11297,31 @@ function joomlaStorageComposeModel() {
     arguments+=(--file "$compose_file")
     [ -z "$directory" ] || arguments+=(--project-directory "$directory")
     model=$(LC_ALL=C runComposeProgress "$compose_file" "${arguments[@]}" config --format json 2>"$diagnostic") || status=$?
-    if grep -q 'variable is not set' "$diagnostic"; then
-      missing=$(sed -nE 's/\\"/"/g; s/.*The[[:space:]]+"?([A-Za-z_][A-Za-z0-9_]*)"?[[:space:]]+variable is not set.*/\1/p' "$diagnostic" |
-        sort -u | awk '{printf "%s%s", separator, $0; separator=", "} END {if(NR) print ""}')
-      printf 'Cannot verify storage for %s using %s: Compose variables are unset (%s).\n' "$site" "$description" "${missing:-unknown}" >&2
-      exit 1
-    fi
     if [ "$status" -ne 0 ]; then
       printf 'Cannot verify storage for %s using %s: Compose configuration could not be rendered.\n' "$site" "$description" >&2
       exit 1
+    fi
+    if grep -q 'variable is not set' "$diagnostic"; then
+      missing=$(sed -nE 's/\\"/"/g; s/.*The[[:space:]]+"?([A-Za-z_][A-Za-z0-9_]*)"?[[:space:]]+variable is not set.*/\1/p' "$diagnostic" | sort -u)
+      if [ -z "$missing" ] || ! raw=$(LC_ALL=C runComposeProgress "$compose_file" "${arguments[@]}" config --no-interpolate --format json 2>"$diagnostic") ||
+        ! joomlaSiteJSON -e '(.services | type)=="object"' >/dev/null 2>&1 <<< "$raw"; then
+        printf 'Cannot verify storage for %s using %s: unresolved storage references could not be checked.\n' "$site" "$description" >&2
+        exit 1
+      fi
+      while IFS= read -r variable; do
+        status=0
+        joomlaSiteJSON -e --arg variable "$variable" '[.name, .services[].volumes[]?.source, .services[].volumes[]?.target,
+            (.volumes//{})[].name, (.volumes//{})[].driver_opts[]?] |
+          any(.[]; type=="string" and (gsub("\\$\\$"; "") | test("\\$(\\{)?"+$variable+"([^A-Za-z0-9_]|$)")))' \
+          >/dev/null 2>&1 <<< "$raw" || status=$?
+        if [ "$status" -eq 0 ]; then
+          printf 'Cannot verify storage for %s using %s: Compose storage variables are unset (%s).\n' "$site" "$description" "$variable" >&2
+          exit 1
+        elif [ "$status" -ne 1 ]; then
+          printf 'Cannot verify storage for %s using %s: unresolved storage references could not be checked.\n' "$site" "$description" >&2
+          exit 1
+        fi
+      done <<< "$missing"
     fi
     # An explicitly empty project base produces no Compose warning. Inspect
     # unexpanded storage references only in that case, preserving intentional
@@ -11329,8 +11344,7 @@ function joomlaStorageComposeModel() {
         exit 1
       fi
     fi
-    # The selected site has an empty services map while replacement gates its
-    # public project. Every actual bind or named volume still needs a concrete
+    # Every actual bind or named volume needs a concrete
     # source and target before the caller can compare ownership.
     if ! joomlaSiteJSON -e '. as $model | (.services | type)=="object" and
       all(.services[]; type=="object" and ((.volumes//[]) | type)=="array" and
@@ -13216,37 +13230,26 @@ function joomlaPlaygroundImportCandidate() {
   )
 }
 
-# Rewrite only installer/recipe input and the data connection. Keep the
-# original site's other environment entries, including image-specific options.
-# shellcheck disable=SC2016 # Literal Compose references and jq program variables.
+# Remove automatic installer inputs while retaining custom application settings.
+# Database service configuration belongs to the destination and is unchanged.
+# shellcheck disable=SC2016
 function joomlaPlaygroundReplacementEnvironment() {
-  local compose="$1" service="$2" kind="$3" key="$4" engine="$5" output="$6"
-  local style=list field index prefix=MYSQL
-  local -a fields=() suffixes=()
+  local compose="$1" service="$2" key="$3" output="$4" style=list field index
+  local -a fields=(JOOMLA_DB_NAME JOOMLA_DB_USER JOOMLA_DB_PASSWORD JOOMLA_DB_TYPE JOOMLA_DB_PREFIX)
+  local -a suffixes=(DB DB_USER DB_PASS JOOMLA_DB_TYPE JOOMLA_DB_PREFIX)
   joomlaServiceProperty "$compose" "$service" environment > "$output.input" || return 1
   head -1 "$output.input" | grep -qE '^    environment:[[:space:]]*$' || return 1
   if grep -qE '^      [A-Za-z_][A-Za-z0-9_]*:' "$output.input"; then style=map; fi
-  awk -v kind="$kind" -v root="${7:-false}" '
+  awk '
     NR==1 {print; next}
     /^[[:space:]]*(#.*)?$/ {print; next}
     /^      (- |[A-Za-z_][A-Za-z0-9_]*:)/ {
       name=$0; sub(/^      (-[[:space:]]*)?["\047]?/,"",name); sub(/[:=].*/,"",name)
-      if (kind=="app" && name ~ /^JOOMLA_(SITE_NAME|ADMIN_(USER|USERNAME|PASSWORD|EMAIL)|EXTENSIONS_URLS|CLI_COMMANDS|DB_(NAME|USER|PASSWORD|TYPE|PREFIX))$/) next
-      if (kind=="db" && (name ~ /^(MYSQL|MARIADB)_(DATABASE|USER|PASSWORD)$/ ||
-          (root=="true" && name ~ /^(MYSQL|MARIADB)_ROOT_PASSWORD$/))) next
+      if (name ~ /^JOOMLA_(SITE_NAME|ADMIN_(USER|USERNAME|PASSWORD|EMAIL)|EXTENSIONS_URLS|CLI_COMMANDS|DB_(NAME|USER|PASSWORD|TYPE|PREFIX))$/) next
       print; next
     }
     {exit 1}
   ' "$output.input" > "$output" || { printf 'Unsupported service environment layout for %s.\n' "$service" >&2; return 1; }
-  if [ "$kind" = app ]; then
-    fields=(JOOMLA_DB_NAME JOOMLA_DB_USER JOOMLA_DB_PASSWORD JOOMLA_DB_TYPE JOOMLA_DB_PREFIX)
-    suffixes=(DB DB_USER DB_PASS JOOMLA_DB_TYPE JOOMLA_DB_PREFIX)
-  else
-    [ "$engine" != mariadb ] || prefix=MARIADB
-    fields=("${prefix}_DATABASE" "${prefix}_USER" "${prefix}_PASSWORD")
-    suffixes=(DB DB_USER DB_PASS)
-    if [ "${7:-false}" = true ]; then fields+=("${prefix}_ROOT_PASSWORD"); suffixes+=(DB_ROOT); fi
-  fi
   for index in "${!fields[@]}"; do
     field="${fields[index]}"
     if [ "$style" = map ]; then printf '      %s: "${VDM_%s_%s}"\n' "$field" "$key" "${suffixes[index]}"
@@ -13323,6 +13326,10 @@ function joomlaPlaygroundReplacementIni() {
   joomlaPHPPatchIni "$source" "$work/candidate.ini" "${changes[@]}" || return 1
   joomlaPHPValidateIni "$image" "$work/candidate.ini" "$VDM_PHP_INI_TARGET" "${changes[@]}" || return 1
   host=$(joomlaWebHostPath "$destination") || return 1
+  if [ "$old_target" = "$VDM_PHP_INI_TARGET" ] && [ "$source" = "$work/ini-destination" ]; then
+    cp -- "$work/with-env.yml" "$work/candidate.yml"
+    return $?
+  fi
   joomlaPHPReplaceMount "$work/with-env.yml" "$work/candidate.yml" "$VDM_SITE_SERVICE" "$old_target" "$host" "$VDM_PHP_INI_TARGET"
 }
 
@@ -13341,66 +13348,19 @@ function joomlaPlaygroundReplacementProject() {
   done <<< "$ids"
 }
 
-# Undo only the exact Apache probe emitted by the reverted Playground code.
-# Its digest identifies the old command without retaining executable probe code.
-# Custom checks and existing timing options remain the operator's configuration.
-function joomlaPlaygroundRestoreApacheHealthcheck() {
-  local work="$1" app="$2"
-  (
-    cd -- "$work" || exit 1
-    python3 -I -B - "$app" <<'PYTHON' || exit 1
-import hashlib
-import json
-from pathlib import Path
-import re
-import sys
-
-output = Path("restored-healthcheck.property")
-output.unlink(missing_ok=True)
-model = json.loads(Path("original-model.json").read_text())
-health = model["services"][sys.argv[1]].get("healthcheck")
-test = health.get("test") if isinstance(health, dict) else None
-if (not isinstance(test, list) or len(test) != 8 or test[:3] != ["CMD", "sh", "-c"]
-        or test[4] != "sh" or test[6:] != ["localhost", "127.0.0.1"]
-        or not isinstance(test[3], str) or not isinstance(test[5], str)):
-    sys.exit(0)
-if hashlib.sha256(test[3].encode()).hexdigest() != "ef1f727764af80cf0b5b416d215a095010aa786b47536524d21a3e3824576cc6":
-    sys.exit(0)
-
-lines = ['    healthcheck:', '      test: ["CMD", "curl", "-f", "http://localhost/"]']
-ordered = [key for key in ("interval", "timeout", "retries") if key in health]
-ordered += [key for key in health if key not in ("test", "interval", "timeout", "retries")]
-for key in ordered:
-    value = health[key]
-    if not re.fullmatch(r"[a-z_]+", key):
-        sys.exit(1)
-    # Compose duration strings are safe plain YAML; serialize other values as
-    # JSON scalars/collections, which are also valid YAML, without evaluation.
-    duration = key in ("interval", "timeout", "start_period", "start_interval")
-    scalar = value if duration and isinstance(value, str) and re.fullmatch(r"[0-9.a-z]+", value) else json.dumps(value)
-    lines.append(f"      {key}: {scalar}")
-output.write_text("\n".join(lines) + "\n")
-PYTHON
-    if [ -f restored-healthcheck.property ]; then
-      joomlaSetServiceProperty with-env.yml with-health.yml "$app" healthcheck restored-healthcheck.property &&
-        mv -- with-health.yml with-env.yml || exit 1
-    fi
-  )
-}
-
-# The transaction has already read the destination database context and
-# collected the operator's choices. Prepare changes in its private directory.
+# Prepare the minimal application/INI changes without starting another site.
+# The existing database service, project, routing and mount declarations stay.
 # shellcheck disable=SC2016
 function joomlaPlaygroundPlanReplacement() {
-  local prepared="$1" site="$2" work="$3" project_dir model project image relative web=127.0.0.1 root_override=false
-  local endpoint="${DOCKER_HOST:-}" VDM_WEBSERVER="$VDM_SITE_WEBSERVER" VDM_DB_DRIVER="$VDM_DB_DRIVER"
+  local prepared="$1" site="$2" work="$3" project image relative web=127.0.0.1
+  local endpoint="${DOCKER_HOST:-}" VDM_WEBSERVER="$VDM_SITE_WEBSERVER"
   local VDM_J_REPO="${VDM_J_REPO:-}" VDM_JV="${VDM_JV:-}"
   if [ -n "${DOCKER_CONTEXT:-}" ] || [ -z "$endpoint" ]; then endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}') || return 1; fi
-  case "$endpoint" in unix://*|npipe://*) ;; *) printf 'Run Playground replacement on the local Docker host.\n' >&2; return 1;; esac
+  case "$endpoint" in unix://*|npipe://*) ;; *) printf 'Run Playground import on the local Docker host.\n' >&2; return 1;; esac
   [[ "$VDM_DB_SITE" = "$site" && "$VDM_DB_INSTALLED" = true && "$VDM_SITE_ENV_KEY" =~ ^[A-Za-z]+$ ]] || {
-    printf 'Replacement requires a configured Octojoom site with an installed Joomla database.\n' >&2; return 1;
+    printf 'Import requires a configured Octojoom site with an installed Joomla database.\n' >&2; return 1;
   }
-  case "$VDM_DB_ENGINE" in mysql|mariadb) ;; *) printf 'Playground replacement requires MariaDB or MySQL.\n' >&2; return 1;; esac
+  case "$VDM_DB_ENGINE" in mysql|mariadb) ;; *) printf 'Playground import requires MariaDB or MySQL.\n' >&2; return 1;; esac
   case "$VDM_DB_DRIVER" in mysql) VDM_DB_DRIVER=mysqli;; pdo_mysql) VDM_DB_DRIVER=pdomysql;; mysqli|pdomysql) ;; *) return 1;; esac
   case "$VDM_SITE_DOCROOT" in /var/www/html) relative=.;; /var/www/html/*) relative="${VDM_SITE_DOCROOT#/var/www/html/}";; *) return 1;; esac
   joomlaValidateDocumentRoot "$relative" || return 1
@@ -13408,12 +13368,9 @@ function joomlaPlaygroundPlanReplacement() {
   joomlaSiteJSON 'walk(if type=="string" then gsub("\\$\\$"; "$") else . end)' < "$work/rendered.json" > "$work/original-model.json" || return 1
   project=$(joomlaSiteJSON -er '.name | select(test("^[a-z0-9][a-z0-9_-]*$"))' < "$work/original-model.json") || return 1
   joomlaPlaygroundReplacementProject "$site" "$project" || return 1
-  project_dir=$(joomlaPHPProjectIni "$site") || return 1
-  project_dir="${project_dir%/*}"
-  model=$(cat "$work/original-model.json") || return 1
-  joomlaBackupValidateDestination "$model" "$project_dir" "$VDM_SITE_DIR" false "${project_dir%/*}/bulk" || return 1
   case "$VDM_WEBSERVER" in
-    nginx)
+    nginx|fpm)
+      VDM_WEBSERVER=nginx
       web=$(joomlaSiteJSON -er --arg app "$VDM_SITE_SERVICE" '[.services | to_entries[] | select(.key!=$app and
         any(.value.volumes[]?; .target=="/etc/nginx/conf.d/default.conf") and (.value.depends_on | has($app))) | .key] |
         select(length==1) | .[0]' < "$work/original-model.json") || { printf 'Cannot identify the existing Nginx/FPM route.\n' >&2; return 1; };;
@@ -13427,15 +13384,10 @@ function joomlaPlaygroundPlanReplacement() {
   fi
   joomlaPlaygroundSelectFreshRuntime "$prepared" || return 1
   image="$VDM_J_REPO:$VDM_JV"
-  siteReplaceServiceScalar "$VDM_SITE_COMPOSE" "$work/with-image.yml" "$VDM_SITE_SERVICE" image "$image" || return 1
-  joomlaPlaygroundReplacementEnvironment "$work/with-image.yml" "$VDM_SITE_SERVICE" app "$VDM_SITE_ENV_KEY" "$VDM_DB_ENGINE" "$work/app-env" &&
-    joomlaSetServiceProperty "$work/with-image.yml" "$work/with-app.yml" "$VDM_SITE_SERVICE" environment "$work/app-env" || return 1
-  if cliHasValue vdm_database_rootpass; then root_override=true; fi
-  joomlaPlaygroundReplacementEnvironment "$work/with-app.yml" "$VDM_DB_SERVICE" db "$VDM_SITE_ENV_KEY" "$VDM_DB_ENGINE" "$work/db-env" "$root_override" &&
-    joomlaSetServiceProperty "$work/with-app.yml" "$work/with-env.yml" "$VDM_DB_SERVICE" environment "$work/db-env" || return 1
-  if [ "$VDM_WEBSERVER" = apache ]; then
-    joomlaPlaygroundRestoreApacheHealthcheck "$work" "$VDM_SITE_SERVICE" || return 1
-  fi
+  if [ "$image" = "$VDM_SITE_IMAGE" ]; then cp -- "$VDM_SITE_COMPOSE" "$work/with-image.yml" || return 1
+  else siteReplaceServiceScalar "$VDM_SITE_COMPOSE" "$work/with-image.yml" "$VDM_SITE_SERVICE" image "$image" || return 1; fi
+  joomlaPlaygroundReplacementEnvironment "$work/with-image.yml" "$VDM_SITE_SERVICE" "$VDM_SITE_ENV_KEY" "$work/app-env" &&
+    joomlaSetServiceProperty "$work/with-image.yml" "$work/with-env.yml" "$VDM_SITE_SERVICE" environment "$work/app-env" || return 1
   siteWriteScopedEnv "$VDM_SITE_COMPOSE" "$VDM_SITE_ENV" "$VDM_SITE_ENV_KEY" "$work/candidate.env" || return 1
   joomlaPlaygroundReplaceEnv "$work/candidate.env" "$VDM_SITE_ENV_KEY" || return 1
   writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE=$image" true &&
@@ -13443,154 +13395,19 @@ function joomlaPlaygroundPlanReplacement() {
     writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE_TAG=$VDM_JV" true || return 1
   joomlaPlaygroundReplacementIni "$site" "$work" "$image" "${4:-}" || return 1
   joomlaStorageComposeModel "$site" "$work/candidate.env" "$work/candidate.yml" "$VDM_SITE_DIR" > "$work/proposed.json" || return 1
-  model=$(joomlaSiteJSON 'walk(if type=="string" then gsub("\\$\\$"; "$") else . end)' < "$work/proposed.json") || return 1
-  joomlaBackupValidateDestination "$model" "$project_dir" "$VDM_SITE_DIR" false "${project_dir%/*}/bulk" || return 1
-  # Never start a candidate with a replayed installer, or silently switch
-  # Compose project identity when the candidate is published under the old name.
-  joomlaSiteJSON -e --arg app "$VDM_SITE_SERVICE" --arg image "$image" --arg project "$project" '
-    .name==$project and .services[$app].image==$image and
-    all(.services[$app].environment | keys[]; test("^JOOMLA_(SITE_NAME|ADMIN_|EXTENSIONS_URLS|CLI_COMMANDS)")|not)
-  ' >/dev/null <<< "$model" || return 1
+  (
+    cd -- "$work" || exit 1
+    joomlaSiteJSON -e --arg app "$VDM_SITE_SERVICE" --arg db "$VDM_DB_SERVICE" --arg project "$project" --slurpfile old rendered.json '
+      .name==$project and .services[$db]==$old[0].services[$db] and .volumes==$old[0].volumes and
+      .networks==$old[0].networks and .services[$app].healthcheck==$old[0].services[$app].healthcheck and
+      all(.services[$app].environment | keys[]; test("^JOOMLA_(SITE_NAME|ADMIN_|EXTENSIONS_URLS|CLI_COMMANDS)")|not)
+    ' < proposed.json >/dev/null
+  ) || { printf 'The import would change database storage, networking or the configured health check.\n' >&2; return 1; }
   joomlaSiteJSON -n --arg app "$VDM_SITE_SERVICE" --arg db "$VDM_DB_SERVICE" --arg web "$web" --arg root "$VDM_SITE_DOCROOT" \
     --arg engine "$VDM_DB_ENGINE" --arg image "$image" --arg project "$project" --arg ini "$VDM_PHP_INI_TARGET" --arg driver "$VDM_DB_DRIVER" \
     '{app:$app,db:$db,web:$web,root:$root,engine:$engine,image:$image,project:$project,ini:$ini,driver:$driver}' > "$work/services.json"
 }
 
-# Keep only the selected services and their known data and companion mounts.
-# Reject custom storage, host namespaces or commands rather than letting an
-# imported application reach the original project during isolated startup.
-# shellcheck disable=SC2016
-function joomlaPlaygroundReplacementModel() {
-  local work="$1" token="$2" app="$3" db="$4" web="$5" info="$6" ini_file site_dir
-  local role type original candidate files file
-  local -a paths=()
-  for role in web db; do
-    type=$(joomlaSiteJSON -er --arg role "$role" '.[$role].type' < "$work/storage.json") || return 1
-    original=$(joomlaSiteJSON -er --arg role "$role" '.[$role].original' < "$work/storage.json") || return 1
-    candidate=$(joomlaSiteJSON -er --arg role "$role" '.[$role].candidate' < "$work/storage.json") || return 1
-    if [ "$type" = bind ]; then
-      original=$(joomlaWebHostPath "$original") && candidate=$(joomlaWebHostPath "$candidate") || return 1
-    fi
-    [ "$original" != "$candidate" ] || return 1
-    paths+=(--arg "${role}Old" "$original" --arg "${role}New" "$candidate" --arg "${role}Type" "$type")
-  done
-  ini_file=$(joomlaWebHostPath "$work/candidate.ini") && site_dir=$(joomlaWebHostPath "$VDM_SITE_DIR") || return 1
-  joomlaPlaygroundCandidateModel "octojoom-playground-$token" "$app" "$db" "$web" < "$work/proposed.json" > "$work/private-services.json" || return 1
-  joomlaSiteJSON -e "${paths[@]}" --argjson info "$info" --arg ini "$ini_file" --arg dir "$site_dir" --arg dbHost "${VDM_DB_HOST%:*}" '
-    def escaped: gsub("\\$"; "$$");
-    def checked($ok; $why): if $ok then . else error($why) end;
-    def companion($dir; $target; $file): .target==$target and .type=="bind" and .read_only==true and .source==(($dir+"/"+$file) | escaped);
-    def dataMount($model; $kind; $old; $new):
-      checked(.type==$kind and (.volume.subpath//"")=="" and (.bind.propagation//"rprivate")=="rprivate"; "unsupported data mount") |
-      if $kind=="bind" then checked(.source==($old|escaped); "unexpected bind source") | .source=($new|escaped)
-      else checked($kind=="volume" and $model.volumes[.source].name==($old|escaped); "unexpected volume source") end;
-    . as $model |
-    .services |= with_entries(.key as $s | .value |= (
-      # Compose renders inherited image commands and entrypoints as null.
-      checked(.command==null and .entrypoint==null; "unsupported service command or entrypoint") |
-      del(.command,.entrypoint) |
-      checked(((keys-["image","container_name","environment","healthcheck","volumes","networks","expose","labels","depends_on","working_dir","restart","ports","platform","user","read_only","init","stop_grace_period","stop_signal","tty","stdin_open","attach","pull_policy","logging","deploy"])|length)==0; "unsupported custom service configuration") |
-      checked((((.deploy//{}) | keys-["labels","replicas","resources"])|length)==0 and (.deploy.replicas//1)==1 and
-        (((.deploy.resources//{}) | keys-["limits","reservations"])|length)==0 and
-        (((.deploy.resources.limits//{}) | keys-["cpus","memory","pids"])|length)==0 and
-        (((.deploy.resources.reservations//{}) | keys-["cpus","memory"])|length)==0;
-        "unsupported deployment configuration for an isolated service") |
-      checked((.logging.driver//"json-file") as $driver | ["local","json-file","none"] | index($driver)!=null;
-        "unsupported logging driver for an isolated service") |
-      del(.deploy.labels,.pull_policy) |
-      checked(all((.depends_on//{} | keys[]); . as $dependency | $model.services | has($dependency)); "dependency outside the isolated site") |
-      .volumes |= map(
-        if ($s==$info.app or $s==$info.web) and .target=="/var/www/html" then
-          checked((if $s==$info.app then (.read_only//false)==false else .read_only==true end); "unexpected website mount access") |
-          dataMount($model;$webType;$webOld;$webNew)
-        elif $s==$info.db and .target=="/var/lib/mysql" then
-          checked((.read_only//false)==false; "read-only database volume") | dataMount($model;$dbType;$dbOld;$dbNew)
-        elif $s==$info.app and .target==$info.ini and .type=="bind" and .read_only==true then .source=($ini | escaped)
-        elif ($s==$info.app and (companion($dir;"/etc/apache2/sites-enabled/000-default.conf";"apache.conf") or
-          companion($dir;"/usr/local/etc/php-fpm.d/zz-octojoom-user.conf";"php-fpm-user.conf"))) or
-          ($s==$info.web and companion($dir;"/etc/nginx/conf.d/default.conf";"nginx.conf")) then .
-        else error("unsupported extra mount in the isolated site") end)
-    )) |
-    checked(([.services[$info.app].volumes[] | select(.target=="/var/www/html")]|length)==1 and
-      ([.services[$info.db].volumes[] | select(.target=="/var/lib/mysql")]|length)==1; "missing primary data mount") |
-    .services[$info.db].networks.default.aliases=[$dbHost] |
-    # An ordinary internal bridge still has a host IP. Isolated gateway mode
-    # permits service DNS and HTTP between these containers without a host route.
-    .networks.default += {driver:"bridge",enable_ipv6:false,
-      driver_opts:{"com.docker.network.bridge.gateway_mode_ipv4":"isolated"}} |
-    [.services[].volumes[] | select(.type=="volume") | .source] as $used |
-    .volumes=((.volumes//{}) | with_entries(.key as $key | select($used|index($key)) |
-      if .value.name==($webOld|escaped) then .value.name=($webNew|escaped)
-      elif .value.name==($dbOld|escaped) then .value.name=($dbNew|escaped)
-      else error("unmapped database or website volume") end)) |
-    del(.configs,.secrets)
-  ' < "$work/private-services.json" > "$work/candidate.json" || {
-    printf 'Cannot isolate the configured website, database, or HTTP companion.\n' >&2; return 1;
-  }
-  files=$(joomlaSiteJSON -r '.services[].volumes[] | select(.type=="bind" and .read_only==true and .target!="/var/www/html") |
-    .source | gsub("\\$\\$"; "$")' < "$work/candidate.json") || return 1
-  while IFS= read -r file; do
-    [ -n "$file" ] || continue
-    file=$(joomlaBackupFilesystemPath "$file") || return 1
-    if [ ! -f "$file" ] || migrationPathHasSymlink "$file"; then
-      printf 'A required site configuration file is unavailable.\n' >&2; return 1
-    fi
-  done <<< "$files"
-}
-
-# shellcheck disable=SC2016 # Literal Compose references and jq program variables.
-function joomlaPlaygroundReplacementMount() {
-  local storage="$1" role="$2" target="$3" type source
-  type=$(joomlaSiteJSON -er --arg role "$role" '.[$role].type' < "$storage") &&
-    source=$(joomlaSiteJSON -er --arg role "$role" '.[$role].candidate' < "$storage") || return 1
-  case "$type" in
-    volume) [[ "$source" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || return 1
-      printf 'type=volume,src=%s,dst=%s,volume-nocopy\n' "$source" "$target";;
-    bind) [ -d "$source" ] && ! migrationPathHasSymlink "$source" || return 1
-      source=$(joomlaWebHostPath "$source") || return 1
-      [[ "$source" != *,* ]] || return 1
-      printf 'type=bind,src=%s,dst=%s\n' "$source" "$target";;
-    *) return 1;;
-  esac
-}
-
-function joomlaPlaygroundStageReplacement() {
-  (
-    set +x
-    umask 077
-    local prepared="$1" site="$2" work="$3" info token image relative=. web driver mount db_mount file_bytes db_bytes
-    local VDM_PUID='' VDM_PGID=''
-    local step='reading the candidate plan'
-    # An operator can see where staging stopped without exposing the private
-    # Compose model, installed configuration, account fields or database SQL.
-    trap 'if [ "$?" -ne 0 ]; then printf "Replacement candidate failed while %s.\n" "$step" >&2; fi' EXIT
-    IFS= read -r token < "$work/token" && [[ "$token" =~ ^[a-f0-9]{32}$ ]] || exit 1
-    info=$(cat "$work/services.json") || exit 1
-    image=$(joomlaSiteJSON -er .image <<< "$info") && web=$(joomlaSiteJSON -er .web <<< "$info") &&
-      driver=$(joomlaSiteJSON -er .driver <<< "$info") || exit 1
-    step='isolating the Compose services and storage'
-    joomlaPlaygroundReplacementModel "$work" "$token" "$VDM_SITE_SERVICE" "$VDM_DB_SERVICE" "$web" "$info" || exit 1
-    step='copying the installed Joomla configuration'
-    joomlaDatabaseCopyConfiguration "$site" "$work/target-configuration.php" || exit 1
-    step='reconciling the installed and imported Joomla configuration'
-    joomlaPlaygroundConfigureReplace "$prepared" "$work/target-configuration.php" "$VDM_DB_HOST" "$driver" \
-      "$vdm_database_name" "$vdm_database_user" "$vdm_database_pass" "$VDM_SITE_DOCROOT" || exit 1
-    step='resolving the private storage mounts'
-    mount=$(joomlaPlaygroundReplacementMount "$work/storage.json" web /octojoom-joomla) &&
-      db_mount=$(joomlaPlaygroundReplacementMount "$work/storage.json" db /octojoom-db) || exit 1
-    file_bytes=$(joomlaSiteJSON -er .fileBytes < "$prepared/metadata.json") &&
-      db_bytes=$(joomlaSiteJSON -er .databaseBytes < "$prepared/metadata.json") || exit 1
-    [[ "$file_bytes" =~ ^[0-9]+$ && "$db_bytes" =~ ^[0-9]+$ ]] || exit 1
-    [ "$VDM_SITE_DOCROOT" = /var/www/html ] || relative="${VDM_SITE_DOCROOT#/var/www/html/}"
-    migrationReadEnvValue "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_PUID" VDM_PUID || VDM_PUID=''
-    migrationReadEnvValue "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_PGID" VDM_PGID || VDM_PGID=''
-    step='seeding the private website storage'
-    : > "$work/seeding" || exit 1
-    joomlaPlaygroundSeedWebsite "$prepared/site" "$mount" "$db_mount" "$image" "$relative" "$file_bytes" "$db_bytes" "$token" || exit 1
-    step='starting the private services and importing the database'
-    joomlaPlaygroundImportCandidate "$prepared" "$site" "$work" "$VDM_SITE_SERVICE" "$VDM_DB_SERVICE" "$VDM_SITE_DOCROOT" "$web" "$VDM_DB_ENGINE" "$token" "$VDM_DB_PORT"
-  )
-}
 
 function joomlaPlaygroundStartFresh() {
   local prepared="$1" site="$2" model="$1/runtime/final.json" root=/var/www/html web=127.0.0.1
@@ -13691,47 +13508,39 @@ function joomlaPlaygroundSelectFreshRuntime() {
   VDM_J_REPO="${candidate%:*}" VDM_JV="${candidate##*:}" VDM_PHP_INI_TARGET="${scan%/}/zz-octojoom.ini"
 }
 
-# Collect the replacement identity while the original connection is still in
-# scope. Backup/rollback continue to use the original VDM_DB_* values.
+# Import into the selected database using its established connection. Changing
+# database identity or credentials is a separate database-management operation.
 function joomlaPlaygroundConfirmReplaceSettings() {
   set +x
-  local variable selected index
+  local variable index
   local -a variables=(vdm_database_name vdm_database_user vdm_database_pass)
-  local -a existing_values=("$VDM_DB_NAME" "$VDM_DB_USER" "$VDM_DB_PASSWORD")
-  local -a labels=('Database name' 'Database username' 'Database password')
+  local -a existing=("$VDM_DB_NAME" "$VDM_DB_USER" "$VDM_DB_PASSWORD")
   for index in "${!variables[@]}"; do
     variable="${variables[index]}"
-    selected="${existing_values[index]}"
-    if cliHasValue "$variable"; then
-      selected="${!variable}"
-    elif [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ]; then
-      if [ "$variable" = vdm_database_pass ]; then
-        selected=$(getPassword 'Enter a new database password, or leave blank to keep the destination password.' '' 'Replacement database' 0) || return $?
-        [ -n "$selected" ] || selected="${existing_values[index]}"
-      else
-        selected=$(getInput "${labels[index]}" "$selected" 'Replacement database' 0) || return $?
-      fi
+    if cliHasValue "$variable" && [ "${!variable}" != "${existing[index]}" ]; then
+      printf 'An in-place import keeps the selected database name, user and password. Change its connection separately.\n' >&2
+      return 17
     fi
-    if [[ -z "$selected" || "$selected" == *[[:cntrl:]]* ]]; then
-      printf 'A single-line value is required for %s.\n' "${labels[index]}" >&2; return 17
-    fi
-    cliRememberValue "$variable" "$selected"
+    printf -v "$variable" '%s' "${existing[index]}"
   done
-  if cliHasValue vdm_database_rootpass && [[ -z "$vdm_database_rootpass" || "$vdm_database_rootpass" == *[[:cntrl:]]* ]]; then
-    printf 'A single-line value is required for the database root password.\n' >&2; return 17
+  if cliHasValue vdm_database_rootpass; then
+    printf 'An in-place import does not change the database root password.\n' >&2
+    return 17
   fi
-  joomlaPlaygroundConfirmFreshSettings "$1"
+  joomlaPlaygroundConfirmFreshSettings "$1" || return $?
+  for index in "${!variables[@]}"; do
+    variable="${variables[index]}"
+    cliRememberValue "$variable" "${existing[index]}"
+  done
 }
 
-# Only the isolated, site-scoped candidate env is passed here. Preserve
-# unrelated hosting settings and serialize literals through the normal writer.
+# Update only the selected site's imported settings using the normal ENV writer.
 function joomlaPlaygroundReplaceEnv() {
   set +x
   local file="$1" key="$2" suffix variable index
   local -a suffixes=(DB DB_USER DB_PASS JOOMLA_DB_TYPE JOOMLA_DB_PREFIX JOOMLA_SITE_NAME JOOMLA_ADMIN_USER JOOMLA_ADMIN_USERNAME JOOMLA_ADMIN_EMAIL JOOMLA_ADMIN_PASSWORD)
   local -a variables=(vdm_database_name vdm_database_user vdm_database_pass VDM_DB_DRIVER VDM_J_DB_PREFIX VDM_J_SITE_NAME VDM_J_USER VDM_J_USERNAME VDM_J_EMAIL VDM_J_PASSWORD)
   [[ "$key" =~ ^[A-Za-z]+$ && -f "$file" && ! -L "$file" ]] || return 1
-  if cliHasValue vdm_database_rootpass; then suffixes+=(DB_ROOT); variables+=(vdm_database_rootpass); fi
   for index in "${!suffixes[@]}"; do
     variable="${variables[index]}" suffix="${suffixes[index]}"
     writeEnvVariable "$file" "VDM_${key}_${suffix}=\"${!variable}\"" true || return $?
@@ -13742,8 +13551,7 @@ function joomlaPlaygroundReplaceEnv() {
 }
 
 # Keep the installed site's environment location and unrelated settings. The
-# isolated candidate never receives the complete shared environment; only this
-# publication copy contains the other sites' original assignments and comments.
+# prepared update retains the other sites' original assignments and comments.
 function joomlaPlaygroundPreparePublishedEnvironment() {
   local original="$1" candidate="$2" key="$3" destination="$4"
   [[ "$key" =~ ^[A-Za-z]+$ ]] && [ -f "$original" ] && [ ! -L "$original" ] &&
@@ -13841,46 +13649,6 @@ function joomlaPlaygroundInstallEnvironment() {
   )
 }
 
-# The environment journal precedes publication. Unlike the general file
-# publisher, both this update and its rollback replace the file atomically.
-function joomlaPlaygroundPublishEnvironment() {
-  local source="$1" destination="$2" work="$3" expected="$4" index saved
-  [[ "$destination" != *[![:print:]]* ]] && [ -f "$destination" ] && [ ! -L "$destination" ] &&
-    [ -f "$expected" ] && [ ! -L "$expected" ] || return 1
-  mkdir -p "$work/original-files" || return 1
-  index=$(find "$work/original-files" -type f | wc -l)
-  saved="$work/original-files/$index"
-  runPrivileged cp -a -- "$destination" "$saved" || return 1
-  cmp -s "$expected" "$saved" || {
-    printf 'The original website environment changed before publication. Retry against the new settings.\n' >&2
-    return 1
-  }
-  printf '%s\t%s\n' "$destination" "$saved" >> "$work/files.journal" || return 1
-  joomlaPlaygroundInstallEnvironment "$source" "$destination" "$saved" "$saved"
-}
-
-# An operator may edit another site in the shared file during verification.
-# Do not restore our snapshot over that edit; retain the journal for recovery.
-function joomlaPlaygroundRollbackEnvironment() {
-  local work="$1" mirror="${2:-}" destination saved published expected
-  [ -f "$work/environment/files.journal" ] || return 0
-  while IFS=$'\t' read -r destination saved; do
-    published="$work/published.env"
-    [ -z "$mirror" ] || [ "$destination" != "$mirror/.env" ] || published="$work/published-mirror.env"
-    if [ -L "$destination" ] || { ! cmp -s "$published" "$destination" &&
-      { [ "$saved" = - ] || ! cmp -s "$saved" "$destination"; }; }; then
-      printf 'The website environment changed after publication; preserve it and inspect the recovery journal: %s\n' "$destination" >&2
-      return 1
-    fi
-  done < "$work/environment/files.journal"
-  while IFS=$'\t' read -r destination saved; do
-    published="$work/published.env"
-    [ -z "$mirror" ] || [ "$destination" != "$mirror/.env" ] || published="$work/published-mirror.env"
-    expected="$published"
-    if cmp -s "$saved" "$destination"; then expected="$saved"; fi
-    joomlaPlaygroundInstallEnvironment "$saved" "$destination" "$expected" || return 1
-  done < "$work/environment/files.journal"
-}
 
 # The installed destination supplies hosting, mail, routing, TLS, and custom
 # settings. Only explicitly portable scalar properties come from the package.
@@ -14000,13 +13768,9 @@ PYTHON
   )
 }
 
-# Each data mount gets an independently owned sibling. The journal always names
-# the host path or physical volume, even when Compose uses another logical key.
-# shellcheck disable=SC2016
-function joomlaPlaygroundReplaceableDirectory() {
-  # Refuse mounts nested anywhere in a bind tree, including same-device Linux
-  # bind mounts that df and st_dev alone cannot distinguish. Cleanup must never
-  # descend into another host filesystem.
+# In-place deletion may clear a mount root, but never descend into a nested
+# host filesystem. Docker-only named-volume paths are validated by Docker.
+function joomlaPlaygroundValidateWebsiteDirectory() {
   local host_path
   host_path=$(joomlaWebHostPath "$1") || return 1
   python3 -I -B - "$host_path" <<'PYMOUNT'
@@ -14015,273 +13779,82 @@ import re
 import sys
 
 path = os.path.realpath(sys.argv[1])
-if not os.path.isdir(path) or os.path.ismount(path):
+if path == os.path.sep or not os.path.isdir(path):
     sys.exit(1)
 if os.path.exists("/proc/self/mountinfo"):
-    # Linux mountinfo escapes the raw bytes of a mount path.
-    path_bytes = os.fsencode(path)
+    path_bytes = os.fsencode(path).rstrip(b"/") + b"/"
     with open("/proc/self/mountinfo", "rb") as mounts:
         for record in mounts:
             mount = re.sub(rb"\\([0-7]{3})", lambda match: bytes([int(match[1], 8)]), record.split()[4])
-            if mount == path_bytes or mount.startswith(path_bytes.rstrip(b"/") + b"/"):
+            if mount.startswith(path_bytes):
                 sys.exit(1)
 PYMOUNT
 }
 
+# Resolve the actual stores and verify ownership. No replacement directories,
+# volumes or database services are allocated by an existing-site import.
 # shellcheck disable=SC2016
-function joomlaPlaygroundAllocateReplacement() {
-  local site="$1" work="$2" role service target kind logical original candidate parent path token project row details
-  IFS= read -r token < "$work/token" || return 1
-  project=$(joomlaSiteJSON -er .project < "$work/services.json") || return 1
+function joomlaPlaygroundReplacementStorage() {
+  local site="$1" work="$2" role service target row kind source path logical ids id actual actual_type actual_source
   for role in web db; do
     if [ "$role" = web ]; then target=/var/www/html; service=$(joomlaSiteJSON -er .app < "$work/services.json") || return 1
     else target=/var/lib/mysql; service=$(joomlaSiteJSON -er .db < "$work/services.json") || return 1; fi
     row=$(joomlaSiteJSON -ec --arg s "$service" --arg t "$target" '
       . as $m | [.services[$s].volumes[]? | select(.target==$t)] | select(length==1) | .[0]
-      | select((.read_only//false)==false) | if .type=="bind" then {type,source,logical:""}
-        elif .type=="volume" then .source as $k | $m.volumes[$k]
-        | select(. and (.external//false)==false and (.driver//"local")=="local" and ((.driver_opts//{})|length)==0)
+      | select((.read_only//false)==false and (.volume.subpath//"")=="") |
+      if .type=="bind" then {type,source,logical:""}
+      elif .type=="volume" then .source as $k | $m.volumes[$k]
+        | select(. and (.driver//"local")=="local" and ((.driver_opts//{})|length)==0)
         | {type:"volume",source:.name,logical:$k} else empty end
-      | select(.source|type=="string" and length>0 and (test("[[:cntrl:]]")|not))' < "$work/original-model.json") || return 1
-    kind=$(joomlaSiteJSON -er .type <<< "$row") && original=$(joomlaSiteJSON -er .source <<< "$row") &&
+      | select(.source|type=="string" and length>0 and (test("[[:cntrl:],]")|not))' < "$work/original-model.json") || {
+      printf 'Cannot identify the selected site %s storage safely.\n' "$role" >&2; return 1;
+    }
+    kind=$(joomlaSiteJSON -er .type <<< "$row") && source=$(joomlaSiteJSON -er .source <<< "$row") &&
       logical=$(joomlaSiteJSON -r .logical <<< "$row") && path=$(joomlaPlaygroundStoragePath "$row") || return 1
-    joomlaPersistenceCheckShared "$site" "$kind" "$original" "$target" || return 1
-    if [ "$kind" = volume ]; then
-      # A foreign container may mount the backing volume directory as a bind.
-      joomlaPersistenceCheckShared "$site" bind "$path" '' || return 1
+    if [ "$kind" = bind ]; then source=$(joomlaPersistenceCanonicalPath "$path") || return 1; fi
+    joomlaPersistenceCheckShared "$site" "$kind" "$source" "$target" || return 1
+    if [ "$kind" = volume ]; then joomlaPersistenceCheckShared "$site" bind "$path" '' || return 1; fi
+    if [ "$role" = web ]; then
+      if [ "$kind" = bind ]; then joomlaPlaygroundValidateWebsiteDirectory "$source" || {
+        printf 'The website directory contains another host mount.\n' >&2; return 1;
+      }; fi
+      joomlaSiteJSON -e --arg service "$service" 'all(.services[$service].volumes[]?;
+        .target=="/var/www/html" or .target=="/var/www/html/php.ini" or (.target|startswith("/var/www/html/")|not))' \
+        < "$work/original-model.json" >/dev/null || { printf 'A nested website mount prevents a complete in-place import.\n' >&2; return 1; }
     fi
-    mkdir "$work/$role" || return 1
-    case "$kind" in
-      bind)
-        original=$(joomlaPersistenceCanonicalPath "$path") || return 1
-        [[ "$original" != / && "$original" != *,* && "$original" != *[![:print:]]* &&
-          "$work/" != "$original/"* && "$original/" != "$VDM_SITE_DIR/"* ]] || return 1
-        joomlaPlaygroundReplaceableDirectory "$original" || { printf 'The site data contains a host mount and cannot be swapped safely.\n' >&2; return 1; }
-        parent=$(mktemp -d "${original%/*}/.octojoom-$role-$token.XXXXXX") || return 1
-        printf '%s\n' "$parent" > "$work/$role/bind-directory" || { rmdir "$parent"; return 1; }
-        candidate="$parent/candidate"
-        mkdir "$candidate" || return 1
-        # A filesystem mounted at the original directory cannot be renamed to
-        # this sibling. Reject it before stopping any original service.
-        local original_device candidate_device
-        original_device=$(df -P "$original" | awk 'END {print $1}') &&
-          candidate_device=$(df -P "$candidate" | awk 'END {print $1}') || return 1
-        [ -n "$candidate_device" ] && [ "$original_device" = "$candidate_device" ] || return 1
-        ;;
-      volume)
-        [[ "$logical" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ && "$original" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || return 1
-        candidate="octojoom-playground-$token-$role"
-        docker volume inspect "$original" > "$work/$role/original-volume.json" || return 1
-        printf '%s\n' "$candidate" > "$work/$role/new-volume" || return 1
-        docker volume create --label "com.octoleo.octojoom.playground=$token" --label "com.docker.compose.project=$project" \
-          --label "com.docker.compose.volume=$logical" "$candidate" >/dev/null || return 1
-        details=$(docker volume inspect --format '{{ index .Labels "com.octoleo.octojoom.playground" }}' "$candidate") || return 1
-        [ "${details%$'\r'}" = "$token" ] || return 1
-        ;;
-      *) return 1;;
-    esac
-    joomlaSiteJSON -n --arg type "$kind" --arg original "$original" --arg candidate "$candidate" --arg logical "$logical" \
-      '{type:$type,original:$original,candidate:$candidate,logical:$logical}' > "$work/$role/mount.json" || return 1
-  done
-  (cd "$work" && joomlaSiteJSON -ens --slurpfile web web/mount.json --slurpfile db db/mount.json \
-    '{web:$web[0],db:$db[0]} | select(.web.original != .db.original)' > storage.json)
-}
-
-# Keep service mount references and their logical volume keys. Only update the
-# physical names in the two managed volume declarations. Render and recheck the
-# staged source in its permanent project directory before the old site stops.
-# shellcheck disable=SC2016
-function joomlaPlaygroundPreparePublishedModel() {
-  local work="$1" directory="$2" role key volume
-  for role in web db; do
-    [ "$(joomlaSiteJSON -er .type < "$work/$role/mount.json")" = volume ] || continue
-    key=$(joomlaSiteJSON -er .logical < "$work/$role/mount.json") &&
-      volume=$(joomlaSiteJSON -er .candidate < "$work/$role/mount.json") || return 1
-    joomlaSiteJSON -ec --arg key "$key" --arg name "$volume" '.volumes[$key] | .name=$name' \
-      < "$work/rendered.json" > "$work/volume-property" || return 1
-    awk -v key="$key" -v name="$volume" -v file="$work/volume-property" '
-      /^volumes:[[:space:]]*$/ {in_volumes=1}
-      /^[^[:space:]#]/ && !/^volumes:[[:space:]]*$/ {in_volumes=0; selected=0}
-      in_volumes && /^  [^[:space:]#]/ {
-        selected=0; if(index($0,"  "key":")==1) {
-          selected=1; count++
-          if($0 ~ /:[[:space:]]*(#.*)?$/) {print; print "    name: "name; next}
-          if((getline property < file)!=1) exit 1
-          print "  "key": "property; next
-        }
-      }
-      selected && /^    name:/ {next}
-      {print}
-      END {if(count!=1) exit 1}
-    ' "$work/candidate.yml" > "$work/publish.next" && mv "$work/publish.next" "$work/candidate.yml" || return 1
-  done
-  migrationRunCompose "$work/candidate.env" "$work/candidate.yml" --project-directory "$directory" config --format json \
-    > "$work/published-model.json" || return 1
-  (cd "$work" && joomlaSiteJSON -e --slurpfile store storage.json --slurpfile services services.json --slurpfile prior original-model.json '
-    walk(if type=="string" then gsub("\\$\\$"; "$") else . end) as $m | $services[0] as $s | $store[0] as $d |
-    def matches($service;$target;$data):
-      [$m.services[$service].volumes[] | select(.target==$target)] | length==1 and
-      (.[0] | .type==$data.type and if .type=="volume" then $m.volumes[.source].name==$data.candidate
-        else .source==([$prior[0].services[$service].volumes[] | select(.target==$target)][0].source) end);
-    $m.name==$s.project and matches($s.app;"/var/www/html";$d.web) and matches($s.db;"/var/lib/mysql";$d.db)
-  ' < published-model.json >/dev/null)
-}
-
-# Create a second, private application model for the final storage paths.
-# Published and proposed services must agree before the old site is paused.
-# The private model supplies all runtime and network restrictions. Only the
-# validated mount sources come from the published model, including the INI.
-# shellcheck disable=SC2016
-function joomlaPlaygroundPrepareVerifyModel() {
-  (
-    set +x
-    umask 077
-    local work="$1" token="$2" project="octojoom-verify-$2" containers networks
-    [[ "$token" =~ ^[a-f0-9]{32}$ ]] || exit 1
-    cd -- "$work" || exit 1
-    joomlaSiteJSON -e --arg project "$project" --slurpfile published published-model.json --slurpfile proposed proposed.json \
-      --slurpfile info services.json '
-      def checked($ok; $reason): if $ok then . else error($reason) end;
-      $published[0] as $p |
-      checked($p.services == $proposed[0].services; "the published service definition changed") |
-      checked((.services|keys)==([$info[0].app,$info[0].db,($info[0].web|select(.!="127.0.0.1"))]|unique) and
-        (.networks|keys)==["default"] and (.networks.default | .internal==true and .external!=true and .name==null and
-          .driver=="bridge" and .enable_ipv6==false and .driver_opts["com.docker.network.bridge.gateway_mode_ipv4"]=="isolated") and
-        all(.services[]; .ports==null and .container_name==null and .network_mode==null and
-          (.networks|keys)==["default"] and .labels=={"traefik.enable":"false"} and .deploy.labels==null);
-        "the verification project is not isolated") |
-      .name=$project |
-      .services |= with_entries(.key as $s | .value.volumes |= map(. as $staged |
-        [$p.services[$s].volumes[] | select(.target==$staged.target)] |
-        checked(length==1 and (.[0] | del(.source))==($staged | del(.source)); "the published mount changed") |
-        .[0])) |
-      checked(all(.volumes//{} | to_entries[];
-        .value.external==true and .value.name==$p.volumes[.key].name); "unexpected final data volume") |
-      {name,services,networks,volumes}
-    ' < candidate.json > verify.json || exit 1
-    COMPOSE_PROJECT_NAME="$project" migrationRunCompose '' verify.json config --quiet >/dev/null || exit 1
-    # A private project must own its network and containers from their creation.
-    containers=$(docker ps -aq --filter "label=com.docker.compose.project=$project") &&
-      networks=$(docker network ls -q --filter "name=^${project}_default$") || exit 1
-    [ -z "$containers$networks" ] || { printf 'The private verification project is already occupied.\n' >&2; exit 1; }
-  )
-}
-
-function joomlaPlaygroundStopVerification() {
-  local work="$1" token="$2" ids networks
-  [ -f "$work/verifying" ] || return 0
-  [[ "$token" =~ ^[a-f0-9]{32}$ ]] || return 1
-  COMPOSE_PROJECT_NAME="octojoom-verify-$token" migrationRunCompose '' "$work/verify.json" down --remove-orphans >/dev/null || return 1
-  ids=$(docker ps -aq --filter "label=com.docker.compose.project=octojoom-verify-$token") || return 1
-  [ -z "$ids" ] || { printf 'Private verification containers still hold the website or database storage.\n' >&2; return 1; }
-  networks=$(docker network ls -q --filter "name=^octojoom-verify-${token}_default$") || return 1
-  [ -z "$networks" ] || { printf 'The private verification network is still in use.\n' >&2; return 1; }
-  rm -f -- "$work/verifying"
-}
-
-function joomlaPlaygroundVerifyPublished() {
-  (
-    local work="$1" token="$2" site="$3" app="$4" root="$5" web="$6" status=0
-    [[ "$token" =~ ^[a-f0-9]{32}$ ]] || exit 1
-    local COMPOSE_PROJECT_NAME="octojoom-verify-$token"
-    export COMPOSE_PROJECT_NAME
-    : > "$work/verifying" || exit 1
-    migrationRunCompose '' "$work/verify.json" up -d --pull never >/dev/null &&
-      joomlaPlaygroundWaitFresh '' "$work/verify.json" "$app" "$site" "$root" "$web" || status=$?
-    joomlaPlaygroundStopVerification "$work" "$token" || exit 1
-    exit "$status"
-  )
-}
-
-# Always remove a private candidate project before touching directories it may
-# still mount. Its external data volumes are managed separately by their receipts.
-function joomlaPlaygroundStopReplacementCandidate() {
-  local work="$1" token="$2" ids child
-  if [ -f "$work/starting" ]; then
-    COMPOSE_PROJECT_NAME="octojoom-playground-$token" migrationRunCompose '' "$work/candidate.json" down --volumes --remove-orphans >/dev/null || return 1
-    rm -f "$work/starting" || return 1
-  fi
-  [ -f "$work/seeding" ] || return 0
-  ids=$(docker ps -aq --filter "label=com.octoleo.octojoom.playground=$token") || return 1
-  while IFS= read -r child; do
-    [ -z "$child" ] || docker rm -fv "$child" >/dev/null || return 1
-  done <<< "$ids"
-}
-
-# A raw bind of the backing directory is invisible to Docker's volume removal
-# protection. Inspect configured and live mounts again at publication and at
-# retirement, even if this volume was exclusive when staging began.
-# shellcheck disable=SC2016
-function joomlaPlaygroundCheckOriginalVolume() {
-  local site="$1" volume="$2" role_dir="$3" allowed_target="$4" path
-  path=$(
-    set -o pipefail
-    cd -- "$role_dir" || exit 1
-    docker volume inspect "$volume" | joomlaSiteJSON -er --arg name "$volume" --slurpfile receipt original-volume.json '
-      def identity: {Name, CreatedAt, Driver, Scope, Options, Labels, Mountpoint};
-      .[0] | select(.Name==$name and identity==($receipt[0][0] | identity)) |
-      .Mountpoint | select(type=="string" and startswith("/") and (test("[[:cntrl:]]") | not))'
-  ) || { printf 'The original Docker volume changed or could not be inspected.\n' >&2; return 1; }
-  # At cutover the selected site's own named mount is expected. At retirement
-  # no service may still reference it. Raw binds are foreign in both cases.
-  joomlaPersistenceCheckShared "$site" volume "$volume" "$allowed_target" &&
-    joomlaPersistenceCheckShared "$site" bind "$path" ''
-}
-
-# After rollback discard only privately reserved candidates. After commit with
-# no backup discard only the now-offline original recorded at reservation time.
-# shellcheck disable=SC2016
-function joomlaPlaygroundDiscardReplacementStorage() {
-  local work="$1" token="$2" discard="$3" site="$4" role directory tree host image volume owner
-  for role in web db; do
-    if [ -f "$work/$role/bind-directory" ]; then
-      IFS= read -r directory < "$work/$role/bind-directory" || return 1
-      [[ "${directory##*/}" == ".octojoom-$role-$token."* ]] && ! migrationPathHasSymlink "$directory" || return 1
-      tree="$directory/$discard"
-      if [ -d "$tree" ]; then
-        joomlaPlaygroundReplaceableDirectory "$tree" && joomlaPersistenceCheckShared "$site" bind "$tree" '' &&
-          joomlaDatabaseStorageStopped "$tree" || return 1
-        # Joomla and native DB files may belong to container-only accounts.
-        if ! runPrivileged find "$tree" -xdev -depth -delete 2>/dev/null; then
-          image=$(joomlaSiteJSON -er .image < "$work/services.json") && host=$(joomlaWebHostPath "$tree") || return 1
-          MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker run --rm --network none --read-only --user 0:0 --entrypoint sh \
-            --mount "type=bind,src=$host,dst=/octojoom-data" "$image" -ceu \
-            'find /octojoom-data -xdev -depth -mindepth 1 -delete' || return 1
-          rmdir "$tree" || return 1
-        fi
+    ids=$(joomlaSiteCompose "$site" ps -aq "$service") || return 1
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      actual=$(docker inspect --format '{{json .Mounts}}' "$id") || return 1
+      actual=$(joomlaSiteJSON -er --arg target "$target" '[.[]|select(.Destination==$target)]|select(length==1)|
+        .[0]|[.Type,(if .Type=="volume" then .Name else .Source end)]|@tsv' <<< "$actual") || return 1
+      IFS=$'\t' read -r actual_type actual_source <<< "$actual"
+      if [ "$actual_type" = bind ]; then actual_source=$(joomlaPersistenceCanonicalPath "$actual_source") || return 1; fi
+      if [ "$actual_type" != "$kind" ] || [ "$actual_source" != "$source" ]; then
+        printf 'The selected service uses different storage from its Compose definition.\n' >&2; return 1
       fi
-      rmdir "$directory" || return 1
-    elif [ -f "$work/$role/new-volume" ]; then
-      if [ "$discard" = candidate ]; then
-        IFS= read -r volume < "$work/$role/new-volume" || return 1
-        owner=$(docker volume inspect --format '{{ index .Labels "com.octoleo.octojoom.playground" }}' "$volume" 2>/dev/null) || {
-          docker info >/dev/null 2>&1 || return 1
-          continue
-        }
-        [ "${owner%$'\r'}" = "$token" ] || continue
-      else
-        volume=$(joomlaSiteJSON -er .original < "$work/$role/mount.json") || return 1
-        joomlaPlaygroundCheckOriginalVolume "$site" "$volume" "$work/$role" '' || return 1
-      fi
-      docker volume rm "$volume" >/dev/null || return 1
-    fi
+    done <<< "$ids"
+    mkdir -p "$work/$role" || return 1
+    joomlaSiteJSON -n --arg type "$kind" --arg source "$source" --arg path "$path" --arg logical "$logical" \
+      '{type:$type,source:$source,path:$path,logical:$logical}' > "$work/$role/mount.json" || return 1
   done
+  (cd -- "$work" && joomlaSiteJSON -ens --slurpfile web web/mount.json --slurpfile db db/mount.json \
+    '{web:$web[0],db:$db[0]}' > storage.json) || return 1
+  local web_path db_path
+  web_path=$(joomlaSiteJSON -er .web.path < "$work/storage.json") && db_path=$(joomlaSiteJSON -er .db.path < "$work/storage.json") || return 1
+  [[ "$web_path/" != "$db_path/"* && "$db_path/" != "$web_path/"* ]] || { printf 'Website and database storage overlap.\n' >&2; return 1; }
 }
 
-# A verified recovery archive lives outside both active and staged storage.
+# Use the normal full-site archive and verification, outside the selected data.
 function joomlaPlaygroundCreateReplacementBackup() {
   (
-    local site="$1" work="$2" token="$3" role path directory original
+    local site="$1" work="$2" token="$3" role path directory data
     joomlaBackupResolveOptions "$site" || return 1
-    VDM_SCOPE=full VDM_LABEL="playground-replace-$token" VDM_OVERWRITE=false
+    VDM_SCOPE=full VDM_LABEL="playground-import-$token" VDM_OVERWRITE=false
     directory=$(joomlaPersistenceCanonicalPath "$VDM_DESTINATION") || return 1
     for role in web db; do
-      if [ -s "$work/$role/original-volume.json" ]; then
-        original=$(joomlaSiteJSON -er '.[0].Mountpoint' < "$work/$role/original-volume.json") || return 1
-      else
-        original=$(joomlaSiteJSON -er .original < "$work/$role/mount.json") || return 1
-      fi
-      [[ "$directory/" != "$original/"* ]] || { printf 'The backup directory is inside site data being replaced.\n' >&2; return 1; }
+      data=$(joomlaSiteJSON -er .path < "$work/$role/mount.json") || return 1
+      [[ "$directory/" != "$data/"* ]] || { printf 'The backup directory is inside site data being replaced.\n' >&2; return 1; }
     done
     VDM_DESTINATION="$directory"
     path=$(joomlaBackupFilename "$site") || return 1
@@ -14319,379 +13892,198 @@ function joomlaPlaygroundOriginalCompose() {
   migrationRunCompose '' "$work/rendered.json" --project-directory "$directory" --project-name "$project" "$@"
 }
 
-# The verifier owns a different project. Any public project container left
-# behind at either boundary can keep a restart policy, route, or storage mount.
-function joomlaPlaygroundRequireVacantProject() {
-  local project="$1" ids
-  ids=$(docker ps -aq --filter "label=com.docker.compose.project=$project") || return 1
-  [ -z "$ids" ] || { printf 'The public Compose project still has containers. Inspect the project before continuing.\n' >&2; return 1; }
-}
-
-# Replace the inert registration without overwriting its rollback receipt.
-function joomlaPlaygroundOpenIngress() {
-  local gate="$1" source="$2" destination="$3" temp
-  [ ! -L "$destination" ] && cmp -s "$gate" "$destination" || return 1
-  temp=$(mktemp "${destination%/*}/.octojoom-ingress.XXXXXXXX") || return 1
-  if runPrivileged cp -p -- "$source" "$temp" && runPrivileged mv -f -- "$temp" "$destination"; then return 0; fi
-  runPrivileged rm -f -- "$temp"
-  return 1
-}
-
-# Keep the original project off the network while swapping its storage. The
-# commit receipt precedes restoration of any public route or published port.
+# Pause this project's writers, import into its existing stores, then resume
+# through normal Compose. A failed write is not an automatic restore operation.
 # shellcheck disable=SC2016
 function joomlaPlaygroundReplaceSite() {
   (
     set +x
     umask 077
-    local prepared="$1" site="$2" backup="$3" stage=preflight reason='' recovery='' verified='' enabled='' running='' existing=''
-    local token='' work='' lock='' environment_lock='' environment_locked=false paused=false removed=false committed=false recovered=true status=1 public_running=null
-    local directory compose mirror='' database app web root role original candidate target ini service old_env='' old_digest='' project='' kind was_running outcome=not_committed result_status=failed
-    local -a before=() previous_running=()
+    local prepared="$1" site="$2" backup="$3" stage=preflight reason='' verified='' enabled='' running=''
+    local token='' work='' lock='' env_lock='' env_locked=false paused=false db_started=false destructive_started=false success=false status
+    local directory compose mirror='' database='' app='' web='' root image mount kind source ini service old_env old_digest project='' public_running=null
+    local -a previous_running=()
     case "$backup" in true|false) ;; *) exit 17;; esac
     resolveJoomlaSite "$site" || exit 1
     directory="$VDM_SITE_DIR" compose="$VDM_SITE_COMPOSE" old_env="$VDM_SITE_ENV"
     lock="$directory/.octojoom-change.lock"
     mkdir "$lock" 2>/dev/null || { printf 'Another operation is changing this website.\n' >&2; exit 1; }
-    work=$(mktemp -d "$directory/.playground-replace.XXXXXXXX") || { rmdir "$lock"; exit 1; }
+    work=$(mktemp -d "${TMPDIR:-/tmp}/octojoom-import.XXXXXXXX") || { rmdir "$lock"; exit 1; }
     trap 'exit 130' INT
     trap 'exit 143' TERM HUP
     trap '
       status=$?
       trap - EXIT
       trap "" INT TERM HUP
-      if [ -f "$work/committed" ]; then
-        committed=true
-        [ "$stage" != commit ] || public_running=false
-      fi
-      if ! "$committed"; then
-        if [ -n "$token" ]; then joomlaPlaygroundStopVerification "$work" "$token" || recovered=false; fi
-        if "$recovered" && "$paused"; then
-          for role in db web; do
-            if [ -f "$work/$role/website-storage" ]; then
-              IFS=$'\''\t'\'' read -r original candidate target < "$work/$role/website-storage" &&
-                joomlaDatabaseStorageStopped "$original" "$candidate" "$target" &&
-                joomlaBackupRollbackWebsite "$work/$role" || recovered=false
-            fi
-          done
-          if "$recovered"; then joomlaPlaygroundRollbackEnvironment "$work" "$mirror" || recovered=false; fi
-          if "$recovered"; then joomlaBackupRollbackFiles "$work" || recovered=false; fi
-          if "$recovered"; then joomlaBackupRollbackFiles "$work/ingress" || recovered=false; fi
-          if "$recovered"; then joomlaPlaygroundReplacementProject "$site" "$project" || recovered=false; fi
-          if "$recovered" && "$removed" && [ "${#before[@]}" -gt 0 ]; then
-            joomlaSiteCompose "$site" up --no-start --no-deps "${before[@]}" >/dev/null || recovered=false
-          fi
-          if "$recovered" && [ "${#previous_running[@]}" -gt 0 ]; then
-            if "$removed"; then
-              joomlaSiteCompose "$site" up -d --no-recreate --no-deps "${previous_running[@]}" >/dev/null || recovered=false
-            else
-              joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" up -d --no-recreate --no-deps "${previous_running[@]}" >/dev/null || recovered=false
-            fi
-          fi
-          if "$recovered" && "$removed" && [ "$public_running" = true ]; then
-            joomlaPlaygroundWaitFresh "$old_env" "$compose" "$app" "$site" "$root" "$web" || recovered=false
-          fi
-        fi
-        if "$recovered" && [ -n "$token" ]; then
-          joomlaPlaygroundStopReplacementCandidate "$work" "$token" &&
-            joomlaPlaygroundDiscardReplacementStorage "$work" "$token" candidate "$site" || recovered=false
-        fi
-        if "$recovered"; then
-          if "$paused"; then reason="Previous storage, configuration and running services were restored."
-          else reason="The selected site was left in its original state."; fi
-        else
-          reason="Automatic recovery or private storage cleanup needs attention. Inspect the retained journal before changing this site."
-          recovery="$work" public_running=null
-        fi
-        [ "$status" -ne 0 ] || status=1
-      fi
+      [ ! -f "$work/import-writing" ] || destructive_started=true
       [ ! -s "$work/verified-backup" ] || IFS= read -r verified < "$work/verified-backup"
-      if [ -z "$recovery" ] && ! runPrivileged rm -rf -- "$work"; then
-        recovery="$work" reason="Inspect and remove the retained private deployment files." status=1
-        "$committed" || recovered=false
-      fi
-      if "$recovered" && { ! "$committed" || [ "$status" -eq 0 ]; }; then
-        if "$environment_locked" && ! { rm -f -- "$environment_lock/recovery.path" && rmdir "$environment_lock"; }; then
-          reason="Inspect and release the retained environment change lock at $environment_lock." status=1
-          [ -n "$recovery" ] || recovery="$environment_lock"
-          "$committed" || recovered=false
+      if ! "$success"; then
+        [ "$status" -ne 0 ] || status=1
+        if [ "$stage" = import ] && [ -s "$work/import-stage" ]; then IFS= read -r stage < "$work/import-stage"; fi
+        if "$destructive_started"; then
+          reason="The import may be partial. Website writers remain stopped."
+          public_running=false
+          # A failed normal start can have started some writers; stop them again.
+          while IFS= read -r service; do
+            [ -z "$service" ] || [ "$service" = "$database" ] ||
+              joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" stop "$service" >/dev/null 2>&1 || public_running=null
+          done <<< "$running"
+          if "$db_started"; then joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" stop "$database" >/dev/null 2>&1 || true; fi
+          if [ -n "$verified" ]; then reason+=" Restore the verified archive with the existing backup restore command."
+          else reason+=" No backup was requested; the previous data cannot be restored by this import."; fi
+        else
+          reason="No website files or database contents were overwritten."
+          if "$paused" && ! joomlaBackupResume "$site" "$running" "$database" "$db_started"; then
+            reason+=" The previous service state could not be restored; inspect the selected project."; public_running=null
+          fi
         fi
       fi
-      if "$recovered" && { ! "$committed" || [ "$status" -eq 0 ]; }; then
-        if ! { rm -f -- "$lock/recovery.path" && rmdir "$lock"; }; then
-          reason="Inspect and release the retained site change lock at $lock." status=1
-          [ -n "$recovery" ] || recovery="$lock"
-          "$committed" || recovered=false
-        fi
-      fi
-      [ -z "$recovery" ] || printf "Private deployment recovery location: %s\n" "$recovery" >&2
-      if "$committed"; then
-        if [ "$status" -eq 0 ]; then result_status=deployed outcome=committed
-        else result_status=committed_with_followup outcome=committed_with_followup; fi
-      elif ! "$recovered"; then outcome=recovery_incomplete; fi
-      joomlaSiteJSON -nc --arg site "$site" --arg status "$result_status" --arg outcome "$outcome" --argjson committed "$committed" \
-        --arg stage "$stage" --arg reason "$reason" --arg enabled "$enabled" --argjson running "$public_running" \
-        --arg recovery "$recovery" --arg backup "$verified" \
-        '\''{site:$site,target:"current",status:$status,outcome:$outcome,committed:$committed,stage:$stage,reason:$reason,
-          enabled:$enabled,running:$running,recovery:(if $recovery=="" then null else $recovery end),
-          backup:(if $backup=="" then null else $backup end)}'\'' > "$prepared/result.next" &&
-        mv -f -- "$prepared/result.next" "$prepared/result.json" || status=1
+      "$env_locked" && rmdir "$env_lock" || { [ "$env_locked" != true ] || status=1; }
+      rmdir "$lock" || status=1
+      if ! runPrivileged rm -rf -- "$work"; then reason+=" Import scratch cleanup failed at $work."; status=1; fi
+      joomlaSiteJSON -nc --arg site "$site" --arg stage "$stage" --arg reason "$reason" --arg enabled "$enabled" \
+        --argjson running "$public_running" --argjson destructive_started "$destructive_started" --argjson status "$status" --arg backup "$verified" \
+        '\''{site:$site,target:"current",status:(if $status==0 then "deployed" else "failed" end),
+          $stage,$reason,$enabled,$running,$destructive_started,backup:(if $backup=="" then null else $backup end)}'\'' > "$prepared/result.json" || status=1
       exit "$status"
     ' EXIT
-    printf '%s\n' "$work" > "$lock/recovery.path" && printf '%s\n' "$work" > "$prepared/transaction.path" || exit 1
     enabled=$(getJoomlaSiteEnabledState "$site") || exit 1
-    case "$enabled" in enabled|disabled) ;; *) printf 'The enabled site registration does not match the selected website.\n' >&2; exit 1;; esac
+    case "$enabled" in enabled|disabled) ;; *) printf 'The enabled site registration differs from the selected website.\n' >&2; exit 1;; esac
     if [ "$enabled" = enabled ] && [ ! -L "$VDM_REPO_PATH/joomla/enabled/$site" ]; then mirror="$VDM_REPO_PATH/joomla/enabled/$site"; fi
+    [ -n "$old_env" ] && [ -f "$old_env" ] && [ ! -L "$old_env" ] || { printf 'Restore the existing website environment before importing.\n' >&2; exit 1; }
+    env_lock="${old_env}.octojoom-change.lock"
+    mkdir "$env_lock" 2>/dev/null || { printf 'Another operation is changing the website environment: %s\n' "$old_env" >&2; exit 1; }
+    env_locked=true
     token=$(python3 -I -B -c 'import secrets; print(secrets.token_hex(16))') || exit 1
     token="${token%$'\r'}"; [[ "$token" =~ ^[0-9a-f]{32}$ ]] || exit 1
     printf '%s\n' "$token" > "$work/token" || exit 1
-    cp -- "$compose" "$work/initial-compose" || exit 1
-    if [ -z "$old_env" ] || [ ! -f "$old_env" ] || [ -L "$old_env" ]; then
-      printf 'Replacement requires the existing website environment file. Restore that file before retrying.\n' >&2
-      exit 1
-    fi
-    old_digest=$(migrationArchiveDigest "$old_env") && cp -p "$old_env" "$work/initial.env" || exit 1
+    cp -- "$compose" "$work/initial-compose" && cp -p -- "$old_env" "$work/initial.env" || exit 1
+    old_digest=$(migrationArchiveDigest "$old_env") || exit 1
     joomlaDatabaseContext "$site" && joomlaPlaygroundConfirmReplaceSettings "$prepared" || exit $?
-    joomlaPlaygroundPlanReplacement "$prepared" "$site" "$work" "$mirror" || exit $?
+    joomlaPlaygroundPlanReplacement "$prepared" "$site" "$work" "$mirror" &&
+      joomlaPlaygroundReplacementStorage "$site" "$work" || exit 1
     joomlaPlaygroundPreparePublishedEnvironment "$work/initial.env" "$work/candidate.env" "$VDM_SITE_ENV_KEY" "$work/published.env" || exit 1
     if [ -n "$mirror" ] && [ "$old_env" = "$directory/.env" ]; then
       cp -p "$mirror/.env" "$work/initial-mirror.env" &&
         joomlaPlaygroundPreparePublishedEnvironment "$work/initial-mirror.env" "$work/candidate.env" "$VDM_SITE_ENV_KEY" "$work/published-mirror.env" || exit 1
     fi
-    joomlaPlaygroundAllocateReplacement "$site" "$work" || exit 1
-    stage=candidate
-    printf '%s\n' "$stage" > "$work/stage" || exit 1
-    joomlaPlaygroundStageReplacement "$prepared" "$site" "$work" || exit $?
-    joomlaPlaygroundStopReplacementCandidate "$work" "$token" && joomlaPlaygroundPreparePublishedModel "$work" "$directory" &&
-      joomlaPlaygroundPrepareVerifyModel "$work" "$token" || exit 1
     app=$(joomlaSiteJSON -er .app < "$work/services.json") && database=$(joomlaSiteJSON -er .db < "$work/services.json") &&
-      root=$(joomlaSiteJSON -er .root < "$work/services.json") && web=$(joomlaSiteJSON -er .web < "$work/services.json") || exit 1
-    project=$(joomlaSiteJSON -er .project < "$work/services.json") || exit 1
-    # Different websites may share this file. Reserve it before stopping any
-    # original service, then reject a snapshot made stale by an earlier writer.
-    environment_lock="${old_env}.octojoom-change.lock"
-    mkdir "$environment_lock" 2>/dev/null || {
-      printf 'Another operation is changing the website environment: %s\n' "$old_env" >&2
-      exit 1
-    }
-    environment_locked=true
-    printf '%s\n' "$work" > "$environment_lock/recovery.path" || exit 1
+      web=$(joomlaSiteJSON -er .web < "$work/services.json") &&
+      root=$(joomlaSiteJSON -er .root < "$work/services.json") && image=$(joomlaSiteJSON -er .image < "$work/services.json") &&
+      project=$(joomlaSiteJSON -er .project < "$work/services.json") || exit 1
+    kind=$(joomlaSiteJSON -er .type < "$work/web/mount.json") && source=$(joomlaSiteJSON -er .source < "$work/web/mount.json") || exit 1
+    [ "$kind" != bind ] || source=$(joomlaWebHostPath "$source") || exit 1
+    mount="type=$kind,src=$source,dst=/octojoom-joomla"
+    joomlaDatabaseCopyConfiguration "$site" "$work/target-configuration.php" &&
+      joomlaPlaygroundConfigureImport "$prepared" "$work/target-configuration.php" "$VDM_DB_HOST" "$VDM_DB_DRIVER" \
+        "$VDM_DB_NAME" "$VDM_DB_USER" "$VDM_DB_PASSWORD" "$root" || exit 1
     joomlaPlaygroundCheckOriginalSite "$site" "$work" "$compose" "$old_env" "$old_digest" "$enabled" "$mirror" "$project" || exit 1
-    running=$(joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" ps --status running --services) &&
-      existing=$(joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" ps --all --services) || exit 1
-    printf '%s\n' "$running" > "$work/running-services" && printf '%s\n' "$existing" > "$work/existing-services" &&
-      printf '%s\n' "$enabled" > "$work/registration" || exit 1
-    while IFS= read -r service; do [ -z "$service" ] || before+=("$service"); done <<< "$existing"
+    running=$(joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" ps --status running --services) || exit 1
     while IFS= read -r service; do [ -z "$service" ] || previous_running+=("$service"); done <<< "$running"
     public_running=true
-    for service in "$database" "$app" "$web"; do
+    for service in "$app" "$database" "$web"; do
       [ "$service" = 127.0.0.1 ] || grep -Fxq -- "$service" <<< "$running" || public_running=false
     done
-    joomlaSiteJSON -nc --arg project "$project" '{name:$project,services:{}}' > "$work/gate.json" || exit 1
-    stage=quiesce
-    printf '%s\n' "$stage" > "$work/stage" || exit 1
-    paused=true
+    stage=quiesce paused=true
     while IFS= read -r service; do
-      [ -z "$service" ] || [ "$service" = "$database" ] || joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" stop "$service" >/dev/null || exit 1
+      [ -z "$service" ] || [ "$service" = "$database" ] ||
+        joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" stop "$service" >/dev/null || exit 1
     done <<< "$running"
     if "$backup"; then
       stage=backup
-      printf '%s\n' "$stage" > "$work/stage" || exit 1
       joomlaPlaygroundCreateReplacementBackup "$site" "$work" "$token" && [ -s "$work/verified-backup" ] || exit 1
     fi
+    stage=preflight
+    joomlaPlaygroundCheckOriginalSite "$site" "$work" "$compose" "$old_env" "$old_digest" "$enabled" "$mirror" "$project" &&
+      joomlaPlaygroundReplacementStorage "$site" "$work" && joomlaPlaygroundCheckIni "$work"/ini-*.path || exit 1
+    joomlaDatabaseCopyConfiguration "$site" "$work/current-configuration.php" &&
+      cmp -s "$work/target-configuration.php" "$work/current-configuration.php" || { printf 'The destination Joomla configuration changed during import preparation.\n' >&2; exit 1; }
+    if ! grep -Fxq -- "$database" <<< "$running"; then
+      db_started=true
+      joomlaSiteCompose "$site" up -d --no-deps "$database" >/dev/null || exit 1
+    fi
+    stage=import
+    local VDM_DB_COMPOSE="$work/candidate.yml" VDM_DB_ENV="$work/published.env" VDM_DB_PROJECT_DIR="$directory"
+    migrationReadEnvValue "$old_env" "VDM_${VDM_SITE_ENV_KEY}_PUID" VDM_PUID || VDM_PUID=''
+    migrationReadEnvValue "$old_env" "VDM_${VDM_SITE_ENV_KEY}_PGID" VDM_PGID || VDM_PGID=''
+    joomlaPlaygroundImportPackage "$prepared" "$site" "$work" "$app" "$root" "$image" "$mount" replace "$work/target-configuration.php" || exit 1
+    destructive_started=true public_running=false
+    stage=configuration
     joomlaPlaygroundCheckOriginalSite "$site" "$work" "$compose" "$old_env" "$old_digest" "$enabled" "$mirror" "$project" || exit 1
-    if ! joomlaDatabaseCopyConfiguration "$site" "$work/current-configuration.php" ||
-      ! cmp -s "$work/target-configuration.php" "$work/current-configuration.php"; then
-      printf 'The original Joomla configuration changed or could not be read. Retry against its current settings.\n' >&2
-      exit 1
+    joomlaPlaygroundInstallEnvironment "$work/published.env" "$old_env" "$work/initial.env" "$work/initial.env" || exit 1
+    if [ -n "$mirror" ] && [ "$old_env" = "$directory/.env" ]; then
+      joomlaPlaygroundInstallEnvironment "$work/published-mirror.env" "$mirror/.env" "$work/initial-mirror.env" "$work/initial-mirror.env" || exit 1
     fi
-    stage=publish
-    printf '%s\n' "$stage" > "$work/stage" || exit 1
-    joomlaPlaygroundCheckIni "$work"/ini-*.path || exit 1
-    joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" stop >/dev/null || exit 1
-    joomlaBackupPublishFile "$work/gate.json" "$compose" "$work/ingress" || exit 1
-    if [ -n "$mirror" ]; then joomlaBackupPublishFile "$work/gate.json" "$mirror/docker-compose.yml" "$work/ingress" || exit 1; fi
-    removed=true
-    if [ "${#before[@]}" -gt 0 ]; then
-      joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" rm --force --stop "${before[@]}" >/dev/null || exit 1
-    fi
-    joomlaPlaygroundRequireVacantProject "$project" || exit 1
-    for role in web db; do
-      original=$(joomlaSiteJSON -er .original < "$work/$role/mount.json") &&
-        candidate=$(joomlaSiteJSON -er .candidate < "$work/$role/mount.json") || exit 1
-      if [ "$role" = web ]; then target=/var/www/html; else target=/var/lib/mysql; fi
-      kind=$(joomlaSiteJSON -er .type < "$work/$role/mount.json") || exit 1
-      if [ "$kind" = bind ]; then
-        joomlaPersistenceCheckShared "$site" bind "$original" "$target" &&
-          joomlaDatabaseStorageStopped "$original" "$candidate" &&
-          joomlaBackupPublishWebsite "$work/$role" "$original" "$candidate" || exit 1
-      else
-        joomlaPlaygroundCheckOriginalVolume "$site" "$original" "$work/$role" "$target" || exit 1
-      fi
-    done
-    if [ "$(getContainerEnvFile joomla "$site" available)" != "$old_env" ] || ! cmp -s "$work/initial.env" "$old_env"; then
-      printf 'The original website environment changed before publication. Retry against the new settings.\n' >&2
-      exit 1
-    fi
-    if [ -n "$mirror" ] && [ "$old_env" = "$directory/.env" ] && ! cmp -s "$work/initial-mirror.env" "$mirror/.env"; then
-      printf 'The enabled website environment changed before publication. Retry against the new settings.\n' >&2
-      exit 1
-    fi
-    joomlaPlaygroundPublishEnvironment "$work/published.env" "$old_env" "$work/environment" "$work/initial.env" || exit 1
-    if [ -f "$work/candidate.ini" ]; then
-      joomlaPlaygroundCheckIni "$work"/ini-*.path && IFS= read -r ini < "$work/ini-destination.path" &&
-        joomlaBackupPublishFile "$work/candidate.ini" "$ini" "$work" || exit 1
-    fi
+    joomlaPlaygroundCheckIni "$work"/ini-*.path && IFS= read -r ini < "$work/ini-destination.path" || exit 1
+    runPrivileged cp -- "$work/candidate.ini" "$ini" || exit 1
+    # Atomic publication uses the same checked-file writer; no rollback journal.
+    joomlaPlaygroundInstallEnvironment "$work/candidate.yml" "$compose" "$work/initial-compose" "$work/initial-compose" || exit 1
     if [ -n "$mirror" ]; then
-      if [ "$old_env" = "$directory/.env" ]; then
-        joomlaPlaygroundPublishEnvironment "$work/published-mirror.env" "$mirror/.env" "$work/environment" "$work/initial-mirror.env" || exit 1
-      fi
-      if [[ -n "${ini:-}" && "$ini" == "$directory/"* ]]; then
-        joomlaPlaygroundCheckIni "$work/ini-mirror.path" &&
-          joomlaBackupPublishFile "$work/candidate.ini" "$mirror/${ini#"$directory/"}" "$work" || exit 1
-      fi
+      joomlaPlaygroundInstallEnvironment "$work/candidate.yml" "$mirror/docker-compose.yml" "$work/initial-compose" "$work/initial-compose" || exit 1
+      if [[ "$ini" == "$directory/"* ]]; then runPrivileged cp -- "$work/candidate.ini" "$mirror/${ini#"$directory/"}" || exit 1; fi
     fi
-    stage=verify
-    printf '%s\n' "$stage" > "$work/stage" || exit 1
-    joomlaPlaygroundVerifyPublished "$work" "$token" "$site" "$app" "$root" "$web" || exit 1
-
-    joomlaPlaygroundRequireVacantProject "$project" || exit 1
-
-    # Everything above is reversible and has run exclusively on private networks.
-    # Once this receipt exists no failure or signal may restore original storage.
-    was_running="$public_running"
-    stage=commit
-    printf '%s\n' "$stage" > "$work/stage" || exit 1
-    recovery="$work"
-    reason="Public service has not been confirmed. Use candidate.yml and the saved service inventory in the recovery directory to restore the site to its previous service state."
-    if ! printf 'committed\n' > "$work/commit.next" || ! mv -- "$work/commit.next" "$work/committed"; then
-      recovery=''
-      exit 1
-    fi
-    committed=true public_running=false
-    : > "$prepared/committed" || exit 1
-    stage=ingress
-    printf '%s\n' "$stage" > "$work/stage" || exit 1
-    public_running=null
-    joomlaPlaygroundReplacementProject "$site" "$project" || exit 1
-    joomlaPlaygroundOpenIngress "$work/gate.json" "$work/candidate.yml" "$compose" || exit 1
-    if [ -n "$mirror" ]; then
-      joomlaPlaygroundOpenIngress "$work/gate.json" "$work/candidate.yml" "$mirror/docker-compose.yml" || exit 1
-    fi
-    if [ "${#before[@]}" -gt 0 ]; then
-      joomlaSiteCompose "$site" up --no-start --no-deps --pull never "${before[@]}" >/dev/null || exit 1
-    fi
+    stage=start
+    if "$db_started"; then joomlaSiteCompose "$site" stop "$database" >/dev/null || exit 1; db_started=false; fi
     if [ "${#previous_running[@]}" -gt 0 ]; then
-      joomlaSiteCompose "$site" up -d --no-recreate --no-deps --pull never "${previous_running[@]}" >/dev/null || exit 1
+      joomlaSiteCompose "$site" up -d --no-deps --wait --wait-timeout 120 "${previous_running[@]}" >/dev/null || exit 1
     fi
-    if [ "$was_running" = true ]; then
-      joomlaPlaygroundWaitFresh "$old_env" "$compose" "$app" "$site" "$root" "$web" || exit 1
-    fi
-    public_running="$was_running"
-    stage=cleanup
-    reason="Inspect the retained private deployment files and original storage in the recovery journal before completing cleanup."
-    printf '%s\n' "$stage" > "$work/stage" || exit 1
-    if "$backup"; then
-      find "$work" -mindepth 1 -maxdepth 1 -type f ! -name files.journal ! -name storage.json ! -name services.json \
-        ! -name registration ! -name existing-services ! -name running-services ! -name stage ! -name token ! -name verified-backup \
-        ! -name committed -delete || exit 1
-    else
-      joomlaPlaygroundDiscardReplacementStorage "$work" "$token" original "$site" || exit 1
-      recovery=''
-    fi
-    reason=''
+    public_running=true
+    for service in "$app" "$database" "$web"; do
+      [ "$service" = 127.0.0.1 ] || grep -Fxq -- "$service" <<< "$running" || public_running=false
+    done
+    stage=complete success=true
     exit 0
   )
 }
 
+# Menu and CLI share archive preparation, the import and its public result.
+# Scratch holds only import inputs; existing data is retained solely by backup.
 # shellcheck disable=SC2016
-# The menu and CLI have already confirmed the target and the backup choice.
-# Only the transaction changes the site. The package stays outside its webroot.
 function joomlaPlaygroundDeployCurrent() {
   (
     set +x
     umask 077
     local archive="$1" site="$2" backup="$3" expected="${4:-}" format="${5:-${OCTOJOOM_OUTPUT:-text}}"
-    local work prepared result='' status=0 stage=package outcome reason transaction='' recovery='' verified='' message
+    local work prepared result='' status=0 stage=package message
     local VDM_CONTAINER_TYPE=joomla VDM_TASK=playground
     case "$backup" in true|false) ;; *) exit 17;; esac
     resolveJoomlaSite "$site" || exit 17
     command -v jq >/dev/null 2>&1 || { printf 'Playground deployment requires jq.\n' >&2; exit 1; }
     work=$(mktemp -d "${TMPDIR:-/tmp}/octojoom-playground.XXXXXXXX") || exit 1
     prepared="$work/package"
-    trap 'if [ -f "$prepared/keep-recovery" ]; then printf "Private deployment recovery information retained at %s\n" "$work" >&2; else rm -rf -- "$work"; fi' EXIT
+    trap 'rm -rf -- "$work"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' HUP TERM
     if joomlaPlaygroundPreparePackage "$archive" "$prepared" "$expected" > "$work/summary.json"; then
       stage=preflight
       joomlaPlaygroundReplaceSite "$prepared" "$site" "$backup" >&2 || status=$?
     else status=$?; fi
-
     if [ -s "$prepared/result.json" ]; then
-      # Both inputs are public summaries. Package metadata also holds the
-      # imported password, and must never be included in an output envelope.
       result=$(
         set -o pipefail
         cat "$work/summary.json" "$prepared/result.json" | joomlaSiteJSON -ecs --arg site "$site" '
           select(length==2) | .[0] as $source | .[1] |
           select(.target=="current" and .site==$site and (.stage|type)=="string" and
-            (if .outcome=="committed" then .committed==true and .status=="deployed"
-             elif .outcome=="committed_with_followup" then .committed==true and .status==.outcome
-             else (.outcome=="not_committed" or .outcome=="recovery_incomplete") and .committed==false and .status=="failed" end)) |
+            (.status=="deployed" or .status=="failed") and (.destructive_started|type)=="boolean") |
           . + ($source | {archiveSha256,joomlaVersion,databasePrefix})'
       ) || result=''
     fi
     if [ -z "$result" ]; then
       [ "$status" -ne 0 ] || status=1
-      outcome=not_committed
-      if [ "$stage" = package ]; then reason="The package could not be prepared for replacement."
-      else reason="The replacement could not start."; fi
-      if [ -f "$prepared/transaction.path" ]; then
-        IFS= read -r transaction < "$prepared/transaction.path" || true
-        if [[ "${transaction%/*}" = "$VDM_SITE_DIR" && "${transaction##*/}" = .playground-replace.* && -d "$transaction" && ! -L "$transaction" ]]; then
-          recovery="$transaction"
-          if [ -f "$recovery/verified-backup" ] && [ ! -L "$recovery/verified-backup" ]; then
-            IFS= read -r verified < "$recovery/verified-backup" || verified=''
-          fi
-        fi
-        outcome=recovery_incomplete stage=report
-        reason="The transaction result is unavailable. Verify recovery before changing the site."
-      fi
-      if [ -f "$prepared/committed" ] || { [ -n "$recovery" ] && [ -f "$recovery/committed" ]; }; then
-        outcome=committed_with_followup stage=report
-        reason="The commit was recorded, but the final result is unavailable. Check the site and its recovery information."
-      fi
-      result=$(joomlaSiteJSON -nc --arg site "$site" --arg stage "$stage" --arg reason "$reason" --arg outcome "$outcome" \
-        --arg recovery "$recovery" --arg backup "$verified" '
-        {target:"current",status:(if $outcome=="committed_with_followup" then $outcome else "failed" end),site:$site,
-          $outcome,committed:($outcome=="committed_with_followup"),$stage,$reason,running:null,
-          backup:($backup|select(length>0) // null),recovery:($recovery|select(length>0) // null)}') || exit 1
+      result=$(joomlaSiteJSON -nc --arg site "$site" --arg stage "$stage" '
+        {target:"current",status:"failed",site:$site,$stage,running:null,destructive_started:false,backup:null,
+          reason:(if $stage=="package" then "The package could not be prepared for import." else "The import could not start; inspect the diagnostic." end)}') || exit 1
     fi
-    outcome=$(joomlaSiteJSON -er .outcome <<< "$result") || exit 1
-    if [ "$outcome" != committed ] && [ "$status" -eq 0 ]; then status=1; fi
+    if [ "$(joomlaSiteJSON -r .status <<< "$result")" != deployed ] && [ "$status" -eq 0 ]; then status=1; fi
     if [ "$format" = json ]; then
       printf '%s\n' "$result"
     else
-      # Only public receipt fields enter the dialog. Docker and package
-      # diagnostics stay on stderr, including when the wizard captures stdout.
-      message=$(joomlaSiteJSON -r --arg outcome "$outcome" --argjson status "$status" '
-        if ($status==130 or $status==255) and $outcome=="not_committed" and (.recovery or .backup|not) then empty
-        else (if $outcome=="committed" then
-            "Replaced " + .site + " with Joomla " + .joomlaVersion + ". " +
-            (if .running==true then "The website is running." elif .running==false then "The website passed its checks and its previous service states were restored."
-             else "The running state of the website is unconfirmed." end)
-          elif $outcome=="committed_with_followup" then "The replacement of " + .site + " was committed. Follow-up is required at stage " + .stage + ". " +
-            (if .running==true then "The website is running." elif .running==false then "Some website services are stopped."
-             else "The running state of the website is unconfirmed." end)
-          elif $outcome=="recovery_incomplete" then "The replacement of " + .site + " was not committed. Automatic recovery is incomplete at stage " + .stage + "."
-          else "The replacement of " + .site + " was not committed. It stopped at stage " + .stage + "." end) +
-          (if (.reason // "")!="" then " " + .reason else "" end) +
-          (if .backup then "\nVerified backup: " + .backup else "" end) +
-          (if .recovery then "\nRecovery information: " + .recovery else "" end)
-        end' <<< "$result") || exit 1
-      if [ -n "$message" ]; then
-        if [ "$format" = menu ] || [ "$status" -eq 0 ]; then printf '%s\n' "$message"; else printf '%s\n' "$message" >&2; fi
-      fi
+      message=$(joomlaSiteJSON -r '
+        (if .status=="deployed" then "Imported Joomla " + .joomlaVersion + " into " + .site + ". " +
+          (if .running==true then "The website is running." else "The previous stopped service state was preserved." end)
+         else "Import into " + .site + " failed at stage " + .stage + ". " + .reason end) +
+        (if .backup then "\nVerified backup: " + .backup else "" end)' <<< "$result") || exit 1
+      if [ "$format" = menu ] || [ "$status" -eq 0 ]; then printf '%s\n' "$message"; else printf '%s\n' "$message" >&2; fi
     fi
     exit "$status"
   )
@@ -20635,7 +20027,6 @@ function joomla__TRuST__migrate() {
 }
 
 
-
 # Validate automation choices before filesystem writes or source interruption.
 function cliPreflightOtherTask() {
   [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] || return 0
@@ -21483,13 +20874,10 @@ function cliExecute() {
     result=$(cliDispatch) || status=$?
     printf '%s' "$result" | jq -Rs --arg task "$task" --arg action "$action" --arg container "$site" --argjson status "$status" \
       '(if length == 0 then null else (try fromjson catch .) end) as $data |
-       (if $task=="playground" and $action=="deploy" and ($data|type)=="object" and $data.target=="current"
-        then $data.outcome else null end) as $outcome |
        {success:($status==0),task:$task,action:$action,container:$container,data:$data,
         error:(if $status==0 then null
-          elif $outcome=="committed_with_followup" then "The replacement was committed. Follow-up is required."
-          elif $outcome=="recovery_incomplete" then "The replacement was not committed. Automatic recovery is incomplete."
-          elif $outcome=="not_committed" then "The replacement was not committed."
+          elif $task=="playground" and $action=="deploy" and ($data|type)=="object" and $data.target=="current"
+          then "Import failed at stage " + ($data.stage // "unknown") + ". " + ($data.reason // "See stderr for details.")
           else "Operation failed; see stderr for details." end),exit_status:$status}'
     return "$status"
   fi
