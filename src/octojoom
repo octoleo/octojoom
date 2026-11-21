@@ -12407,20 +12407,16 @@ function joomlaPlaygroundTargetPreflight() {
 function joomlaPlaygroundConfirmFreshSettings() {
   set +x
   local prepared="$1" metadata="$1/metadata.json" field variable source selected changed override
-  local source_username='' source_email='' explicit_source=false imported_prefix setting value
+  local source_username='' imported_prefix setting value
   local -a edits=()
   local -a fields=(siteName username name email password)
   local -a variables=(VDM_J_SITE_NAME VDM_J_USERNAME VDM_J_USER VDM_J_EMAIL VDM_J_PASSWORD)
   local -a labels=('Site name' 'Administrator login username' 'Administrator display name' 'Administrator email' 'Administrator password')
   local index
-  if cliHasValue VDM_J_SOURCE_USERNAME; then explicit_source=true; fi
   for index in "${!fields[@]}"; do
     field="${fields[index]}" variable="${variables[index]}"
     source=$(joomlaSiteJSON -r --arg key "$field" 'if $key=="siteName" then .siteName else .admin[$key] // "" end' < "$metadata") || return 1
-    if [ "$field" = username ]; then
-      if [ "$explicit_source" = true ]; then source="$VDM_J_SOURCE_USERNAME"; fi
-      source_username="$source"
-    elif [ "$field" = email ]; then source_email="$source"; fi
+    [ "$field" != username ] || source_username="$source"
     selected="$source" changed=false override=false
     if cliHasValue "$variable"; then
       selected="${!variable}" override=true
@@ -12471,9 +12467,8 @@ function joomlaPlaygroundConfirmFreshSettings() {
     set -o pipefail
     umask 077
     printf '%s\n' "${source_username:-$VDM_J_USERNAME}" "$VDM_J_USERNAME" "$VDM_J_USER" "$VDM_J_EMAIL" "$VDM_J_PASSWORD" \
-      "$VDM_J_SITE_NAME" "$explicit_source" "$source_email" "${edits[@]}" | joomlaSiteJSON -Rn '{
+      "$VDM_J_SITE_NAME" "${edits[@]}" | joomlaSiteJSON -Rn '{
         sourceUsername:input, username:input, name:input, email:input, password:input, siteName:input,
-        explicitSource:(input=="true"), sourceEmail:input,
         changed:{username:(input=="true"),name:(input=="true"),email:(input=="true"),password:(input=="true")}}' > "$prepared/account.json"
   )
 }
@@ -12611,21 +12606,7 @@ function joomlaPlaygroundFreshAccountCode() {
       $stage = 25;
       $users = $container->get(UserFactoryInterface::class);
       $account = $users->loadUserByUsername($settings['sourceUsername']);
-      if ($settings['username'] !== $settings['sourceUsername']) {
-          $destination = $users->loadUserByUsername($settings['username']);
-          if ($account->id && $destination->id && (int) $account->id !== (int) $destination->id) {
-              $stage = 34;
-              throw new RuntimeException();
-          }
-          // Playground remembers the original login even after a Joomla rename.
-          // Use only the confirmed login and verify its original identity before edits.
-          if (!$account->id && !$settings['explicitSource'] && $settings['changed']['username'] && $destination->id
-              && !empty($settings['sourceEmail']) && strcasecmp($destination->email, $settings['sourceEmail']) === 0) {
-              $account = $destination;
-          }
-      }
       if (!$account->id) {
-          $stage = 33;
           throw new RuntimeException();
       }
       if ($account->block) {
@@ -13173,13 +13154,8 @@ function joomlaPlaygroundImportCandidate() {
       "$app" -d register_argc_argv=1 -r "$account_code" -- "$root" "$site" < "$prepared/account.json" >/dev/null 2>&1 || {
       account_status=$?
       account_stage='starting PHP in the selected Joomla service'
-      case "$account_status" in
-        33) printf '%s\n' 'Could not identify the imported Joomla administrator. Supply its actual login with --source-admin-username.' >&2;;
-        34) printf '%s\n' 'Another imported Joomla user already has the requested destination login. Choose a different --admin-username.' >&2;;
-        *)
-          if ((account_status >= 21 && account_status <= 32)); then account_stage="${account_stages[account_status-21]}"; fi
-          printf 'Could not apply the confirmed Joomla administrator while %s (status %d).\n' "$account_stage" "$account_status" >&2;;
-      esac
+      if ((account_status >= 21 && account_status <= 32)); then account_stage="${account_stages[account_status-21]}"; fi
+      printf 'Could not apply the confirmed Joomla administrator while %s (status %d).\n' "$account_stage" "$account_status" >&2
       exit 1
     }
     joomlaDatabaseCompose up -d >/dev/null || exit 1
@@ -18912,8 +18888,6 @@ Playground: --type joomla --task playground --action inspect --file ABSOLUTE_ZIP
        --action deploy --target current --file ABSOLUTE_ZIP_PATH --container HOSTNAME --confirm yes
        Replace the selected site. A verified full backup is the default.
        Proceeding without a backup requires --pre-backup no --confirm-no-backup yes.
-       Use --source-admin-username LOGIN to select the installed administrator when the
-       export settings are stale. Add --admin-username NEW_LOGIN to rename that account.
 
 Database: --task database --action change|export|import|tables|console|execute
        --engine mariadb|mysql|postgres --database-image PUBLISHED_IMAGE
@@ -20539,7 +20513,6 @@ function cliOptionVariable() {
     --db-persistence) echo VDM_DB_PERSISTENCE;; --mailcatcher) echo VDM_MAILCATCHER;;
     --phpmyadmin) echo VDM_PHPMYADMIN;; --save-defaults) echo VDM_SAVE_DEFAULTS;;
     --site-name) echo VDM_J_SITE_NAME;; --admin-username) echo VDM_J_USERNAME;;
-    --source-admin-username) echo VDM_J_SOURCE_USERNAME;;
     --admin-user) echo VDM_J_USER;; --admin-email) echo VDM_J_EMAIL;; --admin-password) echo VDM_J_PASSWORD;;
     --extensions) echo VDM_J_EXTENSIONS_URLS;; --commands) echo VDM_J_CLI_COMMANDS;;
     --php-settings) echo VDM_PHP_SETTINGS;; --image) echo VDM_PHP_IMAGE;;
@@ -20756,13 +20729,6 @@ function parseCLI() {
 # by their shared action handlers before touching data.
 function cliValidateDataOptions() {
   local variable value
-  if cliHasValue VDM_J_SOURCE_USERNAME; then
-    if [ "${VDM_CONTAINER_TYPE:-joomla}/${VDM_TASK:-}/${VDM_ACTION:-}" != joomla/playground/deploy ] ||
-       [[ -z "$VDM_J_SOURCE_USERNAME" || "$VDM_J_SOURCE_USERNAME" == *[[:cntrl:]]* ]]; then
-      echo >&2 'ERROR: --source-admin-username requires a single-line login for a Joomla Playground deployment.'
-      return 17
-    fi
-  fi
   for variable in VDM_DB_ENGINE VDM_DATA_MODE VDM_COMPRESSION VDM_FORMAT VDM_SCOPE VDM_RETENTION VDM_TARGET VDM_IMPORT_MODE; do
     cliHasValue "$variable" || continue
     value="${!variable}"
@@ -20889,7 +20855,7 @@ function cliComplete() {
     --enable|--secure|--cloudflare|--customize|--auto-install|--persistence|--db-persistence|--save-defaults|--mailcatcher|--phpmyadmin|--php-settings) printf '%s\n' true false;;
     --timestamp|--overwrite|--delete-source|--progress|--pre-backup|--confirm|--confirm-no-backup) printf '%s\n' yes no;;
     --file|--input-json|--repo-path|--project-path|--ssh-dir|--ssh-keys|--mount-base|--destination|--archive) compgen -f -- "$current";;
-    --table|--database-image|--db-image|--label|--retention|--timestamp-pattern|--source-admin-username) :;;
+    --table|--database-image|--db-image|--label|--retention|--timestamp-pattern) :;;
     --image-tag)
       # Cached catalogues contain public tag names only. Tab never refreshes them.
       for path in "${VDM_SRC_PATH}/cache/"php-tags-*; do [ ! -f "$path" ] || cat "$path"; done;;

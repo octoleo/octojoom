@@ -119,7 +119,7 @@ setup() {
   assert_equal "$VDM_J_USERNAME" fixture-admin
   assert_equal "$VDM_J_DB_PREFIX" demo_
   assert_equal "${VDM_memory_limit:-}" 512M
-  joomlaSiteJSON -e '.sourceUsername=="fixture-admin" and .explicitSource==false and .password=="private-fixture-password" and
+  joomlaSiteJSON -e '.sourceUsername=="fixture-admin" and .password=="private-fixture-password" and
     (.changed|all(.[]; .==false))' < "$prepared/account.json"
   parseCLI --non-interactive --site-name "Imported store" --admin-username owner --admin-user "Store owner" \
     --admin-email owner@example.test --admin-password 'a private edited password!' --db-name shopdata --memory-limit 768M
@@ -127,43 +127,9 @@ setup() {
   assert_success
   refute_output_contains private-fixture
   refute_output_contains 'a private edited password!'
-  joomlaSiteJSON -e '.sourceUsername=="fixture-admin" and .sourceEmail=="private-fixture@example.test" and
-    .email=="owner@example.test" and .username=="owner" and .changed.password and
+  joomlaSiteJSON -e '.sourceUsername=="fixture-admin" and .username=="owner" and .changed.password and
     .changed.username and .changed.email and .changed.name' < "$prepared/account.json"
   if ! is_windows; then assert_equal "$(file_mode "$prepared/account.json")" 600; fi
-}
-
-@test "Playground deployments accept an explicit imported login independently of the final login" {
-  joomlaPlaygroundPreparePackage "$package" "$prepared" >/dev/null
-  local -a deploy=(--non-interactive --type joomla --task playground --action deploy)
-  parseCLI "${deploy[@]}" --target new --source-admin-username owner
-  joomlaPlaygroundConfirmFreshSettings "$prepared"
-  assert_equal "$VDM_J_USERNAME" owner
-  joomlaSiteJSON -e '.sourceUsername=="owner" and .username=="owner" and .explicitSource and (.changed.username|not)' < "$prepared/account.json"
-
-  local VDM_DB_NAME=shop VDM_DB_USER=shop VDM_DB_PASSWORD=private-old-db
-  parseCLI "${deploy[@]}" --target current --source-admin-username owner --admin-username publisher
-  joomlaPlaygroundConfirmReplaceSettings "$prepared"
-  assert_equal "$VDM_J_USERNAME" publisher
-  joomlaSiteJSON -e '.sourceUsername=="owner" and .username=="publisher" and .explicitSource and .changed.username' < "$prepared/account.json"
-  run cliComplete '' --source-admin joomla playground
-  assert_success
-  assert_equal "$output" --source-admin-username
-}
-
-@test "source administrator selection requires a single-line login and a Playground deploy action" {
-  local -a playground=(--non-interactive --type joomla --task playground)
-  run parseCLI "${playground[@]}" --action inspect --source-admin-username owner
-  assert_equal "$status" 17
-  assert_output_contains 'Playground deployment'
-  run parseCLI "${playground[@]}" --action deploy --source-admin-username $'owner\nsecond'
-  assert_equal "$status" 17
-  assert_output_contains 'single-line login'
-  printf '%s\n' '{"type":"joomla","task":"playground","action":"deploy","options":{"source-admin-username":""}}' > "$SANDBOX/request.json"
-  run parseCLI --input-json "$SANDBOX/request.json"
-  assert_equal "$status" 17
-  assert_output_contains 'single-line login'
-  refute_command '^docker '
 }
 
 @test "interactive settings retain the imported password when the masked field is left blank" {
@@ -256,7 +222,7 @@ fresh_command() {
   make_joomla_container bravo BRAVO bravo
   cp "$VDM_REPO_PATH/joomla/.env" "$SANDBOX/prior.env"
   fresh_setup_standins
-  run --separate-stderr fresh_command --enable false --source-admin-username owner
+  run --separate-stderr fresh_command --enable false
   assert_success
   joomlaSiteJSON -e '.success and .data.site=="shop.example.test" and .data.enabled==false and .data.target=="new"' <<< "$output"
   [[ "${stderr:-}$output" != *private-fixture* ]]
@@ -266,8 +232,6 @@ fresh_command() {
   assert_equal "$value" "Fixture Shop"
   migrationReadEnvValue "$fixture_site_dir/.env" VDM_SHOP_JOOMLA_ADMIN_PASSWORD value
   assert_equal "$value" private-fixture-password
-  migrationReadEnvValue "$fixture_site_dir/.env" VDM_SHOP_JOOMLA_ADMIN_USERNAME value
-  assert_equal "$value" owner
   migrationReadEnvValue "$fixture_site_dir/.env" VDM_SHOP_JOOMLA_DB_PREFIX value
   assert_equal "$value" demo_
   migrationReadEnvValue "$fixture_site_dir/.env" VDM_SHOP_DB value
