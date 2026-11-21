@@ -167,11 +167,8 @@ portable coverage, not equivalent real-Docker move acceptance.
 The Playground fixture exercises the public CLI. It verifies the default full
 backup, explicit backup opt-out, failed SQL import, an unusable backup path,
 rollback after failed activation, and the stopped site's state after restart.
-It checks that the neighboring site's containers keep running. A second export
-captures a renamed Joomla administrator and a site in offline mode. The fixture
-checks the imported account's ID, groups and password, the visitor-facing 503
-page, and Docker health after restart. macOS and Windows run the portable
-Playground suites with Docker stand-ins.
+It also checks that the neighboring site's containers keep running. macOS and
+Windows run the portable Playground suites with Docker stand-ins.
 
 The database and backup matrix installs Joomla separately for each engine.
 It exports and imports actual SQL, checks selected-table operations, Unicode
