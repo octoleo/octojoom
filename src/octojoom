@@ -13203,36 +13203,11 @@ function joomlaPlaygroundReplacementEnvironment() {
   done >> "$output"
 }
 
-# A missing override is a distinct state: creating it during staging is also
-# an edit. Keep the initial bytes privately so the candidate uses this snapshot.
-function joomlaPlaygroundSnapshotIni() {
-  local path="$1" snapshot="$2"
-  [[ "$path" != *[![:print:]]* ]] && ! migrationPathHasSymlink "$path" || return 1
-  printf '%s\n' "$path" > "$snapshot.path" || return 1
-  [ ! -e "$path" ] || { [ -f "$path" ] && cp -- "$path" "$snapshot"; }
-}
-
-function joomlaPlaygroundCheckIni() {
-  local entry path
-  [ "$#" -gt 0 ] || return 1
-  for entry in "$@"; do
-    if IFS= read -r path < "$entry" && ! migrationPathHasSymlink "$path"; then
-      if [ -f "${entry%.path}" ]; then
-        [ -f "$path" ] && cmp -s "${entry%.path}" "$path" && continue
-      elif [ ! -e "$path" ]; then
-        continue
-      fi
-    fi
-    printf 'A site PHP override changed during staging. Retry against its current settings.\n' >&2
-    return 1
-  done
-}
-
 # Keep all unrelated directives in the site's active INI, including legacy
 # /var/www/html/php.ini mounts. Move the mount to the selected image's scan dir.
 # shellcheck disable=SC2016
 function joomlaPlaygroundReplacementIni() {
-  local site="$1" work="$2" image="$3" mirror="${4:-}" mounts source='' old_target='' destination host setting variable
+  local site="$1" work="$2" image="$3" mounts source='' old_target='' destination host setting variable
   local -a changes=()
   mounts=$(joomlaSiteJSON -ce --arg app "$VDM_SITE_SERVICE" '[.services[$app].volumes[]? |
     select((.target | endswith("/php.ini")) or (.target | endswith("/zz-octojoom.ini")))] |
@@ -13246,18 +13221,8 @@ function joomlaPlaygroundReplacementIni() {
     [ -f "$source" ] && ! migrationPathHasSymlink "$source" || return 1
   fi
   destination=$(joomlaPHPIniDestination "$site" "$source" "$(cat "$work/original-model.json")") || return 1
-  joomlaPlaygroundSnapshotIni "$destination" "$work/ini-destination" || return 1
-  if [ -n "$source" ]; then
-    if [ "$source" = "$destination" ]; then
-      source="$work/ini-destination"
-    else
-      joomlaPlaygroundSnapshotIni "$source" "$work/ini-source" || return 1
-      source="$work/ini-source"
-    fi
-  fi
-  if [[ -n "$mirror" && "$destination" == "$VDM_SITE_DIR/"* ]]; then
-    joomlaPlaygroundSnapshotIni "$mirror/${destination#"$VDM_SITE_DIR/"}" "$work/ini-mirror" || return 1
-  fi
+  ! migrationPathHasSymlink "$destination" && { [ ! -e "$destination" ] || [ -f "$destination" ]; } || return 1
+  printf '%s\n' "$destination" > "$work/ini-destination" || return 1
   if [ "${VDM_PHP_SETTINGS:-true}" != false ]; then
     for setting in max_execution_time max_input_time max_input_vars error_reporting upload_max_filesize post_max_size memory_limit; do
       variable="VDM_${setting}"
@@ -13345,7 +13310,7 @@ function joomlaPlaygroundPlanReplacement() {
   writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE=$image" true &&
     writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE_SOURCE=$VDM_J_REPO" true &&
     writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE_TAG=$VDM_JV" true || return 1
-  joomlaPlaygroundReplacementIni "$site" "$work" "$image" "${4:-}" || return 1
+  joomlaPlaygroundReplacementIni "$site" "$work" "$image" || return 1
   migrationRunCompose "$work/candidate.env" "$work/candidate.yml" --project-directory "$VDM_SITE_DIR" config --format json > "$work/proposed.json" || return 1
   model=$(joomlaSiteJSON 'walk(if type=="string" then gsub("\\$\\$"; "$") else . end)' < "$work/proposed.json") || return 1
   joomlaBackupValidateDestination "$model" "$project_dir" "$VDM_SITE_DIR" false "${project_dir%/*}/bulk" || return 1
@@ -13976,34 +13941,6 @@ function joomlaPlaygroundCreateReplacementBackup() {
   )
 }
 
-# Recheck the exact model used to prepare the replacement, including Compose
-# includes, environment selection and the form of the enabled registration.
-function joomlaPlaygroundCheckOriginalSite() {
-  local site="$1" work="$2" compose="$3" env_file="$4" digest="$5" enabled="$6" mirror="$7" project="$8"
-  local current_env current_mirror='' registered="$VDM_REPO_PATH/joomla/enabled/$site"
-  current_env=$(getContainerEnvFile joomla "$site" available) || return 1
-  if [ "$enabled" = enabled ] && [ ! -L "$registered" ]; then current_mirror="$registered"; fi
-  if ! cmp -s "$work/initial-compose" "$compose" || [ "$env_file" != "$current_env" ] ||
-    { [ -n "$digest" ] && [ "$(migrationArchiveDigest "$current_env")" != "$digest" ]; } ||
-    [ "$(getJoomlaSiteEnabledState "$site")" != "$enabled" ] ||
-    [ "$current_mirror" != "$mirror" ] ||
-    ! joomlaSiteCompose "$site" config --format json > "$work/current-model.json" ||
-    ! cmp -s "$work/rendered.json" "$work/current-model.json"; then
-    printf 'The original Compose settings or site registration changed during deployment. Retry against the new settings.\n' >&2
-    return 1
-  fi
-  joomlaPlaygroundReplacementProject "$site" "$project"
-}
-
-# Select existing containers by their original project even if an operator
-# edits the public definition while writers are paused. Only the public
-# definition is used to create or recreate the website after publication.
-function joomlaPlaygroundOriginalCompose() {
-  local work="$1" directory="$2" project="$3"
-  shift 3
-  migrationRunCompose '' "$work/rendered.json" --project-directory "$directory" --project-name "$project" "$@"
-}
-
 # Store the service inventory before ever stopping writers. All publications
 # have a write-ahead receipt; the original pair is kept until final readiness.
 # shellcheck disable=SC2016
@@ -14012,9 +13949,9 @@ function joomlaPlaygroundReplaceSite() {
     set +x
     umask 077
     local prepared="$1" site="$2" backup="$3" stage=preflight reason='' recovery='' verified='' enabled='' running='' existing=''
-    local token='' work='' lock='' paused=false activating=false committed=false recovered=true status=1 public_running=null
-    local directory compose mirror='' database app web root role original candidate target ini service old_env='' old_digest='' project='' stopped
-    local -a active=() before=() inactive=() previous_running=() verification_only=()
+    local token='' work='' lock='' paused=false activating=false committed=false recovered=true status=1 public_running=false
+    local directory compose mirror='' database app web root role original candidate target ini service old_env='' old_digest='' current_env='' stopped
+    local -a active=() before=() inactive=()
     case "$backup" in true|false) ;; *) exit 17;; esac
     resolveJoomlaSite "$site" || exit 1
     directory="$VDM_SITE_DIR" compose="$VDM_SITE_COMPOSE" old_env="$VDM_SITE_ENV"
@@ -14043,15 +13980,8 @@ function joomlaPlaygroundReplaceSite() {
           if "$recovered" && "$activating" && [ "${#before[@]}" -gt 0 ]; then
             joomlaSiteCompose "$site" up --no-start --no-deps "${before[@]}" >/dev/null || recovered=false
           fi
-          if "$recovered" && [ "${#previous_running[@]}" -gt 0 ]; then
-            if ! joomlaPlaygroundReplacementProject "$site" "$project"; then recovered=false
-            elif "$activating"; then
-              joomlaSiteCompose "$site" up -d --no-recreate --no-deps "${previous_running[@]}" >/dev/null || recovered=false
-            else
-              joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" up -d --no-recreate --no-deps "${previous_running[@]}" >/dev/null || recovered=false
-            fi
-          fi
-          if "$recovered" && "$activating" && [ "$public_running" = true ]; then
+          if "$recovered"; then joomlaBackupResume "$site" "$running" "$database" false || recovered=false; fi
+          if "$recovered" && "$activating" && "$public_running"; then
             joomlaPlaygroundWaitFresh "$old_env" "$compose" "$app" "$site" "$root" "$web" || recovered=false
           fi
         fi
@@ -14064,7 +13994,7 @@ function joomlaPlaygroundReplaceSite() {
           else reason="The selected site was left in its original state."; fi
         else
           reason="Automatic recovery or private storage cleanup needs attention. Inspect the retained journal before changing this site."
-          recovery="$work" public_running=null
+          recovery="$work"
         fi
         [ "$status" -ne 0 ] || status=1
       fi
@@ -14093,7 +14023,7 @@ function joomlaPlaygroundReplaceSite() {
     cp -- "$compose" "$work/initial-compose" || exit 1
     if [ -f "$old_env" ]; then old_digest=$(migrationArchiveDigest "$old_env") || exit 1; fi
     joomlaDatabaseContext "$site" && joomlaPlaygroundConfirmReplaceSettings "$prepared" || exit $?
-    joomlaPlaygroundPlanReplacement "$prepared" "$site" "$work" "$mirror" || exit $?
+    joomlaPlaygroundPlanReplacement "$prepared" "$site" "$work" || exit $?
     joomlaPlaygroundAllocateReplacement "$site" "$work" || exit 1
     stage=candidate
     printf '%s\n' "$stage" > "$work/stage" || exit 1
@@ -14101,27 +14031,13 @@ function joomlaPlaygroundReplaceSite() {
     joomlaPlaygroundStopReplacementCandidate "$work" "$token" && joomlaPlaygroundPreparePublishedModel "$work" "$directory" || exit 1
     app=$(joomlaSiteJSON -er .app < "$work/services.json") && database=$(joomlaSiteJSON -er .db < "$work/services.json") &&
       root=$(joomlaSiteJSON -er .root < "$work/services.json") && web=$(joomlaSiteJSON -er .web < "$work/services.json") || exit 1
-    project=$(joomlaSiteJSON -er .project < "$work/services.json") || exit 1
-    joomlaPlaygroundCheckOriginalSite "$site" "$work" "$compose" "$old_env" "$old_digest" "$enabled" "$mirror" "$project" || exit 1
-    running=$(joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" ps --status running --services) &&
-      existing=$(joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" ps --all --services) || exit 1
+    running=$(joomlaSiteCompose "$site" ps --status running --services) && existing=$(joomlaSiteCompose "$site" ps --all --services) || exit 1
     printf '%s\n' "$running" > "$work/running-services" && printf '%s\n' "$existing" > "$work/existing-services" &&
       printf '%s\n' "$enabled" > "$work/registration" || exit 1
     while IFS= read -r service; do [ -z "$service" ] || before+=("$service"); done <<< "$existing"
-    # The database, Joomla and (for FPM) HTTP service must run for readiness.
-    # Any of them may have been stopped independently before this replacement.
     active=("$database" "$app"); [ "$web" = 127.0.0.1 ] || active+=("$web")
-    public_running=true
-    for service in "${active[@]}"; do
-      if ! grep -Fxq -- "$service" <<< "$running"; then
-        verification_only+=("$service")
-        public_running=false
-      fi
-    done
     while IFS= read -r service; do
-      [ -n "$service" ] || continue
-      previous_running+=("$service")
-      case "$service" in "$app"|"$web"|"$database") ;; *) active+=("$service");; esac
+      case "$service" in "$app"|"$web") public_running=true;; ''|"$database") ;; *) active+=("$service");; esac
     done <<< "$running"
     for service in "${before[@]}"; do
       stopped=true
@@ -14132,23 +14048,27 @@ function joomlaPlaygroundReplaceSite() {
     printf '%s\n' "$stage" > "$work/stage" || exit 1
     paused=true
     while IFS= read -r service; do
-      [ -z "$service" ] || [ "$service" = "$database" ] || joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" stop "$service" >/dev/null || exit 1
+      [ -z "$service" ] || [ "$service" = "$database" ] || joomlaSiteCompose "$site" stop "$service" >/dev/null || exit 1
     done <<< "$running"
-    if "$backup"; then
-      stage=backup
-      printf '%s\n' "$stage" > "$work/stage" || exit 1
-      joomlaPlaygroundCreateReplacementBackup "$site" "$work" "$token" && [ -s "$work/verified-backup" ] || exit 1
+    current_env=$(getContainerEnvFile joomla "$site" available) || exit 1
+    if ! cmp -s "$work/initial-compose" "$compose" || [ "$current_env" != "$old_env" ] ||
+      { [ -n "$old_digest" ] && [ "$(migrationArchiveDigest "$current_env")" != "$old_digest" ]; }; then
+      printf 'The original Compose file or environment changed during staging. Retry against the new settings.\n' >&2
+      exit 1
     fi
-    joomlaPlaygroundCheckOriginalSite "$site" "$work" "$compose" "$old_env" "$old_digest" "$enabled" "$mirror" "$project" || exit 1
     if ! joomlaDatabaseCopyConfiguration "$site" "$work/current-configuration.php" ||
       ! cmp -s "$work/target-configuration.php" "$work/current-configuration.php"; then
       printf 'The original Joomla configuration changed or could not be read. Retry against its current settings.\n' >&2
       exit 1
     fi
+    if "$backup"; then
+      stage=backup
+      printf '%s\n' "$stage" > "$work/stage" || exit 1
+      joomlaPlaygroundCreateReplacementBackup "$site" "$work" "$token" && [ -s "$work/verified-backup" ] || exit 1
+    fi
     stage=publish
     printf '%s\n' "$stage" > "$work/stage" || exit 1
-    joomlaPlaygroundCheckIni "$work"/ini-*.path || exit 1
-    joomlaPlaygroundOriginalCompose "$work" "$directory" "$project" stop >/dev/null || exit 1
+    joomlaSiteCompose "$site" stop >/dev/null || exit 1
     for role in web db; do
       original=$(joomlaSiteJSON -er .original < "$work/$role/mount.json") &&
         candidate=$(joomlaSiteJSON -er .candidate < "$work/$role/mount.json") || exit 1
@@ -14166,15 +14086,13 @@ function joomlaPlaygroundReplaceSite() {
     joomlaBackupPublishFile "$work/candidate.yml" "$compose" "$work" &&
       joomlaBackupPublishFile "$work/candidate.env" "$directory/.env" "$work" || exit 1
     if [ -f "$work/candidate.ini" ]; then
-      joomlaPlaygroundCheckIni "$work"/ini-*.path && IFS= read -r ini < "$work/ini-destination.path" &&
-        joomlaBackupPublishFile "$work/candidate.ini" "$ini" "$work" || exit 1
+      IFS= read -r ini < "$work/ini-destination" && joomlaBackupPublishFile "$work/candidate.ini" "$ini" "$work" || exit 1
     fi
     if [ -n "$mirror" ]; then
       joomlaBackupPublishFile "$work/candidate.yml" "$mirror/docker-compose.yml" "$work" &&
         joomlaBackupPublishFile "$work/candidate.env" "$mirror/.env" "$work" || exit 1
       if [[ -n "${ini:-}" && "$ini" == "$directory/"* ]]; then
-        joomlaPlaygroundCheckIni "$work/ini-mirror.path" &&
-          joomlaBackupPublishFile "$work/candidate.ini" "$mirror/${ini#"$directory/"}" "$work" || exit 1
+        joomlaBackupPublishFile "$work/candidate.ini" "$mirror/${ini#"$directory/"}" "$work" || exit 1
       fi
     fi
     stage=activate
@@ -14187,9 +14105,12 @@ function joomlaPlaygroundReplaceSite() {
     fi
     joomlaSiteCompose "$site" up -d --force-recreate --no-deps "${active[@]}" >/dev/null || exit 1
     joomlaPlaygroundWaitFresh "$directory/.env" "$compose" "$app" "$site" "$root" "$web" || exit 1
-    for service in "${verification_only[@]}"; do
-      joomlaSiteCompose "$site" stop "$service" >/dev/null || exit 1
-    done
+    if ! "$public_running"; then
+      # Only the services started for readiness need to return to stopped.
+      for service in "${active[@]}"; do
+        if ! grep -qxF "$service" <<< "$running"; then joomlaSiteCompose "$site" stop "$service" >/dev/null || exit 1; fi
+      done
+    fi
     stage=commit
     printf '%s\n' "$stage" > "$work/stage" || exit 1
     recovery="$work"
@@ -14242,12 +14163,12 @@ function joomlaPlaygroundDeployCurrent() {
     else
       [ "$status" -ne 0 ] || status=1
       result=$(joomlaSiteJSON -nc --arg site "$site" --arg stage "$stage" \
-        '{target:"current",status:"failed",site:$site,stage:$stage,running:null,backup:null,recovery:null}') || exit 1
+        '{target:"current",status:"failed",site:$site,stage:$stage,backup:null,recovery:null}') || exit 1
     fi
     if [ "${OCTOJOOM_OUTPUT:-text}" = json ]; then printf '%s\n' "$result"
     elif [ "$status" -eq 0 ]; then
       joomlaSiteJSON -r '"Replaced " + .site + " with Joomla " + .joomlaVersion + ". " +
-        (if .running then "The website is running." else "The website passed its checks and its previous service states were restored." end) +
+        (if .running then "The website is running." else "The website was checked and returned to its stopped state." end) +
         (if .backup then "\nVerified backup: " + .backup else "" end) +
         (if .recovery then "\nOriginal site data: " + .recovery else "" end)' <<< "$result" || exit 1
     elif [ "$status" -ne 130 ] && [ "$status" -ne 255 ]; then
