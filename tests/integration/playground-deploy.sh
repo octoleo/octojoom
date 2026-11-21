@@ -398,9 +398,15 @@ replacement_state() {
     require "configuration.php"; $c = new JConfig();
     $db = new mysqli(explode(":",$c->host)[0],$c->user,$c->password,$c->db);
     $mode=$argv[1]; $marker=".octojoom-ci-previous"; $oldSecret="previous-" . $argv[2];
+    $literalTable="ci_previous_`\\line\nbreak";
     if ($mode === "seed") {
         $db->query("CREATE TABLE ci_previous_data (id INTEGER PRIMARY KEY)");
         $db->query("INSERT INTO ci_previous_data VALUES (2026)");
+        $db->query("SET SESSION sql_mode=\"NO_BACKSLASH_ESCAPES\"");
+        $db->query("CREATE TABLE `".str_replace("`","``",$literalTable)."` (id INTEGER)");
+        $db->query("CREATE VIEW ci_previous_view AS SELECT id FROM ci_previous_data");
+        $db->query("CREATE PROCEDURE ci_previous_procedure() SELECT 1");
+        $db->query("CREATE EVENT ci_previous_event ON SCHEDULE EVERY 1 DAY DISABLE DO UPDATE ci_previous_data SET id=id");
         if (file_put_contents($marker,"original website\n") === false) exit(1);
         $raw=file_get_contents("configuration.php");
         foreach (["secret"=>$oldSecret,"smtphost"=>"mail.fixture.invalid"] as $field=>$value) {
@@ -417,6 +423,16 @@ replacement_state() {
         || ($c->secret === $oldSecret) !== $old || is_file($marker) !== $old) exit(4);
     $table=(bool)$db->query("SHOW TABLES LIKE \"ci_previous_data\"")->num_rows;
     if ($table !== $old || ($old && (int)$db->query("SELECT id FROM ci_previous_data")->fetch_row()[0] !== 2026)) exit(5);
+    foreach ([
+        ["TABLES", "TABLE_SCHEMA", "TABLE_NAME", $literalTable],
+        ["TABLES", "TABLE_SCHEMA", "TABLE_NAME", "ci_previous_view"],
+        ["ROUTINES", "ROUTINE_SCHEMA", "ROUTINE_NAME", "ci_previous_procedure"],
+        ["EVENTS", "EVENT_SCHEMA", "EVENT_NAME", "ci_previous_event"],
+    ] as [$catalog, $schema, $field, $name]) {
+        $query=$db->prepare("SELECT COUNT(*) FROM information_schema.$catalog WHERE $schema=DATABASE() AND $field=?");
+        $query->bind_param("s", $name); $query->execute();
+        if ((bool)$query->get_result()->fetch_row()[0] !== $old) exit(6);
+    }
   ' -- "$mode" "$sub"
 }
 replace_site() {
