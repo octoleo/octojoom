@@ -230,8 +230,11 @@ check_http() {
 check_site() {
   local sub="$1" key="$2" sitename="$3" username="$4" display="$5" email="$6" password="$7"
   local docroot="${8:-/var/www/html}" web="${9:-127.0.0.1}"
-  local env_file var expected observed expected_hash_digest=''
+  local env_file var expected observed expected_hash_digest='' uid='' gid=''
   env_file=$(destination_env "$sub") || return 1
+  migrationReadEnvValue "$env_file" "VDM_${key^^}_PUID" uid || uid=''
+  migrationReadEnvValue "$env_file" "VDM_${key^^}_PGID" gid || gid=''
+  uid="${uid#\#}"; gid="${gid#\#}"
   [ "$(stat -c %a "$env_file")" = 600 ] || { echo 'Site environment permissions are too broad.' >&2; return 1; }
   for var in SITE_NAME ADMIN_USERNAME ADMIN_USER ADMIN_EMAIL ADMIN_PASSWORD DB_PREFIX; do
     case "$var" in
@@ -243,9 +246,11 @@ check_site() {
   done
   # Check the original donor ID, groups and Joomla permissions independently
   # of CLI output. The confirmed password travels through standard input.
+  # Joomla API calls may write language caches; use the selected website owner.
   if [ "$password" = "$DONOR_PASSWORD" ]; then expected_hash_digest="$donor_hash_digest"; fi
   printf '%s\n%s' "$expected_hash_digest" "$password" |
-    destination "$sub" exec -T --workdir "$docroot" "joomla$key" php -d register_argc_argv=1 -r '
+    destination "$sub" exec -T --user "${uid:-www-data}:${gid:-www-data}" \
+      --workdir "$docroot" "joomla$key" php -d register_argc_argv=1 -r '
     define("_JEXEC", 1); define("JPATH_BASE", getcwd());
     require JPATH_BASE."/includes/defines.php";
     require JPATH_BASE."/includes/framework.php";
