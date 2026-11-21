@@ -6271,17 +6271,6 @@ function joomlaDatabaseInstalledCapability() {
     }
 }
 
-# PostgreSQL 18+ binds the parent of its versioned PGDATA. Its entrypoint
-# prepares PGDATA as root and then runs as postgres, which must be able
-# to traverse this host-owned parent even when a restore uses umask 077.
-function joomlaDatabaseCreateBindDirectory() {
-  local directory="$1" mount_target="$2"
-  mkdir -- "$directory" || return 1
-  if [ "$mount_target" = /var/lib/postgresql ]; then
-    chmod 711 "$directory" || return 1
-  fi
-}
-
 # Stage fresh database storage without changing the site's persistence choice.
 # Existing custom service fields, other mounts and unrelated services survive.
 # shellcheck disable=SC2016,SC2034
@@ -6353,7 +6342,7 @@ function joomlaDatabaseStageStorage() {
     if ! (set -o pipefail; df -P "$original" "$storage_work" | awk 'NR>1 {if(!device) device=$1; else if(device!=$1) exit 1} END {if(NR<3) exit 1}'); then
       rmdir "$storage_work"; printf 'Database staging and source storage must use the same filesystem.\n' >&2; return 1
     fi
-    joomlaDatabaseCreateBindDirectory "$storage_work/candidate" "$target" || return 1
+    mkdir "$storage_work/candidate" || return 1
     VDM_DATABASE_STAGE_STORAGE="$storage_work/candidate"
     VDM_DATABASE_STAGE_STORAGE_ORIGINAL="$original" VDM_DATABASE_STAGE_STORAGE_RECOVERY="$storage_work/original"
   else
@@ -9152,13 +9141,12 @@ function joomlaBackupRestoreNewAction() {
     esac
     database=$(printf '%s' "$config" | joomlaSiteJSON -r '[.services|to_entries[]|select((.value.image//"")|test("(^|/)(mysql|mariadb|postgres)(:|@|$)"))|.key]|if length==1 then .[0] else empty end') || exit 1
     [ -n "$database" ] || exit 1
-    local db_mount_target
-    IFS=$'\t' read -r storage_type path db_mount_target < <(printf '%s' "$config" | joomlaSiteJSON -r --arg service "$database" '.services[$service].volumes[]?|select(.target=="/var/lib/mysql" or .target=="/var/lib/postgresql" or .target=="/var/lib/postgresql/data")|[.type,.source,.target]|@tsv')
+    IFS=$'\t' read -r storage_type path < <(printf '%s' "$config" | joomlaSiteJSON -r --arg service "$database" '.services[$service].volumes[]?|select(.target=="/var/lib/mysql" or .target=="/var/lib/postgresql" or .target=="/var/lib/postgresql/data")|[.type,.source]|@tsv')
     if [ "$storage_type" = bind ]; then
       path=$(joomlaBackupFilesystemPath "$path") || exit 1
       target=$(joomlaBackupFilesystemPath "$project/db") || exit 1
       [ "$path" = "$target" ] || { joomlaBackupError 'Destination database bind escaped its reserved project.'; exit 1; }
-      joomlaDatabaseCreateBindDirectory "$project/db" "$db_mount_target" || exit 1
+      mkdir "$project/db" || exit 1
     elif [ "$storage_type" != volume ]; then
       joomlaBackupError 'The archive database storage could not be resolved; no storage type was changed.'; exit 1
     fi
