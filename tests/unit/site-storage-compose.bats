@@ -45,6 +45,17 @@ storage_real_compose() {
   fi
 }
 
+storage_original_snapshot() {
+  original_work="$SANDBOX/original-check"
+  mkdir "$original_work"
+  cp "$compose" "$original_work/initial-compose"
+  original_digest=$(migrationArchiveDigest "$directory/.env")
+  joomlaStorageComposeModel "$site" "$directory/.env" "$compose" > "$original_work/rendered.json"
+  # Project ownership needs a daemon; the configuration and original-state
+  # checks remain real and must finish before this ownership check is reached.
+  joomlaPlaygroundReplacementProject() { return 0; }
+}
+
 @test "storage rejects unset interpolation from successful Compose without exposing native diagnostics" {
   storage_render_fixture
   local diagnostic
@@ -80,6 +91,28 @@ storage_real_compose() {
   assert_success
   assert_equal "$output" "$(cat "$SANDBOX/model.json")"
   refute_output_contains 'obsolete'
+}
+
+@test "replacement accepts unchanged native JSON without a final newline and rejects changed rendered storage" {
+  storage_render_fixture
+  local native
+  native=$(cat "$SANDBOX/model.json")
+  printf '%s' "$native" > "$SANDBOX/model.json"
+  storage_original_snapshot
+  # Native Compose can omit this newline; the saved validated model adds one.
+  assert_equal "$(tail -c 1 "$SANDBOX/model.json")" '}'
+  run cmp -s "$SANDBOX/model.json" "$original_work/rendered.json"
+  assert_failure
+  run joomlaPlaygroundCheckOriginalSite "$site" "$original_work" "$compose" "$directory/.env" "$original_digest" disabled '' alpha
+  assert_success
+  assert_equal "$output" ''
+  cmp "$original_work/rendered.json" "$original_work/current-model.json"
+
+  joomlaSiteJSON '.services.web.volumes[0].source += "/changed"' < "$SANDBOX/model.json" > "$SANDBOX/changed.json"
+  mv "$SANDBOX/changed.json" "$SANDBOX/model.json"
+  run joomlaPlaygroundCheckOriginalSite "$site" "$original_work" "$compose" "$directory/.env" "$original_digest" disabled '' alpha
+  assert_failure
+  assert_output_contains 'The original Compose settings or site registration changed during deployment.'
 }
 
 @test "storage rejects malformed JSON and unresolved mount identities" {
@@ -147,6 +180,34 @@ storage_real_compose() {
   run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html
   assert_failure
   assert_output_contains 'Another container shares this storage.'
+}
+
+@test "real Compose original-state checks accept an unchanged model and reject a changed external service environment" {
+  storage_real_compose
+  cat > "$compose" <<'YAML'
+services:
+  web:
+    image: busybox:latest
+    env_file: service.env
+    volumes:
+      - "${VDM_PROJECT_PATH}/alpha/joomla:/var/www/html"
+YAML
+  printf 'DEPLOYMENT_MARKER=original\n' > "$directory/service.env"
+  storage_original_snapshot
+  run joomlaPlaygroundCheckOriginalSite "$site" "$original_work" "$compose" "$directory/.env" "$original_digest" disabled '' alpha
+  assert_success
+  assert_equal "$output" ''
+  cmp "$original_work/rendered.json" "$original_work/current-model.json"
+
+  # A dependency changes while the checked Compose and interpolation files
+  # remain identical. Only comparing the rendered model catches this edit.
+  printf 'DEPLOYMENT_MARKER=changed\n' > "$directory/service.env"
+  cmp "$original_work/initial-compose" "$compose"
+  assert_equal "$(migrationArchiveDigest "$directory/.env")" "$original_digest"
+  run joomlaPlaygroundCheckOriginalSite "$site" "$original_work" "$compose" "$directory/.env" "$original_digest" disabled '' alpha
+  assert_failure
+  assert_output_contains 'The original Compose settings or site registration changed during deployment.'
+  assert_equal "$(joomlaSiteJSON -r '.services.web.environment.DEPLOYMENT_MARKER' < "$original_work/current-model.json")" changed
 }
 
 @test "real Compose cannot turn an incomplete stopped neighbor environment into safe storage" {

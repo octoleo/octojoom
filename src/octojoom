@@ -14347,7 +14347,7 @@ function joomlaPlaygroundCheckOriginalSite() {
     { [ -n "$digest" ] && [ "$(migrationArchiveDigest "$current_env")" != "$digest" ]; } ||
     [ "$(getJoomlaSiteEnabledState "$site")" != "$enabled" ] ||
     [ "$current_mirror" != "$mirror" ] ||
-    ! joomlaSiteCompose "$site" config --format json > "$work/current-model.json" ||
+    ! joomlaStorageComposeModel "$site" "$current_env" "$compose" > "$work/current-model.json" ||
     ! cmp -s "$work/rendered.json" "$work/current-model.json"; then
     printf 'The original Compose settings or site registration changed during deployment. Retry against the new settings.\n' >&2
     return 1
