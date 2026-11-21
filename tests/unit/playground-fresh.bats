@@ -524,6 +524,7 @@ shared_import_standins() {
     [[ "$*" == 'run --rm --no-deps -T --label traefik.enable=false --label com.octoleo.octojoom.playground=1234567890abcdef1234567890abcdef --entrypoint php '* ]] || return 91
     [ "$MSYS_NO_PATHCONV" = 1 ] && [ "$MSYS2_ARG_CONV_EXCL" = '*' ] || return 92
     printf '%s\n' "$@" > "$SANDBOX/account-args"
+    printf '%s\n' "$VDM_DB_COMPOSE" "$VDM_DB_ENV" "$VDM_DB_PROJECT_DIR" > "$SANDBOX/account-context"
     cat >/dev/null
     printf 'account\n' >> "$SANDBOX/import-order"
   }
@@ -557,6 +558,24 @@ shared_import_standins() {
   assert_output_contains 'already contains tables'
   refute_file_exists "$SANDBOX/import-order"
   refute_file_exists "$work/import-writing"
+}
+
+@test "both targets run administrator updates as the website owner so Joomla caches remain writable" {
+  shared_import_standins
+  cp "$prepared/site/configuration.php" "$work/existing.php"
+  local mode owner original VDM_PUID VDM_PGID
+  for mode in fresh replace; do
+    original=''
+    [ "$mode" != replace ] || original="$work/existing.php"
+    for owner in www-data:www-data 1234:5678 '#1234:#5678' 1234:www-data www-data:5678; do
+      IFS=: read -r VDM_PUID VDM_PGID <<< "$owner"
+      [ "$VDM_PUID" != www-data ] || VDM_PUID=''
+      [ "$VDM_PGID" != www-data ] || VDM_PGID=''
+      run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount "$mode" "$original"
+      assert_success
+      assert_equal "$(awk 'previous=="--user" {print; exit} {previous=$0}' "$SANDBOX/account-args")" "${owner//#/}"
+    done
+  done
 }
 
 @test "a failed selected-database reset or SQL import cannot reach administrator setup" {
@@ -611,15 +630,19 @@ shared_import_standins() {
   refute_file_exists "$SANDBOX/reset-query"
 }
 
-@test "administrator one-shot uses the prepared PHP settings without publishing the new INI" {
+@test "replacement administrator uses the normal selected context and readable prepared PHP settings" {
   shared_import_standins
-  printf 'memory_limit=768M\n' > "$work/candidate.ini"
+  cp "$prepared/site/configuration.php" "$work/existing.php"
+  joomlaPHPPatchIni '' "$work/candidate.ini" memory_limit 768M
   local VDM_PHP_INI_TARGET=/usr/local/etc/php/conf.d/zz-octojoom.ini
-  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount fresh
+  local VDM_DB_COMPOSE="$work/candidate.yml" VDM_DB_ENV="$work/published.env" VDM_DB_PROJECT_DIR="$SANDBOX/selected-site"
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace "$work/existing.php"
   assert_success
   assert_file_contains "$SANDBOX/account-args" --volume
   assert_file_contains "$SANDBOX/account-args" "$(joomlaWebHostPath "$work/candidate.ini"):$VDM_PHP_INI_TARGET:ro"
-  assert_file_contains "$work/candidate.ini" 'memory_limit=768M'
+  assert_file_contains "$work/candidate.ini" 'memory_limit = 768M'
+  assert_equal "$(cat "$SANDBOX/account-context")" "$(joomlaWebHostPath "$VDM_DB_COMPOSE")"$'\n'"$(joomlaWebHostPath "$VDM_DB_ENV")"$'\n'"$(joomlaWebHostPath "$VDM_DB_PROJECT_DIR")"
+  if ! is_windows; then assert_equal "$(file_mode "$work/candidate.ini")" 644; fi
 }
 
 @test "database reset retains literal identifier bytes and confines its SQL mode to the reset session" {

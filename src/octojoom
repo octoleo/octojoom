@@ -13231,6 +13231,7 @@ function joomlaPlaygroundImportPackage() {
     umask 077
     local prepared="$1" site="$2" work="$3" app="$4" root="$5" image="$6" mount="$7" mode="$8" original="${9:-}"
     local engine="$VDM_DB_ENGINE" relative=. bytes token tables ini_host status ids child helpers_started=false cleanup_failed=false
+    local uid="${VDM_PUID:-}" gid="${VDM_PGID:-}"
     local VDM_DB_COMPOSE="${VDM_DB_COMPOSE:-}" VDM_DB_ENV="${VDM_DB_ENV:-}" VDM_DB_PROJECT_DIR="${VDM_DB_PROJECT_DIR:-}"
     local MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
     local -a account_options=()
@@ -13263,8 +13264,14 @@ function joomlaPlaygroundImportPackage() {
       if "$cleanup_failed"; then : > "$work/import-cleanup-failed"; status=1; fi
       exit "$status"
     ' EXIT
+    # Joomla creates language and namespace caches while updating the account.
+    # Run as the same owner used by the website importer so ordinary web
+    # requests can update those files. Without overrides, Docker resolves the
+    # image's www-data UID and GID.
+    uid="${uid#\#}" gid="${gid#\#}"
     account_options=(run --rm --no-deps -T --label traefik.enable=false
-      --label "com.octoleo.octojoom.playground=$token" --entrypoint php)
+      --label "com.octoleo.octojoom.playground=$token" --entrypoint php
+      --user "${uid:-www-data}:${gid:-www-data}")
     if [ -f "$work/candidate.ini" ]; then
       [ ! -L "$work/candidate.ini" ] && [[ "${VDM_PHP_INI_TARGET:-}" == /* &&
         "$VDM_PHP_INI_TARGET" != *'..'* && "$VDM_PHP_INI_TARGET" != *[!a-zA-Z0-9_./-]* ]] || exit 1
