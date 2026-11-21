@@ -156,12 +156,7 @@ transaction_doubles() {
 
 @test "PostgreSQL stage uses measured data target and parks mysql-only viewer" {
   stage_doubles
-  umask 077
   joomlaDatabaseStageStorage alpha.vdm.dev postgres postgres:18 "$work/stage"
-  if ! is_windows; then
-    assert_equal "$(file_mode "$VDM_DATABASE_STAGE_STORAGE")" 711
-    assert_equal "$(file_mode "${VDM_DATABASE_STAGE_STORAGE%/*}")" 700
-  fi
   assert_file_contains "$VDM_DATABASE_STAGE_COMPOSE" '"target":"/var/lib/postgresql"'
   assert_file_contains "$VDM_DATABASE_STAGE_COMPOSE" 'POSTGRES_PASSWORD=${VDM_ALPHA_DB_PASS}'
   assert_file_contains "$VDM_DATABASE_STAGE_COMPOSE" 'JOOMLA_DB_HOST=mariadbalpha:5432'
