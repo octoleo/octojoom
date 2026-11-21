@@ -162,43 +162,36 @@ COMPOSE
   refute_file_contains "$property" 'old-'
 }
 
-@test "a new Apache Playground site checks the nested working root with its offline-aware HTTP probe" {
+@test "a new Apache Playground site keeps the stock healthcheck with a nested working root" {
   local VDM_CONTAINER_TYPE=joomla VDM_SUBDOMAIN=shop VDM_DOMAIN=example.test VDM_WEBSERVER=apache
   local VDM_DOCROOT=store/public VDM_J_REPO=joomla VDM_JV=latest
   joomlaSetupWebPrepare "$work"
   [[ "$VDM_WEB_WORKING_DIR" == *'/var/www/html/store/public'* ]]
-  joomlaSiteJSON -e --arg script "$(joomlaPlaygroundHttpProbeCode)" '
-    . == ["CMD","sh","-c",($script | gsub("\\$"; "$$")),"sh",".","localhost","127.0.0.1"]' <<< "$VDM_WEB_HEALTH"
+  gen_joomla_compose shop SHOP shop example.test > "$work/generated.yml"
+  local expected
+  expected=$(cat <<'YAML'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+YAML
+  )
+  assert_equal "$(joomlaServiceProperty "$work/generated.yml" joomlashop healthcheck)" "$expected"
 }
 
-@test "replacement upgrades only the stock Apache probe and preserves effective timings and custom checks" {
-  cat > "$work/with-env.yml" <<'YAML'
-services:
-  joomla:
-    image: joomla:latest
-    healthcheck:
-      test:
-        - CMD
-        - curl
-        - -f
-        - http://localhost/
-      retries: 7
-  mysql:
-    image: mysql:8.4
-YAML
-  local original='{"test":["CMD","curl","-f","http://localhost/"],"interval":"40s","timeout":"8s","start_period":"25s","retries":7}'
-  local root=/var/www/html/store/public
-  joomlaSiteJSON -n --argjson check "$original" '{services:{joomla:{healthcheck:$check,working_dir:"/custom"}}}' > "$work/original-model.json"
-  joomlaPlaygroundUpgradeApacheHealthcheck "$work" joomla "$root"
-  sed -n 's/^    healthcheck: //p' "$work/with-env.yml" | joomlaSiteJSON -e \
-    --argjson original "$original" --argjson test "$(joomlaPlaygroundApacheHealthcheck "$root")" '. == ($original | .test = $test)'
-  assert_file_contains "$work/with-env.yml" 'image: mysql:8.4'
-
-  printf 'services:\n  joomla:\n    healthcheck: {test: ["CMD", "custom"], retries: 3}\n' > "$work/with-env.yml"
-  cp "$work/with-env.yml" "$work/unchanged.yml"
-  printf '%s\n' '{"services":{"joomla":{"healthcheck":{"test":["CMD","custom"],"retries":3}}}}' > "$work/original-model.json"
-  joomlaPlaygroundUpgradeApacheHealthcheck "$work" joomla "$root"
-  cmp "$work/unchanged.yml" "$work/with-env.yml"
+@test "replacement preserves stock and custom Apache healthcheck definitions" {
+  info=$(joomlaSiteJSON '.web="127.0.0.1"' <<< "$info")
+  local healthcheck
+  for healthcheck in \
+    '{"test":["CMD","curl","-f","http://localhost/"],"interval":"30s","timeout":"5s","retries":5}' \
+    '{"test":["CMD","custom-check"],"interval":"40s","timeout":"8s","start_period":"25s","retries":7}'; do
+    joomlaSiteJSON --argjson check "$healthcheck" '.services.joomla.healthcheck=$check' \
+      < "$work/proposed.json" > "$work/revised.json"
+    mv "$work/revised.json" "$work/proposed.json"
+    joomlaPlaygroundReplacementModel "$work" "$token" joomla mysql 127.0.0.1 "$info"
+    joomlaSiteJSON -e --argjson check "$healthcheck" '.services.joomla.healthcheck==$check' < "$work/candidate.json"
+  done
 }
 
 @test "replacement verifies the Compose file behind occupied project identities" {

@@ -151,9 +151,9 @@ confirmed site and administrator details are written to the site's private
 separate storage, so tables and files that existed only on the old site are
 removed from the active installation.
 
-Fresh deployment and replacement preserve Joomla’s **Site Offline** setting.
-An intentionally offline site can pass verification and serve its offline page
-to visitors while its containers are running.
+Deployment verification uses `curl --fail` against the website's home page.
+HTTP errors, including HTTP 503 from an offline site, fail verification.
+Deployment does not change Joomla’s **Site Offline** setting.
 
 During staging, the original website keeps its current service state. Plan for
 a service interruption at cutover. Octojoom pauses writers for the backup and
@@ -166,7 +166,7 @@ connection while the route is unavailable.
 Octojoom records the commit before restoring the site's public Compose
 definition, routing and published ports. It starts the services that were
 running before replacement and preserves the site's enabled or disabled
-registration and its custom health checks. A fully stopped site stays
+registration and its health checks. A fully stopped site stays
 unavailable to visitors throughout verification and after commit. If
 verification fails before commit, Octojoom removes the private verifier and
 attempts to restore the original storage and services.
