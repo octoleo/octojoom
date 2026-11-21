@@ -84,7 +84,11 @@ octojoom_globals() {
 # the sandbox
 
 octojoom_setup() {
-  SANDBOX="${BATS_TEST_TMPDIR}/sandbox"
+  # macOS exposes /private/var through /var. Use the same physical paths as
+  # deployment code so the sudo stand-in can recognize its own sandbox.
+  local test_tmpdir
+  test_tmpdir=$(cd -- "${BATS_TEST_TMPDIR}" && pwd -P) || return 1
+  SANDBOX="${test_tmpdir}/sandbox"
   STUB_DIR="${SANDBOX}/stub"
   STUB_SANDBOX="${SANDBOX}"
   STUB_KILL_PID="${BASHPID}"
@@ -287,6 +291,15 @@ refute_command() {
 
 ###############################################################################
 # fixtures
+
+# Write a small complete ZIP, including Windows-native paths for the Python interpreter.
+write_playground_fixture() {
+  local script="$HELPERS_DIR/playground-fixture.py" destination="$1"
+  if is_windows; then
+    script=$(cygpath -am -- "$script") && destination=$(cygpath -am -- "$destination") || return 1
+  fi
+  python3 "$script" "$destination" "${2:-valid}"
+}
 
 # the docker-compose.yml joomla__TRuST__setup writes, for the common option sets
 # gen_joomla_compose <key> <env key> <sub-domain> <domain> [secure] [mailcatcher]
