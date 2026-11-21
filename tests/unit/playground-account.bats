@@ -7,7 +7,7 @@ setup() {
   mkdir -p "$SANDBOX/site/includes"
   : > "$SANDBOX/site/includes/defines.php"
   cp "$HELPERS_DIR/playground-account-framework.php" "$SANDBOX/site/includes/framework.php"
-  account_code=$(joomlaPlaygroundFreshAccountCode)
+  account_code=$(joomlaPlaygroundImportAccountCode)
   settings='{"sourceUsername":"original","sourceEmail":"owner@example.test","explicitSource":false,
     "username":"owner","name":"Shop owner","email":"owner@example.test","password":"current-password",
     "changed":{"username":true,"email":false,"name":false,"password":false}}'
