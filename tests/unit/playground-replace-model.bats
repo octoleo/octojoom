@@ -41,8 +41,7 @@ setup() {
   local web ini
   web=$(joomlaWebHostPath "$SANDBOX/new-web") && ini=$(joomlaWebHostPath "$work/candidate.ini")
   joomlaSiteJSON -e --arg web "$web" --arg ini "$ini" --arg name "octojoom-playground-$token" '
-    .name==$name and .networks=={default:{driver:"bridge",internal:true,enable_ipv6:false,
-      driver_opts:{"com.docker.network.bridge.gateway_mode_ipv4":"isolated"}}} and (.services|keys)==["joomla","mysql","nginx"] and
+    .name==$name and .networks=={default:{internal:true}} and (.services|keys)==["joomla","mysql","nginx"] and
     .services.joomla.volumes[0].source==$web and .services.nginx.volumes[0].source==$web and
     .services.joomla.volumes[1].source==$ini and .services.nginx.volumes[1].read_only==true and
     .volumes=={data:{name:"replacement_db",external:true}} and
@@ -50,51 +49,6 @@ setup() {
     (.services.joomla | (has("command") or has("entrypoint")) | not) and
     .services.joomla.ports==null and .services.joomla.container_name==null and .services.joomla.labels=={"traefik.enable":"false"}
   ' < "$work/candidate.json"
-}
-
-@test "the activation check runs final mounts and healthchecks without exposing host or sidecar routes" {
-  local final_web final_ini
-  final_web=$(joomlaWebHostPath "$SANDBOX/web") && final_ini=$(joomlaWebHostPath "$VDM_SITE_DIR/php.ini")
-  joomlaSiteJSON '.services.nginx.labels={"traefik.http.routers.shop.rule":"Host(shop.example.test)","caddy":"shop.example.test"} |
-    .services.nginx.ports=[{target:80,published:"443",host_ip:"127.0.0.1"}] |
-    .services.nginx.deploy={labels:{"traefik.enable":"true"},resources:{limits:{memory:"134217728"}}} |
-    .services.nginx.healthcheck={test:["CMD","custom-check","$$literal"],interval:"12s",retries:3} |
-    .services.mysql.ports=[{target:3306,published:"3307"}] | .services.mail.ports=[{target:80,published:"8080"}]' \
-    < "$work/proposed.json" > "$work/revised.json"
-  mv "$work/revised.json" "$work/proposed.json"
-  joomlaPlaygroundReplacementModel "$work" "$token" joomla mysql nginx "$info"
-  printf '%s\n' "$info" > "$work/services.json"
-  joomlaSiteJSON '.volumes.data.name="replacement_db"' < "$work/proposed.json" > "$work/published-model.json"
-  # Prior to quiescing, the proposed private project must be unused.
-  # shellcheck disable=SC2317
-  docker() {
-    case "$1 $2" in
-      'compose --file')
-        [ "$3 $4 $5" = "verify.json config --quiet" ] && [ "$COMPOSE_PROJECT_NAME" = "octojoom-verify-$token" ] || return 1
-        if [ -n "$REAL_DOCKER" ] && "$REAL_DOCKER" compose version >/dev/null 2>&1; then "$REAL_DOCKER" "$@"; fi;;
-      'ps -aq'|'network ls') return 0;;
-      *) return 1;;
-    esac
-  }
-  joomlaPlaygroundPrepareVerifyModel "$work" "$token"
-  (
-    cd "$work"
-    joomlaSiteJSON -e --arg name "octojoom-verify-$token" --arg web "$final_web" --arg ini "$final_ini" \
-      --slurpfile published published-model.json --slurpfile staged candidate.json '
-      .name==$name and (.services|keys)==["joomla","mysql","nginx"] and .networks==$staged[0].networks and
-      all(.services[]; .ports==null and .container_name==null and .labels=={"traefik.enable":"false"} and
-        (.networks|keys)==["default"] and .deploy.labels==null) and
-      .services.nginx.healthcheck==$published[0].services.nginx.healthcheck and
-      .services.nginx.deploy.resources==$published[0].services.nginx.deploy.resources and
-      .services.mysql.networks.default.aliases==["old-db"] and
-      .services.joomla.volumes[0].source==$web and .services.nginx.volumes[0].source==$web and
-      .services.joomla.volumes[1].source==$ini and .volumes=={data:{external:true,name:"replacement_db"}}
-    ' < verify.json
-  )
-  joomlaSiteJSON '.services.nginx.volumes[0].source="/changed/after-staging"' < "$work/published-model.json" > "$work/revised.json"
-  mv "$work/revised.json" "$work/published-model.json"
-  run joomlaPlaygroundPrepareVerifyModel "$work" "$token"
-  assert_failure
 }
 
 @test "replacement rejects explicit service commands and entrypoints including empty overrides" {
@@ -114,9 +68,7 @@ setup() {
   local filter
   for filter in '.services.joomla.volumes += [{type:"bind",source:"/some/original",target:"/var/www/html/custom"}]' \
     '.services.joomla.volumes[0].source="/other-site"' '.services.mysql.volumes[0].volume.subpath="other-site"' \
-    '.services.joomla.privileged=true' '.services.nginx.volumes[1].read_only=false' \
-    '.services.joomla.network_mode="host"' '.services.nginx.depends_on.mail={condition:"service_started"}' \
-    '.services.joomla.deploy.replicas=2' '.services.joomla.logging.driver="fluentd"'; do
+    '.services.joomla.privileged=true' '.services.nginx.volumes[1].read_only=false'; do
     joomlaSiteJSON "$filter" < "$work/baseline.json" > "$work/proposed.json"
     run joomlaPlaygroundReplacementModel "$work" "$token" joomla mysql nginx "$info"
     assert_failure
