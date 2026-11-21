@@ -12,7 +12,7 @@ setup() {
   published="$SANDBOX/published.env"
 }
 
-@test "replacement keeps the candidate scoped and preserves neighboring shared settings and comments on publication" {
+@test "replacement keeps proposed settings scoped and preserves neighboring shared settings and comments on publication" {
   cat >> "$original" <<'ENV'
 # The next settings belong to another website.
 VDM_OTHER_DB_PASS="private-neighbor-value" # Keep this comment.
@@ -48,8 +48,8 @@ VDM_SHOP_CUSTOM='custom # text' # Original custom note.
 VDM_OTHER_DB_PASS="private-neighbor-value"
 ENV
   cat > "$candidate" <<'ENV'
-VDM_SHOP_DB="shop_db" # A candidate comment must not be duplicated.
-VDM_SHOP_CUSTOM='custom # text' # A second candidate comment.
+VDM_SHOP_DB="shop_db" # A proposed comment must not be duplicated.
+VDM_SHOP_CUSTOM='custom # text' # A second proposed comment.
 VDM_OTHER_DB_PASS="must-not-replace-the-neighbor"
 ENV
   joomlaPlaygroundPreparePublishedEnvironment "$original" "$candidate" SHOP "$published"
@@ -66,7 +66,7 @@ ENV
   refute_file_contains "$published" must-not-replace-the-neighbor
 }
 
-@test "environment publication preserves CRLF comments and refuses a missing original or duplicate candidate key" {
+@test "environment publication preserves CRLF comments and refuses a missing original or duplicate proposed key" {
   printf '# Existing environment\r\nVDM_SHOP_DB="old" # database\r\nVDM_OTHER_DB="neighbor"\r\n' > "$original"
   printf 'VDM_SHOP_DB="new"\n' > "$candidate"
   joomlaPlaygroundPreparePublishedEnvironment "$original" "$candidate" SHOP "$published"
@@ -82,71 +82,46 @@ ENV
   refute_file_exists "$published"
 }
 
-@test "an interrupted environment copy leaves the installed file intact and its journal recoverable" {
-  local work="$SANDBOX/transaction" failing_source="$SANDBOX/transaction/published.env"
-  mkdir "$work"
+@test "atomic environment publication preserves its mode and cleans its temporary directory" {
+  cp -p "$original" "$SANDBOX/expected.env"
+  printf 'VDM_SHOP_JOOMLA_SITE_NAME="Imported shop"\n' > "$candidate"
   if ! is_windows; then chmod 640 "$original"; fi
-  cp -p "$original" "$work/initial.env"
-  printf 'VDM_SHOP_DB="replacement"\n' > "$work/published.env"
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$original" "$SANDBOX/expected.env" "$original"
+  assert_success
+  cmp "$original" "$candidate"
+  if ! is_windows; then assert_equal "$(file_mode "$original")" 640; fi
+  assert_equal "$(find "${original%/*}" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
+}
+
+@test "an interrupted environment copy leaves the installed file intact" {
+  cp -p "$original" "$SANDBOX/expected.env"
+  printf 'VDM_SHOP_JOOMLA_SITE_NAME="Imported shop"\n' > "$candidate"
   runPrivileged() {
-    if [ "$1" = cp ] && [ "${*: -2:1}" = "$failing_source" ]; then
+    if [ "$1" = cp ] && [ "${*: -2:1}" = "$candidate" ]; then
       printf 'interrupted copy' > "${*: -1}"
       return 1
     fi
     "$@"
   }
-  run joomlaPlaygroundPublishEnvironment "$work/published.env" "$original" "$work/environment" "$work/initial.env"
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$original" "$SANDBOX/expected.env" "$original"
   assert_failure
-  cmp "$original" "$work/initial.env"
-  assert_file_exists "$work/environment/files.journal"
+  cmp "$original" "$SANDBOX/expected.env"
   assert_equal "$(find "${original%/*}" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
-  run joomlaPlaygroundRollbackEnvironment "$work"
-  assert_success
-  cmp "$original" "$work/initial.env"
-  if ! is_windows; then assert_equal "$(file_mode "$original")" 640; fi
 }
 
-@test "an interrupted environment rollback preserves the complete published file and can be retried" {
-  local work="$SANDBOX/transaction" destination saved
-  mkdir "$work"
-  if ! is_windows; then chmod 640 "$original"; fi
-  cp -p "$original" "$work/initial.env"
-  printf 'VDM_SHOP_DB="replacement"\n' > "$work/published.env"
-  joomlaPlaygroundPublishEnvironment "$work/published.env" "$original" "$work/environment" "$work/initial.env"
-  IFS=$'\t' read -r destination saved < "$work/environment/files.journal"
+@test "an operator environment edit during publication is preserved" {
+  cp -p "$original" "$SANDBOX/expected.env"
+  printf 'VDM_SHOP_JOOMLA_SITE_NAME="Imported shop"\n' > "$candidate"
   runPrivileged() {
-    if [ "$1" = cp ] && [ "${*: -2:1}" = "$saved" ]; then
-      printf 'interrupted restore' > "${*: -1}"
-      return 1
-    fi
-    "$@"
-  }
-  run joomlaPlaygroundRollbackEnvironment "$work"
-  assert_failure
-  cmp "$original" "$work/published.env"
-  assert_equal "$(find "${original%/*}" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
-  runPrivileged() { "$@"; }
-  run joomlaPlaygroundRollbackEnvironment "$work"
-  assert_success
-  cmp "$original" "$work/initial.env"
-  if ! is_windows; then assert_equal "$(file_mode "$original")" 640; fi
-}
-
-@test "an environment edit at snapshot publication is preserved instead of adopted and overwritten" {
-  local work="$SANDBOX/transaction"
-  mkdir "$work"
-  cp "$original" "$work/initial.env"
-  printf 'VDM_SHOP_DB="replacement"\n' > "$work/published.env"
-  runPrivileged() {
-    if [ "$1" = cp ] && [ "${*: -2:1}" = "$original" ]; then
+    if [ "$1" = cp ] && [ "${*: -2:1}" = "$candidate" ]; then
       printf 'VDM_OTHER_NOTE="edit at publication"\n' >> "$original"
     fi
     "$@"
   }
-  run joomlaPlaygroundPublishEnvironment "$work/published.env" "$original" "$work/environment" "$work/initial.env"
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$original" "$SANDBOX/expected.env" "$original"
   assert_failure
-  assert_output_contains 'environment changed before publication'
+  assert_output_contains 'environment changed'
   assert_file_contains "$original" 'VDM_OTHER_NOTE="edit at publication"'
-  refute_file_contains "$original" replacement
-  refute_file_exists "$work/environment/files.journal"
+  refute_file_contains "$original" 'Imported shop'
+  assert_equal "$(find "${original%/*}" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
 }
