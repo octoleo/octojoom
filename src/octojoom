@@ -1419,8 +1419,8 @@ function joomlaPlaygroundReviewFresh() {
   return 130
 }
 
-# Only the private working registry sees candidate configuration. Claim the
-# real host name after import succeeds and expose the Compose file last.
+# Publish the normal setup configuration under the reserved hostname. The
+# importer starts its database only; ordinary enable/start follows successful import.
 function joomlaPlaygroundPublishFresh() {
   local source="$fresh_stage/joomla/available/$fresh_site" file suffix
   for suffix in '' db mail; do
@@ -1815,10 +1815,9 @@ function joomla__TRuST__setup() {
   if [ -n "$prepared" ]; then
     joomlaPublishSetup private || return $?
     setNetworks || return $?
+    joomlaPlaygroundPublishFresh || return $?
     fresh_provisioning=true
     joomlaPlaygroundProvisionFresh "$prepared" "$fresh_site" || return $?
-    joomlaPlaygroundPublishFresh || return $?
-    if [ "$VDM_ENABLE" = true ]; then joomlaPlaygroundStartFresh "$prepared" "$fresh_site" || return $?; fi
   else joomlaPublishSetup || return $?; fi
   if [ "${VDM_TLS_CHOICE:-default}" != default ]; then
     (VDM_TLS_NEW_SITE=true
@@ -1833,9 +1832,10 @@ function joomla__TRuST__setup() {
     }
   fi
   if [ -n "$prepared" ] && [ "$VDM_ENABLE" = true ]; then
-    createPrivateDirectory -p "${fresh_enabled%/*}" || return 1
-    ln -s "$fresh_available" "${fresh_enabled%/*}/" || return 1
+    : > "$prepared/runtime/activating" || return 1
     fresh_linked=true
+    VDM_CONTAINER="$fresh_site"
+    enableContainer joomla || return $?
     [ "$(getJoomlaSiteEnabledState "$fresh_site")" = enabled ] || return 1
   fi
   if [ -n "$prepared" ]; then
@@ -12519,92 +12519,147 @@ function joomlaPlaygroundConfirmFreshSettings() {
   )
 }
 
-# Preserve the exported configuration, especially its Joomla secret. The
-# existing database patcher serializes the confirmed connection as PHP data.
-function joomlaPlaygroundConfigureFresh() {
+# Both targets use the same data-only configuration patcher. An existing site
+# supplies its hosting/custom settings; a fresh site uses the exported settings
+# with Docker paths and defaults. The imported Joomla secret always survives.
+function joomlaPlaygroundConfigureImport() {
   (
     set +x
     umask 077
-    local prepared="$1" db_host="$2" driver="$3" database="$4" user="$5" password="$6" docroot="$7"
-    local mailhost=''
+    local prepared="$1" host="$3" driver="$4" database="$5" user="$6" password="$7" docroot="$8"
+    local candidate="$prepared/configuration.candidate" source="$2" existing=false mailhost=''
+    if [ -n "$source" ]; then existing=true; else source="$prepared/site/configuration.php"; fi
     [ "${VDM_MAILCATCHER:-false}" != true ] || mailhost="mailcatcher${VDM_KEY}"
-    cd -- "$prepared" || exit 1
-    joomlaDatabasePatchConfiguration site/configuration.php configuration.candidate "$db_host" "$driver" "$database" "$user" "$password" "$VDM_J_DB_PREFIX" || {
-      printf 'Could not reconcile the exported Joomla database configuration.\n' >&2; exit 1;
+    joomlaDatabasePatchConfiguration "$source" "$candidate" "$host" "$driver" "$database" "$user" "$password" "$VDM_J_DB_PREFIX" || {
+      printf 'Could not reconcile the destination Joomla database configuration.\n' >&2; exit 1;
     }
-    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' python3 -I -B - "$docroot" "$mailhost" <<'PYTHON' || exit 1
+    cd -- "$prepared" || exit 1
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' python3 -I -B - "$docroot" "$existing" "$mailhost" <<'PYTHON' || exit 1
 import json
-import pathlib
+from pathlib import Path
 import re
 import sys
 
-def reconcile():
-    path = pathlib.Path("configuration.candidate")
-    docroot, mailhost = sys.argv[1:]
-    account = json.loads(pathlib.Path("account.json").read_text(encoding="utf-8"))
-    metadata = json.loads(pathlib.Path("metadata.json").read_text(encoding="utf-8"))
-    # Traefik handles TLS. Clearing browser-origin and cookie overrides lets
-    # Joomla derive its public host and protocol from the destination request.
-    values = dict(sitename=account["siteName"], log_path=docroot + "/administrator/logs",
-                  tmp_path=docroot + "/tmp", live_site="", cookie_domain="", cookie_path="",
-                  dbencryption=0, dbsslverifyservercert=False, dbsslkey="", dbsslcert="", dbsslca="", dbsslcipher="",
-                  force_ssl=0, session_handler="database", mailer="smtp" if mailhost else "mail",
-                  smtphost=mailhost or "localhost", smtpport=1025 if mailhost else 25,
-                  smtpuser="", smtppass="", smtpauth=False, smtpsecure="none")
-    # Follow new identities only when Joomla used the former installer defaults.
-    # A separate transactional sender address or brand name is portable.
-    sender_defaults = {"mailfrom": (metadata["admin"]["email"], account["email"]),
-                       "fromname": (metadata["siteName"], account["siteName"])}
-    source = path.read_text(encoding="utf-8")
-    # Joomla generates a property per line, including __DIR__ expressions in
-    # portable paths. We only replace the agreed properties, as whole lines.
-    properties = re.compile(r"^(?P<prefix>[ \t]*public[ \t]+\$(?P<field>\w+)[ \t]*=)[ \t]*(?P<expression>[^\r\n]*);[ \t]*$", re.M)
-    changed = set()
+# Restrict application settings copied from the package to scalar metadata,
+# presentation, and editorial defaults. In particular, never copy source SMTP,
+# debug/cache backends, proxy/SSL, SEF, cookies, or session filesystem paths.
+portable = set("""offline offline_message display_offline_message offline_image editor captcha list_limit
+                  access frontediting helpurl offset MetaDesc MetaKeys MetaAuthor MetaVersion robots
+                  feed_limit feed_email lifetime""".split())
+strings = r'''(?:'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")'''
+lex = re.compile(strings + r"|/\*.*?\*/|//[^\r\n]*|\#(?!\[)[^\r\n]*|<<<|\$?\w+|\S", re.S)
+declaration = re.compile(r"public\s+(?:[?\w\\|]+\s+)?\$(\w+)\s*(=|;)", re.I)
+scalar = re.compile(r"(?:true|false|null|-?\d+(?:\.\d+)?)", re.I)
+quoted_literal = re.compile(r'''(?:'(?:\\.|[^'\\])*'|"(?:\\.|[^"$\\])*")''', re.S)
 
-    def quoted(value):
-        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
-
-    def replace(match):
-        field = match.group("field")
-        if field in sender_defaults:
-            old, new = sender_defaults[field]
-            if match.group("expression").strip() == quoted(old):
-                values[field] = new
-        if field not in values:
-            return match.group(0)
-        if field in changed:
+def properties(text, wanted):
+    # Keep offsets into the original file so methods, comments, and unrelated
+    # properties survive. Braces/semicolons inside strings and comments are
+    # not structural. Refuse ambiguous input instead of rewriting that file.
+    iterator = (m for m in lex.finditer(text) if not m[0].startswith(("/*", "//", "#")))
+    body = False
+    depth = 0
+    fields = {}
+    for token in iterator:
+        value = token[0]
+        if value == "<<<" or value in ("'", '"'):
             raise ValueError()
-        changed.add(field)
-        value = values[field]
-        if isinstance(value, str):
-            encoded = quoted(value)
-        else:
-            encoded = str(value).lower()
-        return match.group("prefix") + " " + encoded + ";"
+        if not body:
+            if value.lower() == "class" and next(iterator)[0].lower() == "jconfig":
+                if next(iterator)[0] != "{":
+                    raise ValueError()
+                body, depth = True, 1
+            continue
+        if value == "{":
+            depth += 1
+        elif value == "}":
+            depth -= 1
+            if depth == 0:
+                return fields, token.start()
+        elif depth == 1 and value.lower() == "public":
+            match = declaration.match(text, token.start())
+            if not match or match[1] not in wanted:
+                continue
+            name = match[1]
+            if name in fields or match[2] != "=":
+                raise ValueError()
+            for end in iterator:
+                if end.start() < match.end():
+                    continue
+                if end[0] == ";":
+                    fields[name] = (match.end(), end.start())
+                    break
+                if end[0] in ("{", "}", "<<<", "'", '"'):
+                    raise ValueError()
+            else:
+                raise ValueError()
+    raise ValueError()
 
-    result = properties.sub(replace, source)
-    # Valid older configurations may omit settings whose defaults are
-    # already effective; destination-specific site, paths and mail must exist.
-    required = {"sitename", "log_path", "tmp_path"}
-    if mailhost:
-        required.update(("mailer", "smtphost", "smtpport"))
-    if not required.issubset(changed):
+def quote(text):
+    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+def reconcile():
+    target = Path("configuration.candidate")
+    original = target.read_text(encoding="utf-8")
+    incoming = Path("site/configuration.php").read_text(encoding="utf-8")
+    account = json.loads(Path("account.json").read_text(encoding="utf-8"))
+    docroot = sys.argv[1].rstrip("/")
+    existing, mailhost = sys.argv[2:]
+    # Final paths are container paths even when running from Windows Git Bash.
+    replacements = dict(sitename=quote(account["siteName"]), tmp_path=quote(docroot + "/tmp"),
+                        log_path=quote(docroot + "/administrator/logs"))
+    if existing != "true":
+        # A new site has no hosting configuration to preserve. Adapt the
+        # browser-origin, database transport and mail defaults to Docker.
+        replacements.update(session_handler="'database'", live_site="''", cookie_domain="''", cookie_path="''", force_ssl="0",
+                            dbencryption="0", dbsslverifyservercert="false", dbsslkey="''", dbsslcert="''",
+                            dbsslca="''", dbsslcipher="''", mailer=quote("smtp" if mailhost else "mail"),
+                            smtphost=quote(mailhost or "localhost"), smtpport="1025" if mailhost else "25",
+                            smtpuser="''", smtppass="''", smtpauth="false", smtpsecure="'none'")
+        metadata = json.loads(Path("metadata.json").read_text(encoding="utf-8"))
+        senders, _ = properties(incoming, {"mailfrom", "fromname"})
+        for name, old, new in (("mailfrom", metadata["admin"]["email"], account["email"]),
+                               ("fromname", metadata["siteName"], account["siteName"])):
+            if name in senders:
+                start, end = senders[name]
+                if incoming[start:end].strip() == quote(old):
+                    replacements[name] = quote(new)
+    source, _ = properties(incoming, portable | {"secret"})
+    for name, (start, end) in source.items():
+        expression = incoming[start:end].strip()
+        if quoted_literal.fullmatch(expression) or scalar.fullmatch(expression):
+            replacements[name] = expression
+    secret = replacements.get("secret", "")
+    if not quoted_literal.fullmatch(secret) or len(secret) <= 2:
         raise ValueError()
-    path.write_text(result, encoding="utf-8")
+    destination, close = properties(original, replacements)
+    changes = []
+    additions = []
+    for name, expression in replacements.items():
+        if name in destination:
+            start, end = destination[name]
+            changes.append((start, end, " " + expression))
+        else:
+            additions.append("    public $" + name + " = " + expression + ";\n")
+    if additions:
+        changes.append((close, close, "\n" + "".join(additions)))
+    for start, end, replacement in sorted(changes, reverse=True):
+        original = original[:start] + replacement + original[end:]
+    target.write_text(original, encoding="utf-8")
 
 try:
     reconcile()
-except (OSError, KeyError, ValueError):
-    sys.exit("Could not reconcile the exported Joomla site settings.")
+except (OSError, KeyError, ValueError, StopIteration):
+    sys.exit("Could not reconcile the source Joomla secret and destination site settings.")
 PYTHON
     chmod 600 configuration.candidate && mv -f -- configuration.candidate site/configuration.php
   )
 }
 
-# This PHP runs inside the unpublished site's own Joomla image after SQL
+# This one-shot PHP command uses the selected site's Joomla image after SQL
 # import. Keep the original account ID, groups, and password hash on import.
 # A confirmed edit uses Joomla's user API. No HTTP login or session is needed.
-function joomlaPlaygroundFreshAccountCode() {
+function joomlaPlaygroundImportAccountCode() {
   cat <<'PHP'
   use Joomla\CMS\Factory;
   use Joomla\CMS\User\UserFactoryInterface;
@@ -12714,20 +12769,6 @@ PHP
 }
 
 
-# Only the generated site's permanent data mounts are shared with the candidate.
-# Its staging services use a private project and internal network. No incoming
-# request can reach Joomla while its SQL and administrator are being imported.
-# shellcheck disable=SC2016 # Dollar expressions belong to jq or the container.
-function joomlaPlaygroundCandidateModel() {
-  local project="$1" app="$2" database="$3" nginx="$4"
-  joomlaSiteJSON --arg project "$project" --arg app "$app" --arg db "$database" --arg nginx "$nginx" '
-    .name=$project |
-    .services |= with_entries(select(.key==$app or .key==$db or .key==$nginx)) |
-    .services[] |= (del(.container_name,.ports,.restart) | .labels={"traefik.enable":"false"} | .networks={"default":{}}) |
-    .networks={"default":{"internal":true}} |
-    if .volumes then .volumes |= map_values({name:.name,external:true}) else . end
-  '
-}
 
 # Docker volume create is idempotent. Check our reservation label afterwards
 # so that a concurrent creation can never turn an existing volume into ours.
@@ -12789,20 +12830,23 @@ function joomlaPlaygroundFreshMount() {
 
 # Use the selected PHP image for ownership and a tar stream for both storage
 # modes. No host chmod/chown privilege is needed to seed Docker-managed data.
-function joomlaPlaygroundSeedWebsite() {
+function joomlaPlaygroundImportWebsite() {
   (
     set -o pipefail
-    local source="$1" mount="$2" db_mount="$3" image="$4" relative="$5" file_bytes="$6" db_bytes="$7" token="$8"
+    local source="$1" mount="$2" image="$3" relative="$4" file_bytes="$5" token="$6" mode="$7"
     local uid="${VDM_PUID:-}" gid="${VDM_PGID:-}"
-    # Existing sites store numeric Apache identities as #123. chown takes 123.
+    [[ "$mode" = fresh || "$mode" = replace ]] && joomlaValidateDocumentRoot "$relative" || exit 1
+    # Ownership is numeric in Docker; older Apache environments include '#'.
     TAR_OPTIONS='' tar -cf - -C "$source" . | MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
       docker run --rm -i --network none --read-only --user 0:0 --entrypoint sh \
-        --label traefik.enable=false --label "com.octoleo.octojoom.playground=$token" --mount "$mount" --mount "$db_mount,readonly" "$image" -ceu '
+        --label traefik.enable=false --label "com.octoleo.octojoom.playground=$token" --mount "$mount" "$image" -ceu '
         base=/octojoom-joomla
-        [ -z "$(ls -A /octojoom-db)" ] || { echo "Database storage is already populated." >&2; exit 1; }
-        [ -z "$(ls -A "$base")" ] || { echo "Website storage is already populated." >&2; exit 1; }
+        if [ "$5" = fresh ]; then
+          [ -z "$(ls -A "$base")" ] || { echo "Website storage is already populated." >&2; exit 1; }
+        fi
         free=$(df -Pk "$base" | awk "END{print \$4}")
         [ "$free" -ge "$(( ($4 + 1023) / 1024 ))" ] || { echo "Insufficient space for the website files." >&2; exit 1; }
+        if [ "$5" = replace ]; then find "$base" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; fi
         root=$base
         if [ "$1" != . ]; then root="$base/$1"; mkdir -p "$root"; fi
         uid=${2:-$(id -u www-data)}; gid=${3:-$(id -g www-data)}
@@ -12810,41 +12854,8 @@ function joomlaPlaygroundSeedWebsite() {
         chmod -R u=rwX,go=rX "$base"
         chmod 640 "$root/configuration.php"
         chown -R "$uid:$gid" "$base"
-        free=$(df -Pk /octojoom-db | awk "END{print \$4}")
-        [ "$free" -ge "$(( ($5 + 1023) / 1024 ))" ] || { echo "Insufficient space for the database import." >&2; exit 1; }
-      ' sh "$relative" "${uid#\#}" "${gid#\#}" "$file_bytes" "$db_bytes"
+      ' sh "$relative" "${uid#\#}" "${gid#\#}" "$file_bytes" "$mode"
   )
-}
-
-# Wait for the installed site to reach its database and serve its root URL.
-# Both requests originate in the site container and use its actual web server.
-function joomlaPlaygroundWaitFresh() {
-  local env_file="$1" compose="$2" app="$3" site="$4" root="$5" web="$6" attempt
-  compose=$(joomlaWebHostPath "$compose") || return 1
-  if [ -n "$env_file" ]; then env_file=$(joomlaWebHostPath "$env_file") || return 1; fi
-  # shellcheck disable=SC2016 # Static PHP runs inside the selected Joomla container.
-  for ((attempt=0; attempt<60; attempt++)); do
-    if MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' migrationRunCompose "$env_file" "$compose" exec -T "$app" php -d register_argc_argv=1 -r '
-      try {
-        require $argv[1]."/configuration.php"; $c=new JConfig();
-        $host=explode(":",$c->host,2); $port=(int)($host[1]??3306);
-        if ($c->dbtype==="mysqli") {
-          $db=new mysqli($host[0],$c->user,$c->password,$c->db,$port);
-          if (!$db->query("SELECT 1")) exit(1);
-        } elseif (in_array($c->dbtype,["pdomysql","pdo_mysql"],true)) {
-          $db=new PDO("mysql:host=".$host[0].";port=".$port.";dbname=".$c->db,$c->user,$c->password);
-          if (!$db->query("SELECT 1")) exit(1);
-        } else exit(1);
-      } catch (Throwable $e) { exit(1); }
-    ' -- "$root" </dev/null >/dev/null 2>&1 &&
-      migrationRunCompose "$env_file" "$compose" exec -T "$app" curl --fail --silent \
-        --connect-timeout 3 --max-time 8 --header "Host: $site" "http://$web/" </dev/null >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 2
-  done
-  printf 'Joomla did not establish its database connection and serve the website after startup.\n' >&2
-  return 1
 }
 
 # The exporter reads inline text through utf8mb4, then writes bare X'...'
@@ -13018,18 +13029,16 @@ function joomlaPlaygroundProvisionFresh() {
   (
     set +x
     umask 077
-    local prepared="$1" site="$2" work="$1/runtime" app="joomla${VDM_KEY}" database="mariadb${VDM_KEY}" nginx="nginx${VDM_KEY}"
-    local project_base="${VDM_PROJECT_PATH}/${VDM_KEY}" project mount db_mount image token candidate root=/var/www/html web=127.0.0.1
-    local file_bytes db_bytes app_host engine="${VDM_DB_ENGINE:-mariadb}" relative="${VDM_DOCROOT:-.}"
-    case "$engine" in mysql|mariadb) ;; *) printf 'Playground deployment needs MariaDB or MySQL.\n' >&2; exit 1;; esac
+    local prepared="$1" site="$2" work="$1/runtime" app="joomla${VDM_KEY}" database="mariadb${VDM_KEY}"
+    local project_base="${VDM_PROJECT_PATH}/${VDM_KEY}" project mount image token root=/var/www/html
+    local app_host engine="${VDM_DB_ENGINE:-mariadb}" relative="${VDM_DOCROOT:-.}"
     local endpoint="${DOCKER_HOST:-}"
+    case "$engine" in mysql|mariadb) ;; *) printf 'Playground deployment needs MariaDB or MySQL.\n' >&2; exit 1;; esac
     if [ -n "${DOCKER_CONTEXT:-}" ] || [ -z "$endpoint" ]; then endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}') || exit 1; fi
     case "$endpoint" in unix://*|npipe://*) ;; *) printf 'Run Playground deployment on the local Docker host.\n' >&2; exit 1;; esac
     project_base=$(joomlaBackupFilesystemPath "$project_base") || exit 1
     mkdir "$work" || exit 1
     resolveJoomlaSite "$site" || exit 1
-    # Compose config escapes literal dollars in its reusable model. Decode names
-    # and host paths for direct use while preserving serialization for replay.
     joomlaSiteCompose "$site" config --format json > "$work/rendered.json" || exit 1
     joomlaSiteJSON 'walk(if type=="string" then gsub("\\$\\$"; "$") else . end)' < "$work/rendered.json" > "$work/final.json" || exit 1
     joomlaBackupValidateDestination "$(cat "$work/final.json")" "$project_base" "$VDM_SITE_DIR" true || exit 1
@@ -13039,32 +13048,45 @@ function joomlaPlaygroundProvisionFresh() {
     token="${token%$'\r'}"
     [[ "$token" =~ ^[0-9a-f]{32}$ ]] || exit 1
     printf '%s\n' "$token" > "$work/token" || exit 1
-    candidate="$work/candidate.json"
-    joomlaPlaygroundCandidateModel "octojoom-playground-$token" "$app" "$database" "$nginx" < "$work/rendered.json" > "$candidate" || exit 1
-    # Imported accounts and installed configuration use the confirmed site environment.
     joomlaValidateDocumentRoot "$relative" || exit 1
     [ "$relative" = . ] || root+="/$relative"
     image=$(joomlaSiteJSON -er --arg app "$app" '.services[$app].image' < "$work/final.json") || exit 1
     app_host=$(joomlaSiteJSON -er --arg app "$app" '.services[$app].environment.JOOMLA_DB_HOST' < "$work/final.json") || exit 1
     [ "$app_host" = "$database" ] || [ "$app_host" = "$database:3306" ] || exit 1
-    joomlaPlaygroundConfigureFresh "$prepared" "$app_host" "${VDM_DATABASE_DRIVER:-mysqli}" \
-      "$vdm_database_name" "$vdm_database_user" "$vdm_database_pass" "$root" || exit 1
     joomlaPlaygroundReserveVolumes "$work/final.json" "$work" "$token" "$project" || exit 1
     mount=$(joomlaPlaygroundFreshMount "$work/final.json" "$app" /var/www/html "$project_base/joomla" "$work/bind-joomla") || exit 1
-    db_mount=$(joomlaPlaygroundFreshMount "$work/final.json" "$database" /var/lib/mysql "$project_base/db" "$work/bind-db") || exit 1
-    file_bytes=$(joomlaSiteJSON -er .fileBytes < "$prepared/metadata.json") || exit 1
-    db_bytes=$(joomlaSiteJSON -er .databaseBytes < "$prepared/metadata.json") || exit 1
-    [[ "$file_bytes" =~ ^[0-9]+$ && "$db_bytes" =~ ^[0-9]+$ ]] || exit 1
+    joomlaPlaygroundFreshMount "$work/final.json" "$database" /var/lib/mysql "$project_base/db" "$work/bind-db" >/dev/null || exit 1
+    local VDM_DB_COMPOSE="$VDM_SITE_COMPOSE" VDM_DB_ENV="$VDM_SITE_ENV" VDM_DB_PROJECT_DIR="$VDM_SITE_DIR" VDM_DB_SITE="$site"
+    local VDM_DB_SERVICE="$database" VDM_DB_NAME="$vdm_database_name" VDM_DB_USER="$vdm_database_user" VDM_DB_PASSWORD="$vdm_database_pass"
+    local VDM_DB_HOST="$app_host" VDM_DB_PORT=3306 VDM_DB_DRIVER="${VDM_DATABASE_DRIVER:-mysqli}" VDM_DB_ENGINE="$engine"
+    export -n VDM_DB_PASSWORD
+    # Initialize only the normal database service. No Joomla web process runs
+    # until the imported files, SQL and account have completed successfully.
+    joomlaPlaygroundDatabaseBootstrap "$work" "$database" "$engine" || exit 1
+    if [ -f "$work/bootstrap.json" ]; then VDM_DB_COMPOSE=$(joomlaWebHostPath "$work/bootstrap.json") || exit 1; fi
+    : > "$work/starting" || exit 1
+    joomlaDatabaseCompose up -d --no-deps "$database" >/dev/null || exit 1
+    joomlaDatabaseDiscoverClients && joomlaPlaygroundWaitDatabase || exit 1
+    if [ -f "$work/bootstrap.json" ]; then
+      if [ -f "$work/bootstrap-root.sql" ]; then
+        (
+          VDM_DB_USER=root VDM_DB_NAME=mysql
+          IFS= read -r VDM_DB_PASSWORD < "$work/bootstrap-root" &&
+            joomlaDatabaseClient sql --protocol=SOCKET --host=localhost --connect-expired-password < "$work/bootstrap-root.sql" >/dev/null
+        ) || exit 1
+      fi
+      VDM_DB_COMPOSE="$VDM_SITE_COMPOSE"
+      joomlaDatabaseCompose up -d --force-recreate --no-deps "$database" >/dev/null && joomlaPlaygroundWaitDatabase || exit 1
+      rm -f -- "$work/bootstrap.json" "$work/bootstrap-account.sql" "$work/bootstrap-root" "$work/bootstrap-root.sql" || exit 1
+    fi
     : > "$work/seeding" || exit 1
-    joomlaPlaygroundSeedWebsite "$prepared/site" "$mount" "$db_mount" "$image" "$relative" "$file_bytes" "$db_bytes" "$token" || exit 1
-    if [ "${VDM_WEBSERVER:-apache}" = nginx ]; then web="$nginx"; fi
-    joomlaPlaygroundImportCandidate "$prepared" "$site" "$work" "$app" "$database" "$root" "$web" "$engine" "$token"
+    joomlaPlaygroundImportPackage "$prepared" "$site" "$work" "$app" "$root" "$image" "$mount" fresh || exit 1
+    if [ "${VDM_ENABLE:-false}" != true ]; then joomlaDatabaseCompose stop "$database" >/dev/null || exit 1; fi
   )
 }
-
 # The official database entrypoints interpolate schema/user names into SQL.
 # MySQL also interpolates passwords verbatim. Provision affected values as
-# SQL data on the private, empty volume; normal containers keep the literal ENV.
+# SQL data on the new site's empty database; normal containers keep the literal ENV.
 function joomlaPlaygroundDatabaseBootstrap() {
   (
     set +x
@@ -13079,7 +13101,7 @@ import secrets
 import sys
 
 service, engine, source = sys.argv[1:]
-model = json.loads(Path("candidate.json").read_text(encoding="utf-8"))
+model = json.loads(Path("rendered.json").read_text(encoding="utf-8"))
 database = model["services"][service]
 env = database["environment"]
 prefixes = ["MARIADB_", "MYSQL_"] if engine == "mariadb" else ["MYSQL_"]
@@ -13112,7 +13134,7 @@ unsafe_root = (engine == "mysql" and not value("RANDOM_ROOT_PASSWORD") and
 if not (unsafe_user or unsafe_schema or unsafe_password or unsafe_root):
     sys.exit(0)
 if not (name and user and password):
-    sys.exit("The private database initializer requires the configured application schema and account.")
+    sys.exit("The database initializer requires the configured application schema and account.")
 
 host = value("USER_HOST", "%") if engine == "mariadb" else "%"
 account = literal(user) + "@" + literal(host)
@@ -13154,49 +13176,53 @@ function joomlaPlaygroundWaitDatabase() {
     if printf 'SELECT 1;\n' | joomlaDatabaseClient query >/dev/null 2>&1; then return 0; fi
     sleep 2
   done
-  printf 'The new database did not accept the configured site credentials.\n' >&2
+  printf 'The selected database did not accept the configured site credentials.\n' >&2
   return 1
 }
 
-# A fresh site and a replacement both import through the isolated database
-# service. The candidate contains only private storage and receives no traffic.
-function joomlaPlaygroundImportCandidate() {
+# Build statements from the selected schema only. SQL-quoted identifiers handle
+# literal table names; one session disables foreign-key checks across the reset.
+function joomlaPlaygroundClearDatabase() {
+  local statements="$1/clear-database.sql"
+  case "$VDM_DB_ENGINE" in mariadb|mysql) ;; *) return 1;; esac
+  printf 'SET FOREIGN_KEY_CHECKS=0;\n' > "$statements" || return 1
+  joomlaDatabaseClient query >> "$statements" <<'SQL' || return 1
+SELECT CONCAT('DROP ', IF(TABLE_TYPE='VIEW','VIEW','TABLE'), ' IF EXISTS `', REPLACE(TABLE_NAME,'`','``'), '`;') FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() ORDER BY TABLE_TYPE DESC, TABLE_NAME;
+SQL
+  printf 'SET FOREIGN_KEY_CHECKS=1;\n' >> "$statements" || return 1
+  joomlaDatabaseClient sql < "$statements" >/dev/null
+}
+
+# Both destinations use this import step with the normal site Compose context.
+# The caller validates ownership and pauses writers before overwrite; this step
+# changes only its selected website mount and database, then reconciles Joomla.
+function joomlaPlaygroundImportPackage() {
   (
     set +x
     umask 077
-    local prepared="$1" site="$2" work="$3" app="$4" database="$5" root="$6" web="$7" engine="$8" token="$9"
-    local candidate="$work/candidate.json" tables port="${10:-3306}"
-    local VDM_DB_COMPOSE="$candidate" VDM_DB_ENV='' VDM_DB_PROJECT_DIR="$work" VDM_DB_SITE="$site"
-    local VDM_DB_SERVICE="$database" VDM_DB_NAME="$vdm_database_name" VDM_DB_USER="$vdm_database_user" VDM_DB_PASSWORD="$vdm_database_pass" VDM_DB_PORT="$port"
-    export -n VDM_DB_PASSWORD
-    # Convert host paths once so Git Bash leaves arguments to guest programs intact.
-    VDM_DB_COMPOSE=$(joomlaWebHostPath "$candidate") && VDM_DB_PROJECT_DIR=$(joomlaWebHostPath "$work") || exit 1
-    local MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
-    # An operator's global Compose project must never override the private one.
-    local COMPOSE_PROJECT_NAME="octojoom-playground-$token"
-    export MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL COMPOSE_PROJECT_NAME
-    joomlaPlaygroundDatabaseBootstrap "$work" "$database" "$engine" || exit 1
-    if [ -f "$work/bootstrap.json" ]; then VDM_DB_COMPOSE=$(joomlaWebHostPath "$work/bootstrap.json") || exit 1; fi
-    : > "$work/starting" || exit 1
-    joomlaDatabaseCompose up -d --no-deps "$database" >/dev/null || exit 1
+    local prepared="$1" site="$2" work="$3" app="$4" root="$5" image="$6" mount="$7" mode="$8" original="${9:-}"
+    local engine="$VDM_DB_ENGINE" relative=. bytes token tables
+    [[ "$mode" = fresh || "$mode" = replace ]] || exit 1
+    case "$root" in /var/www/html) ;; /var/www/html/*) relative="${root#/var/www/html/}";; *) exit 1;; esac
+    joomlaValidateDocumentRoot "$relative" || exit 1
+    IFS= read -r token < "$work/token" && [[ "$token" =~ ^[0-9a-f]{32}$ ]] || exit 1
+    bytes=$(joomlaSiteJSON -er .fileBytes < "$prepared/metadata.json") && [[ "$bytes" =~ ^[0-9]+$ ]] || exit 1
+    printf 'configuration\n' > "$work/import-stage" || exit 1
+    joomlaPlaygroundConfigureImport "$prepared" "$original" "$VDM_DB_HOST" "$VDM_DB_DRIVER" \
+      "$VDM_DB_NAME" "$VDM_DB_USER" "$VDM_DB_PASSWORD" "$root" || exit 1
     joomlaDatabaseDiscoverClients && joomlaPlaygroundWaitDatabase || exit 1
-    if [ -f "$work/bootstrap.json" ]; then
-      if [ -f "$work/bootstrap-root.sql" ]; then
-        (
-          VDM_DB_USER=root VDM_DB_NAME=mysql
-          IFS= read -r VDM_DB_PASSWORD < "$work/bootstrap-root" &&
-            joomlaDatabaseClient sql --protocol=SOCKET --host=localhost --connect-expired-password < "$work/bootstrap-root.sql" >/dev/null
-        ) || exit 1
-      fi
-      # Recreate on initialized storage so the healthcheck and PHP use the
-      # real credentials, and the bootstrap SQL is no longer mounted.
-      VDM_DB_COMPOSE=$(joomlaWebHostPath "$candidate") || exit 1
-      joomlaDatabaseCompose up -d --force-recreate --no-deps "$database" >/dev/null &&
-        joomlaPlaygroundWaitDatabase || exit 1
-      rm -f -- "$work/bootstrap.json" "$work/bootstrap-account.sql" "$work/bootstrap-root" "$work/bootstrap-root.sql" || exit 1
+    if [ "$mode" = fresh ]; then
+      tables=$(joomlaDatabaseTablesResolved) || exit 1
+      [ -z "$tables" ] || { printf 'The destination database already contains tables.\n' >&2; exit 1; }
     fi
-    tables=$(joomlaDatabaseTablesResolved) || exit 1
-    [ -z "$tables" ] || { printf 'The destination database already contains tables.\n' >&2; exit 1; }
+    printf 'files\n' > "$work/import-stage" || exit 1
+    : > "$work/import-writing" || exit 1
+    joomlaPlaygroundImportWebsite "$prepared/site" "$mount" "$image" "$relative" "$bytes" "$token" "$mode" || exit 1
+    if [ "$mode" = replace ]; then
+      printf 'database-clear\n' > "$work/import-stage" || exit 1
+      joomlaPlaygroundClearDatabase "$work" || exit 1
+    fi
+    printf 'database-import\n' > "$work/import-stage" || exit 1
     if ! (
       set -o pipefail
       joomlaPlaygroundNativeImportStream "$prepared/database.sql" "$engine" |
@@ -13209,8 +13235,9 @@ function joomlaPlaygroundImportCandidate() {
       'initializing Joomla CLI services' 'finding the imported account' 'evaluating Joomla administrator access'
       'reconciling the account fields' 'verifying the password' 'applying the account update' 'saving the account'
       'checking whether the account is blocked' 'confirming Joomla administrator permission')
-    account_code=$(joomlaPlaygroundFreshAccountCode) || exit 1
-    joomlaDatabaseCompose run --rm --no-deps -T --entrypoint php \
+    printf 'administrator\n' > "$work/import-stage" || exit 1
+    account_code=$(joomlaPlaygroundImportAccountCode) || exit 1
+    joomlaDatabaseCompose run --rm --no-deps -T --label traefik.enable=false --entrypoint php \
       "$app" -d register_argc_argv=1 -r "$account_code" -- "$root" "$site" < "$prepared/account.json" >/dev/null 2>&1 || {
       account_status=$?
       account_stage='starting PHP in the selected Joomla service'
@@ -13223,10 +13250,6 @@ function joomlaPlaygroundImportCandidate() {
       esac
       exit 1
     }
-    joomlaDatabaseCompose up -d >/dev/null || exit 1
-    joomlaPlaygroundWaitFresh '' "$candidate" "$app" "$site" "$root" "$web" || exit 1
-    joomlaDatabaseCompose down --volumes --remove-orphans >/dev/null || exit 1
-    rm -f "$work/starting" || exit 1
   )
 }
 
@@ -13409,17 +13432,6 @@ function joomlaPlaygroundPlanReplacement() {
 }
 
 
-function joomlaPlaygroundStartFresh() {
-  local prepared="$1" site="$2" model="$1/runtime/final.json" root=/var/www/html web=127.0.0.1
-  resolveJoomlaSite "$site" || return 1
-  joomlaPlaygroundCheckFreshNames "$model" || return 1
-  # A later setup failure must be able to undo this activation as well.
-  : > "$prepared/runtime/activating" || return 1
-  joomlaSiteCompose "$site" up -d >/dev/null || return 1
-  [ "${VDM_DOCROOT:-.}" = . ] || root+="/$VDM_DOCROOT"
-  [ "${VDM_WEBSERVER:-apache}" != nginx ] || web="nginx${VDM_KEY}"
-  joomlaPlaygroundWaitFresh "$VDM_SITE_ENV" "$VDM_SITE_COMPOSE" "joomla${VDM_KEY}" "$site" "$root" "$web"
-}
 
 # shellcheck disable=SC2016 # Dollar expressions belong to jq or the container.
 function joomlaPlaygroundCleanupFresh() {
@@ -13427,10 +13439,7 @@ function joomlaPlaygroundCleanupFresh() {
   [ -f "$work/token" ] || return 0
   IFS= read -r token < "$work/token" || return 1
   [[ "$token" =~ ^[0-9a-f]{32}$ ]] || return 1
-  if [ -f "$work/activating" ]; then joomlaSiteCompose "$site" down >/dev/null || return 1; fi
-  if [ -f "$work/starting" ]; then
-    COMPOSE_PROJECT_NAME="octojoom-playground-$token" migrationRunCompose '' "$work/candidate.json" down --volumes --remove-orphans >/dev/null || return 1
-  fi
+  if [ -f "$work/activating" ] || [ -f "$work/starting" ]; then joomlaSiteCompose "$site" down >/dev/null || return 1; fi
   if [ -f "$work/seeding" ]; then
     ids=$(docker ps -aq --filter "label=com.octoleo.octojoom.playground=$token") || return 1
     while IFS= read -r child; do
@@ -13650,123 +13659,6 @@ function joomlaPlaygroundInstallEnvironment() {
 }
 
 
-# The installed destination supplies hosting, mail, routing, TLS, and custom
-# settings. Only explicitly portable scalar properties come from the package.
-# Read the source as data without loading its PHP on the host.
-function joomlaPlaygroundConfigureReplace() {
-  (
-    set +x
-    umask 077
-    local prepared="$1" original="$2" host="$3" driver="$4" database="$5" user="$6" password="$7" docroot="$8"
-    local candidate="$prepared/configuration.candidate"
-    joomlaDatabasePatchConfiguration "$original" "$candidate" "$host" "$driver" "$database" "$user" "$password" "$VDM_J_DB_PREFIX" || {
-      printf 'Could not reconcile the destination Joomla database configuration.\n' >&2; exit 1;
-    }
-    cd -- "$prepared" || exit 1
-    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' python3 -I -B - "$docroot" <<'PYTHON' || exit 1
-import json
-from pathlib import Path
-import re
-import sys
-
-# Restrict application settings copied from the package to scalar metadata,
-# presentation, and editorial defaults. In particular, never copy source SMTP,
-# debug/cache backends, proxy/SSL, SEF, cookies, or session filesystem paths.
-portable = set("""offline offline_message display_offline_message offline_image editor captcha list_limit
-                  access frontediting helpurl offset MetaDesc MetaKeys MetaAuthor MetaVersion robots
-                  feed_limit feed_email lifetime""".split())
-strings = r'''(?:'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")'''
-lex = re.compile(strings + r"|/\*.*?\*/|//[^\r\n]*|\#(?!\[)[^\r\n]*|<<<|\$?\w+|\S", re.S)
-declaration = re.compile(r"public\s+(?:[?\w\\|]+\s+)?\$(\w+)\s*(=|;)", re.I)
-scalar = re.compile(r"(?:true|false|null|-?\d+(?:\.\d+)?)", re.I)
-quoted_literal = re.compile(r'''(?:'(?:\\.|[^'\\])*'|"(?:\\.|[^"$\\])*")''', re.S)
-
-def properties(text, wanted):
-    # Keep offsets into the original file so methods, comments, and unrelated
-    # properties survive. Braces/semicolons inside strings and comments are
-    # not structural. Refuse ambiguous input instead of rewriting that file.
-    iterator = (m for m in lex.finditer(text) if not m[0].startswith(("/*", "//", "#")))
-    body = False
-    depth = 0
-    fields = {}
-    for token in iterator:
-        value = token[0]
-        if value == "<<<" or value in ("'", '"'):
-            raise ValueError()
-        if not body:
-            if value.lower() == "class" and next(iterator)[0].lower() == "jconfig":
-                if next(iterator)[0] != "{":
-                    raise ValueError()
-                body, depth = True, 1
-            continue
-        if value == "{":
-            depth += 1
-        elif value == "}":
-            depth -= 1
-            if depth == 0:
-                return fields, token.start()
-        elif depth == 1 and value.lower() == "public":
-            match = declaration.match(text, token.start())
-            if not match or match[1] not in wanted:
-                continue
-            name = match[1]
-            if name in fields or match[2] != "=":
-                raise ValueError()
-            for end in iterator:
-                if end.start() < match.end():
-                    continue
-                if end[0] == ";":
-                    fields[name] = (match.end(), end.start())
-                    break
-                if end[0] in ("{", "}", "<<<", "'", '"'):
-                    raise ValueError()
-            else:
-                raise ValueError()
-    raise ValueError()
-
-def quote(text):
-    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
-
-def reconcile():
-    target = Path("configuration.candidate")
-    original = target.read_text(encoding="utf-8")
-    incoming = Path("site/configuration.php").read_text(encoding="utf-8")
-    account = json.loads(Path("account.json").read_text(encoding="utf-8"))
-    docroot = sys.argv[1].rstrip("/")
-    # Final paths are container paths even when running from Windows Git Bash.
-    replacements = dict(sitename=quote(account["siteName"]), tmp_path=quote(docroot + "/tmp"),
-                        log_path=quote(docroot + "/administrator/logs"), session_handler="'database'")
-    source, _ = properties(incoming, portable | {"secret"})
-    for name, (start, end) in source.items():
-        expression = incoming[start:end].strip()
-        if quoted_literal.fullmatch(expression) or scalar.fullmatch(expression):
-            replacements[name] = expression
-    secret = replacements.get("secret", "")
-    if not quoted_literal.fullmatch(secret) or len(secret) <= 2:
-        raise ValueError()
-    destination, close = properties(original, replacements)
-    changes = []
-    additions = []
-    for name, expression in replacements.items():
-        if name in destination:
-            start, end = destination[name]
-            changes.append((start, end, " " + expression))
-        else:
-            additions.append("    public $" + name + " = " + expression + ";\n")
-    if additions:
-        changes.append((close, close, "\n" + "".join(additions)))
-    for start, end, replacement in sorted(changes, reverse=True):
-        original = original[:start] + replacement + original[end:]
-    target.write_text(original, encoding="utf-8")
-
-try:
-    reconcile()
-except (OSError, KeyError, ValueError, StopIteration):
-    sys.exit("Could not reconcile the source Joomla secret and destination site settings.")
-PYTHON
-    chmod 600 configuration.candidate && mv -f -- configuration.candidate site/configuration.php
-  )
-}
 
 # In-place deletion may clear a mount root, but never descend into a nested
 # host filesystem. Docker-only named-volume paths are validated by Docker.
