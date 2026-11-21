@@ -636,4 +636,29 @@ replacement_state stopped "$second" replaced "/var/www/html/$nginx_docroot"
 [ "$(destination new ps --status running -q | sort)" = "$new_neighbor_ids" ]
 for port in "$proxy_port" "$nginx_port"; do require_routed_text stopped "$port" "$route_file" "exported-renamed-$run_id"; done
 assert_shared_environment
-echo 'Playground in-place import passed: unchanged bind/named storage, selected database, routing and custom settings; shared/private ENV; old-only files/tables removed; administrator login; verified backup, opt-out and failed-backup refusal.'
+
+# A native SQL failure after overwrite starts is a failed import. The running
+# website remains stopped; an explicit no-backup waiver supplies no old copy.
+failure_neighbor_ids=$(destination stopped ps --status running -q | sort)
+if replace_site new "$work/failing.zip" "${without_backup[@]}" 2> "$work/failed-in-place.log"; then
+  echo 'An in-place SQL failure was reported as successful.' >&2; exit 1
+fi
+jq -e '.success==false and .data.destructive_started==true and .data.backup==null' "$work/result" >/dev/null
+grep -q 'database sql failed' "$work/failed-in-place.log"
+[ -z "$(destination new ps -q --status running "joomla$first")" ]
+[ "$backup_listing" = "$(find "${backup%/*}" -maxdepth 1 -type f -print | sort)" ]
+resource_inventory > "$work/current-resources"
+cmp "$work/before/resources" "$work/current-resources"
+[ "$(other_database <<< 'SELECT value FROM octojoom_other_fixture.keep_me;')" = 'another database survives' ]
+[ "$(destination stopped ps --status running -q | sort)" = "$failure_neighbor_ids" ]
+# A valid import into the same stopped destination completes without enabling
+# it. The operator then starts it through the ordinary Compose path.
+replace_site new "$renamed_package" "${without_backup[@]}" --input-json "$work/request.json"
+jq -e '.success and .data.running==false and .data.backup==null' "$work/result" >/dev/null
+destination new up -d --wait --wait-timeout 240 >/dev/null
+check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+check_admin_login new shopmanager "$CONFIRMED_PASSWORD"
+storage_identity new "$first" > "$work/current-storage"
+cmp "$work/before/bind-storage" "$work/current-storage"
+assert_shared_environment
+echo 'Playground in-place import passed: unchanged bind/named storage, selected database, routing and custom settings; shared/private ENV; old-only files/tables removed; administrator login; verified backup, opt-out, failed-backup refusal and truthful import failure.'
