@@ -873,43 +873,6 @@ function joomlaDatabaseImageFacts() {
   fi
 }
 
-# Run the same driver checks against the image and the installed site's files.
-# shellcheck disable=SC2016
-function joomlaDatabaseDriverCompatibilityPHP() {
-  cat <<'PHP'
-    if (!class_exists($class)) exit(1);
-    $driverClass = new ReflectionClass($class);
-    $minimum = $driverClass->getDefaultProperties()[$engine === "mariadb" ? "dbMinMariadb" : "dbMinimum"] ?? null;
-    if (!$minimum || ($version !== "" && version_compare($version, $minimum, "<"))) exit(1);
-    if ($engine === "postgres" && $version !== "" && version_compare($version, "19", ">=")) {
-        // Joomla's legacy connect() unconditionally disables standard SQL strings.
-        // Match that implementation, allowing a later version-aware driver.
-        $method = $driverClass->getMethod("connect");
-        $file = file($method->getFileName());
-        if ($file === false) exit(1);
-        $lines = array_slice($file, $method->getStartLine() - 1, $method->getEndLine() - $method->getStartLine() + 1);
-        $code = "";
-        foreach (token_get_all("<?php " . implode("", $lines)) as $token) {
-            if (is_array($token)) {
-                list($type, $token) = $token;
-                if (in_array($type, [T_OPEN_TAG, T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) continue;
-                if ($type === T_CONSTANT_ENCAPSED_STRING) {
-                    $sql = preg_replace("/\s+/", "", substr($token, 1, -1));
-                    $token = strcasecmp($sql, "SETstandard_conforming_strings=off") === 0 ? "legacySetting" : "literal";
-                }
-            }
-            $code .= $token;
-        }
-        $body = strstr($code, "{");
-        $connect = 'parent::connect();$this->setQuery(legacySetting)->execute();}';
-        if ($body === "{" . $connect || $body === '{if($this->getConnection()){return;}' . $connect) {
-            fwrite(STDERR, "The selected Joomla PostgreSQL driver requires standard_conforming_strings=off, which PostgreSQL 19 and later cannot use.\n");
-            exit(17);
-        }
-    }
-PHP
-}
-
 # Ask the selected PHP runtime and its actual Joomla driver/installer sources.
 # No server connection, image build, or installed-site mount is involved.
 # An empty version requests driver discovery only (the optional setup menu).
@@ -931,15 +894,17 @@ function joomlaDatabaseJoomlaCapability() {
     require $base."/libraries/vendor/autoload.php";
     require $base."/installation/src/Helper/DatabaseHelper.php";
     $class=$driver==="pgsql"?"Joomla\\Database\\Pgsql\\PgsqlDriver":"Joomla\\Database\\Mysqli\\MysqliDriver";
-    '"$(joomlaDatabaseDriverCompatibilityPHP)"'
+    if (!class_exists($class)) exit(1);
+    $props=(new ReflectionClass($class))->getDefaultProperties();
     $cms=(new ReflectionClass("Joomla\\CMS\\Installation\\Helper\\DatabaseHelper"))->getDefaultProperties();
+    $minimum=$props[$engine==="mariadb"?"dbMinMariadb":"dbMinimum"]??null;
     $cmsMinimum=$cms[["mariadb"=>"dbMinimumMariaDb","mysql"=>"dbMinimumMySql","postgres"=>"dbMinimumPostgreSql"][$engine]]??null;
-    if (!$cmsMinimum || ($version!=="" && version_compare($version,$cmsMinimum,"<"))) exit(1);
+    if (!$minimum || !$cmsMinimum) exit(1);
+    if ($version!=="" && (version_compare($version,$minimum,"<") || version_compare($version,$cmsMinimum,"<"))) exit(1);
     $init=is_file("/makedb.php")?file_get_contents("/makedb.php"):"";
     $simple=$driver==="pgsql" && strpos($init,"password={\$password}")!==false;
     echo $driver," ",($simple?"true":"false"),"\n";
   ' -- "$engine" "$version") || {
-    [ "$?" != 17 ] || return 17
     printf 'The selected Joomla image cannot verify this database engine/version and its required PHP driver.\n' >&2
     return 17
   }
@@ -6297,9 +6262,11 @@ function joomlaDatabaseInstalledCapability() {
       if(!is_file($root."/libraries/vendor/autoload.php")){exit(1);}
       define("_JEXEC",1); require $root."/libraries/vendor/autoload.php";
       $class=$engine==="postgres"?"Joomla\\Database\\Pgsql\\PgsqlDriver":"Joomla\\Database\\Mysqli\\MysqliDriver";
-      '"$(joomlaDatabaseDriverCompatibilityPHP)"'
+      if(!class_exists($class)){exit(1);}
+      $properties=(new ReflectionClass($class))->getDefaultProperties();
+      $minimum=$properties[$engine==="mariadb"?"dbMinMariadb":"dbMinimum"]??null;
+      exit($minimum && version_compare($version,$minimum,">=")?0:1);
     ' -- "$VDM_SITE_DOCROOT" "$engine" "$version" || {
-      [ "$?" != 17 ] || return 17
       printf 'The installed Joomla driver cannot verify compatibility with this database version. Source unchanged.\n' >&2; return 1;
     }
 }
