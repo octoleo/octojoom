@@ -112,17 +112,6 @@ To deliberately skip the backup, add both `--pre-backup no` and
 `--confirm-no-backup yes` to the same command. The general `--yes` switch
 cannot approve skipping the backup.
 
-Existing-site replacement runs on the local Docker host. It requires an installed
-Joomla site using MariaDB or MySQL, with dedicated project-directory storage
-or ordinary local Docker volumes for its website and database. The web root
-can be a subdirectory of `/var/www/html`.
-
-The database prompts default to the destination's current database name, user
-and password. Leave the password prompt blank to keep the current one. To
-change these values in automation, use `db-name`, `db-user` and `db-password`
-in a private `--input-json` request. The imported database keeps the package's
-table prefix.
-
 The replacement keeps the target hostname, routing and storage arrangement.
 The target's Joomla configuration supplies its hosting and mail settings.
 The imported application supplies its secret and database table prefix. The
@@ -131,25 +120,18 @@ confirmed site and administrator details are written to the site's private
 separate storage, so tables and files that existed only on the old site are
 removed from the active installation.
 
-During staging, the original website keeps its current service state. Octojoom
-pauses writers for the backup and switch. It then starts the published services
-and checks that Joomla connects to its database and serves its home page.
-Services started only for verification return to their previous stopped state.
-The website keeps its enabled or disabled registration.
+After the switch, Octojoom starts the published services and checks that Joomla
+connects to its database and serves its home page. A previously running website
+returns to service. A deliberately stopped website returns to its stopped
+state after this check. The website keeps its enabled or disabled registration.
 
-On success with a backup, the result reports the verified archive in `backup`
-and the private directory holding the recovery records in `recovery`. The
-records identify the retained original website and database storage. Allow
-disk space for both copies. Use the backup command's **verify** action to
-recheck the archive and **restore** to restore it to a new or existing site.
-See [Verifying and restoring backups](BACKUPS.md).
-
-If the switch fails, Octojoom attempts to restore the previous installation
-and its running services. If it reports incomplete recovery, keep the journal
-and the storage it identifies. A remaining `.octojoom-change.lock/recovery.path`
-in the site's available directory points to that journal and blocks a second
-change while recovery is outstanding. A successful replacement with an
-explicit backup opt-out discards the old storage after readiness passes.
+If a switch fails, Octojoom restores the previous files, database, configuration
+and running services. If recovery requires manual intervention, the error gives
+the private recovery location. When a backup was selected, the successful result reports both the verified
+archive and the private recovery directory. The directory records where the
+original website files and database storage were retained. These can occupy
+substantial disk space. Completing a replacement without a backup discards
+the old data held temporarily for rollback.
 
 ## Inspect an existing host
 
