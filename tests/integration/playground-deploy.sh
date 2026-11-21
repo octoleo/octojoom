@@ -462,22 +462,77 @@ require_routed_text() {
   printf 'The fixture HTTP %s did not return the expected marker for %s.\n' "$method" "$sub" >&2
   return 1
 }
+report_admin_failure() {
+  local sub="$1" response="$2" service
+  service=$(destination "$sub" config --services | sed -n '/^joomla/p') || return 0
+  destination "$sub" logs --no-color --tail 80 "$service" > "$work/admin-container.log" 2>&1 || true
+  # Collect redactions separately so diagnostics never expose site credentials.
+  destination "$sub" exec -T --user 0 "$service" php -r '
+    require "configuration.php"; $c=new JConfig(); $redact=[]; $logs=[];
+    foreach (get_object_vars($c) as $key=>$value) {
+        if (is_string($value) && $value !== "" && preg_match("/password|secret|token/i",$key)) $redact[]=$value;
+    }
+    foreach (glob($c->log_path."/*") ?: [] as $path) {
+        if (is_file($path) && preg_match("/\.(php|log)$/",$path)) $logs[basename($path)]=substr(file_get_contents($path),-8192);
+    }
+    echo json_encode(["redact"=>$redact,"logs"=>$logs,"session_handler"=>$c->session_handler,
+        "secret_bytes"=>strlen($c->secret),"log_writable"=>is_writable($c->log_path)],JSON_INVALID_UTF8_SUBSTITUTE);
+  ' > "$work/admin-diagnostics.json" 2>/dev/null || : > "$work/admin-diagnostics.json"
+  python3 - "$response" "$work/admin-diagnostics.json" "$work/admin-container.log" <<'PY' >&2
+from html.parser import HTMLParser
+from pathlib import Path
+import json, os, re, sys
+class Text(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.parts=[]; self.hidden=0
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"): self.hidden += 1
+    def handle_endtag(self, tag):
+        if tag in ("script", "style"): self.hidden = max(0, self.hidden - 1)
+    def handle_data(self, data):
+        if not self.hidden: self.parts.append(data)
+raw=Path(sys.argv[2]).read_text()
+metadata=json.loads(raw) if raw else {}
+secrets=metadata.pop("redact", []) + [os.environ.get(key, "") for key in
+    ("DONOR_PASSWORD", "DONOR_DB_PASSWORD", "CONFIRMED_PASSWORD")]
+def emit(label, value):
+    for secret in sorted(filter(None, secrets), key=len, reverse=True): value=value.replace(secret, "[redacted]")
+    print(label + ": " + value[:8192])
+page=Text(); page.feed(Path(sys.argv[1]).read_text(errors="replace"))
+emit("Administrator response", re.sub(r"\s+", " ", " ".join(page.parts)).strip())
+if metadata:
+    emit("Joomla diagnostics", json.dumps(metadata, ensure_ascii=False))
+    emit("Application log", Path(sys.argv[3]).read_text(errors="replace"))
+PY
+}
 check_admin_login() {
-  local sub="$1" username="$2" password="$3" token url="http://$1.$domain:$proxy_port"
-  local -a request=(curl --noproxy '*' --fail --silent --show-error
+  local sub="$1" username="$2" password="$3" token http_status url="http://$1.$domain:$proxy_port"
+  local -a request=(curl --noproxy '*' --fail-with-body --silent --show-error --max-time 30
     --resolve "$sub.$domain:$proxy_port:127.0.0.1")
   rm -f "$work/cookies"
-  "${request[@]}" -c "$work/cookies" "$url/administrator/" > "$work/login.html"
+  if ! http_status=$("${request[@]}" -c "$work/cookies" -o "$work/login.html" -w '%{http_code}' "$url/administrator/"); then
+    printf 'Administrator login form returned HTTP %s.\n' "$http_status" >&2
+    report_admin_failure "$sub" "$work/login.html"
+    return 1
+  fi
   token=$(sed -nE 's/.*name="([a-f0-9]{32})"[[:space:]]+value="1".*/\1/p' "$work/login.html" | head -n 1)
-  [ -n "$token" ] || return 1
+  if [ -z "$token" ]; then report_admin_failure "$sub" "$work/login.html"; return 1; fi
   # Keep the password out of process arguments and ordinary test output.
   printf '%s' "$password" > "$work/login-password"
-  "${request[@]}" --location -b "$work/cookies" -c "$work/cookies" \
+  if ! http_status=$("${request[@]}" --location -b "$work/cookies" -c "$work/cookies" \
     --data-urlencode "username=$username" --data-urlencode "passwd@$work/login-password" \
     --data-urlencode 'option=com_login' --data-urlencode 'task=login' --data-urlencode "$token=1" \
-    "$url/administrator/index.php" > "$work/admin.html"
+    -o "$work/admin.html" -w '%{http_code}' "$url/administrator/index.php"); then
+    rm -f "$work/login-password"
+    printf 'Administrator login returned HTTP %s.\n' "$http_status" >&2
+    report_admin_failure "$sub" "$work/admin.html"
+    return 1
+  fi
   rm -f "$work/login-password"
-  grep -Eq 'task=logout|task=login.logout|com_cpanel' "$work/admin.html"
+  if ! grep -Eq 'task=logout|task=login.logout|com_cpanel' "$work/admin.html"; then
+    report_admin_failure "$sub" "$work/admin.html"
+    return 1
+  fi
 }
 # Snapshot actual persistent-resource identities, including mount directory
 # inodes. A successful import must replace contents without moving storage.
@@ -505,6 +560,7 @@ other_database() {
     'exec mariadb --user=root --password="$MARIADB_ROOT_PASSWORD" --batch --skip-column-names'
 }
 without_backup=(--pre-backup no --confirm-no-backup yes)
+check_admin_login new shopmanager "$CONFIRMED_PASSWORD"
 replacement_state new "$first" seed
 destination new exec -T --user 0 "joomla$first" sh -c 'echo "$1" > "$2"' sh "previous-new-$run_id" "/var/www/html/$route_file"
 apache_port=$(publish_fixture_port new "joomla$first")
