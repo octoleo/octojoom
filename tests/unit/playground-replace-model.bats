@@ -117,8 +117,6 @@ COMPOSE
 @test "replacement verifies the Compose file behind occupied project identities" {
   local VDM_SITE_COMPOSE="$VDM_SITE_DIR/docker-compose.yml"
   touch "$VDM_SITE_COMPOSE"
-  # Bats runs each test in its own shell. The product calls this test's docker stub.
-  # shellcheck disable=SC2317
   docker() {
     case "$1" in
       ps) printf '%s\n' 'site-container';;
