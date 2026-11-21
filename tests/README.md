@@ -166,17 +166,8 @@ portable coverage, not equivalent real-Docker move acceptance.
 
 The Playground fixture exercises the public CLI. It verifies the default full
 backup, explicit backup opt-out, failed SQL import, an unusable backup path,
-rollback after failed verification, and the stopped site's state after restart.
-It uses a disposable Traefik container and a separately published HTTP port
-on loopback. An independent client polls both endpoints while the replacement
-answers its private HTTP probe. Distinct markers identify the old and incoming
-sites. The fixture checks public access after commit, rollback after a rejected
-private probe, and continued isolation for the stopped site. A forced failure
-retiring an original volume covers the `committed_with_followup` result. After
-publication, a request writes a fixture value through Traefik and a second
-request reads it through the host port.
-
-The fixture also checks that neighboring containers keep running. A second export
+rollback after failed activation, and the stopped site's state after restart.
+It checks that the neighboring site's containers keep running. A second export
 captures a renamed Joomla administrator and a site in offline mode. The fixture
 checks the imported account's ID, groups and password, the visitor-facing 503
 page, and Docker health after restart. macOS and Windows run the portable
