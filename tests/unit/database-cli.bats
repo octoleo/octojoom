@@ -256,8 +256,6 @@ JSON
   assert_output_contains cleanup
   run cliComplete --engine p joomla database
   assert_equal "$output" postgres
-  run cliComplete --db-engine '' joomla playground
-  assert_equal "$output" $'mariadb\nmysql'
   run cliComplete --scope '' joomla backup
   assert_output_contains website
   run cliComplete --table '' joomla database

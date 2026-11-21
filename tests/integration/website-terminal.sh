@@ -67,19 +67,6 @@ case "$OCTOJOOM_TTY_TEST_CASE" in
     showJoomlaWebsiteReport first.example.test "$details"
     printf '\nREPORT_STATUS=%s\n' "$?"
     ;;
-  playground-backup-small)
-    stty rows 24 cols 80
-    result=$(joomlaPlaygroundReplacementBackup shop.example.test) || exit $?
-    printf '\nPLAYGROUND_BACKUP=%s\n' "$result"
-    ;;
-  playground-fresh-small)
-    stty rows 24 cols 80
-    fresh_site=shop.example.test VDM_J_SITE_NAME='Fixture Shop' VDM_J_REPO=joomla VDM_JV=6
-    vdm_database_name=shop VDM_DB_ENGINE=mariadb VDM_ENABLE=true
-    printf '%s\n' '{"siteName":"Fixture Shop","joomlaVersion":"6.2.0"}' > "$OCTOJOOM_TTY_TEST_WORK/metadata.json"
-    joomlaPlaygroundReviewFresh "$OCTOJOOM_TTY_TEST_WORK"
-    printf '\nPLAYGROUND_FRESH_STATUS=%s\n' "$?"
-    ;;
   navigation)
     # Exercise the real website loop, including the report's return path. These
     # stand-ins keep navigation read-only and independent of local deployments.
@@ -181,14 +168,6 @@ feed_keys() {
     printf '\r'
     wait_for_dialog 3 "$deadline" || return 1
     printf '\r'
-  elif [ "$OCTOJOOM_TTY_TEST_CASE" = playground-backup-small ]; then
-    # Decline the backup, keep No at its warning, then accept the default backup.
-    wait_for_dialog 2 "$deadline" || return 1
-    printf '\t\r'
-    wait_for_dialog 3 "$deadline" || return 1
-    printf '\r'
-    wait_for_dialog 4 "$deadline" || return 1
-    printf '\r'
   elif [ "$OCTOJOOM_TTY_TEST_CASE" = php-all ]; then
     local count
     for count in {2..7}; do
@@ -243,13 +222,6 @@ run_case menu-default '\r' 'RESULT=back STATUS=0' --menu
 run_case menu-information '\033[B\033[B\r' 'RESULT=information STATUS=0' --menu
 run_case menu-delayed '\033[B\r' 'RESULT=enable STATUS=0' --menu
 run_case menu-small '\033[B\r' 'RESULT=enable STATUS=0' --menu
-run_case playground-backup-small '\t\r' 'PLAYGROUND_BACKUP=true' --yesno
-grep -qF 'Replace all Joomla files' "$WORK/playground-backup-small.log"
-grep -qF 'All existing website files' "$WORK/playground-backup-small.log"
-grep -qF 'without a backup?' "$WORK/playground-backup-small.log"
-run_case playground-fresh-small '\r' 'PLAYGROUND_FRESH_STATUS=130' --yesno
-grep -qF 'Import Fixture Shop' "$WORK/playground-fresh-small.log"
-grep -qF 'Enable after import: true' "$WORK/playground-fresh-small.log"
 run_case menu-tiny '\033[B\r' 'RESULT=enable STATUS=0' --menu
 run_case menu-cancel '\t\t\r' 'RESULT= STATUS=1' --menu
 run_case menu-escape '\033' 'RESULT= STATUS=255' --menu

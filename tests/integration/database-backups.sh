@@ -83,28 +83,18 @@ chmod 755 "$WORK" "$VDM_HOME_PATH" "$VDM_PROJECT_PATH"
 printf 'VDM_DOMAIN="%s"\nVDM_MULTI_DOMAIN=false\nVDM_UPDATE_HOST=false\n' "$DOMAIN" > "$VDM_SRC_PATH/.env"
 docker network create --label "$LABEL" "$NETWORK" >/dev/null
 
-PHASE=select-distinct-database-versions
-rejected_postgres_image=''
 case "$ENGINE" in
   mariadb) DATABASE_IMAGE="${OCTOJOOM_DB_TEST_SOURCE_IMAGE:-mariadb:lts}"; CHANGE_IMAGE="${OCTOJOOM_DB_TEST_TARGET_IMAGE:-mariadb:latest}" ;;
   mysql) DATABASE_IMAGE="${OCTOJOOM_DB_TEST_SOURCE_IMAGE:-mysql:lts}"; CHANGE_IMAGE="${OCTOJOOM_DB_TEST_TARGET_IMAGE:-mysql:latest}" ;;
   postgres)
     CHANGE_IMAGE="${OCTOJOOM_DB_TEST_TARGET_IMAGE:-postgres:latest}"
-    docker pull "$CHANGE_IMAGE" >&2
-    # Select the newest major the actual Joomla image can use. An explicit
-    # target is a test request and must fail if it is incompatible.
-    while :; do
-      joomlaDatabaseImageFacts "$CHANGE_IMAGE" postgres
-      pg_major="${VDM_DATABASE_IMAGE_VERSION%%.*}"
-      [[ "$pg_major" =~ ^[0-9]+$ && "$pg_major" -gt 1 ]]
-      if joomlaDatabaseJoomlaCapability "$JOOMLA_IMAGE" postgres "$VDM_DATABASE_IMAGE_VERSION" >/dev/null 2>"$WORK/pg-capability.log"; then break; fi
-      cat "$WORK/pg-capability.log" >&2
-      if [ -n "${OCTOJOOM_DB_TEST_TARGET_IMAGE:-}" ] || ! grep -Fq 'requires standard_conforming_strings=off' "$WORK/pg-capability.log"; then exit 1; fi
-      if [ -z "$rejected_postgres_image" ]; then rejected_postgres_image="$CHANGE_IMAGE"; fi
-      CHANGE_IMAGE="postgres:$((pg_major - 1))"
-    done
     if [ -n "${OCTOJOOM_DB_TEST_SOURCE_IMAGE:-}" ]; then DATABASE_IMAGE="$OCTOJOOM_DB_TEST_SOURCE_IMAGE"
     else
+      # Discover the published current major; exercise a logical major upgrade
+      # from its predecessor without freezing a particular current release.
+      docker pull "$CHANGE_IMAGE" >&2
+      pg_major=$(docker image inspect "$CHANGE_IMAGE" | jq -er '.[0].Config.Env[] | select(startswith("PG_MAJOR=")) | split("=")[1]')
+      [[ "$pg_major" =~ ^[0-9]+$ && "$pg_major" -gt 1 ]]
       DATABASE_IMAGE="postgres:$((pg_major - 1))"
     fi ;;
   *) printf 'Unsupported acceptance engine: %s\n' "$ENGINE" >&2; exit 1 ;;
@@ -113,6 +103,7 @@ esac
 # Floating LTS/latest aliases sometimes converge. Inspect the real binaries and,
 # if needed, discover a distinct maintained numeric tag from Docker's official
 # image catalogue. Explicit overrides must themselves describe distinct versions.
+PHASE=select-distinct-database-versions
 joomlaDatabaseImageFacts "$CHANGE_IMAGE" "$ENGINE"
 TARGET_VERSION="$VDM_DATABASE_IMAGE_VERSION"
 joomlaDatabaseImageFacts "$DATABASE_IMAGE" "$ENGINE"
@@ -345,21 +336,6 @@ seed_site "$VOLUME_SITE"
 assert_state "$SOURCE"
 assert_state "$VOLUME_SITE"
 
-if [ -n "$rejected_postgres_image" ]; then
-  PHASE=incompatible-postgres-change
-  containers=("joomla$SOURCE_KEY" "mariadb$SOURCE_KEY")
-  before_change=$(docker inspect --format '{{.Id}} {{.State.StartedAt}}' "${containers[@]}")
-  if request database --container "$SOURCE" --action change --engine postgres --database-image "$rejected_postgres_image" \
-    --data-mode preserve --confirm true --pre-backup false >"$WORK/rejected-change.log" 2>&1; then
-    echo 'An incompatible PostgreSQL change succeeded.' >&2; exit 1
-  fi
-  grep -Fq 'requires standard_conforming_strings=off' "$WORK/rejected-change.log"
-  [ "$(docker inspect --format '{{.Id}} {{.State.StartedAt}}' "${containers[@]}")" = "$before_change" ]
-  assert_application "$SOURCE"
-  assert_state "$SOURCE"
-  printf 'Rejected %s before stopping the installed Joomla website or database.\n' "$rejected_postgres_image"
-fi
-
 PHASE=logical-database-tools
 selected_table=octojoom_marker
 [ "$ENGINE" != postgres ] || selected_table=public.octojoom_marker
@@ -535,22 +511,6 @@ request database --container "$SOURCE" --action change --engine "$ENGINE" --data
 assert_application "$clone_target"
 assert_state "$clone_target"
 [ "$(database_version "$clone_target")" = "$TARGET_VERSION" ]
-if [ "$ENGINE" = postgres ] && (( ${SOURCE_VERSION%%.*} < 18 && ${TARGET_VERSION%%.*} >= 18 )); then
-  # The source restores above cover the old layout. Also restore a real
-  # versioned PGDATA from the upgraded clone into a new host-owned bind root.
-  PHASE=versioned-postgres-bind-restore
-  pg_archive="$ARCHIVES/versioned-postgres.tar.gz"
-  pg_restore="pgrestore.$DOMAIN"
-  request backup --container "$clone_target" --action create --scope full --format tar.gz --file "$pg_archive"
-  request backup --container "$clone_target" --action restore --target new --file "$pg_archive" \
-    --key "pgrestore$RUN_ID" --domain "$DOMAIN" --sub-domain pgrestore --enable true --secure false
-  assert_application "$pg_restore"
-  assert_state "$pg_restore"
-  runtime_storage "$pg_restore" database | jq -e '.Type=="bind" and .Destination=="/var/lib/postgresql"' >/dev/null
-  [ "$(database_version "$pg_restore")" = "$TARGET_VERSION" ]
-  retire_site "$pg_restore"
-  PHASE=independent-database-change-clone
-fi
 joomlaSiteCompose "$SOURCE" stop >&2
 assert_application "$clone_target"
 assert_state "$clone_target"

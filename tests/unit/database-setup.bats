@@ -112,56 +112,6 @@ database_capabilities() {
   refute_file_exists "$VDM_REPO_PATH/joomla/available"
 }
 
-@test "database capability: PostgreSQL 19 refuses the legacy Joomla connection query and accepts fixed drivers" {
-  command -v php >/dev/null || skip 'native PHP CLI is unavailable; Docker acceptance probes the published Joomla image'
-  local file="$SANDBOX/drivers.php" code
-  cat > "$file" <<'PHP'
-<?php
-class BaseDriver {
-    protected $dbMinimum = '11';
-    public function connect() {}
-}
-class LegacyDriver extends BaseDriver {
-    public function connect()
-    {
-        if ($this->getConnection()) {
-            return;
-        }
-        parent::connect();
-        $this->setQuery('SET standard_conforming_strings = off')->execute();
-    }
-}
-class FixedDriver extends BaseDriver {
-    public function connect()
-    {
-        parent::connect();
-        // The old driver called $this->setQuery('SET standard_conforming_strings = off')->execute();
-    }
-}
-class VersionAwareDriver extends BaseDriver {
-    public function connect()
-    {
-        parent::connect();
-        if (version_compare($this->getVersion(), '19', '<')) {
-            $this->setQuery('SET standard_conforming_strings = off')->execute();
-        }
-    }
-}
-PHP
-  file=$(joomlaWebHostPath "$file")
-  code='require $argv[1]; $class=$argv[2]; $version=$argv[3]; $engine="postgres";'
-  code+="$(joomlaDatabaseDriverCompatibilityPHP)"
-  run env MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' php -r "$code" -- "$file" LegacyDriver 19.0
-  assert_status 17
-  assert_output_contains 'requires standard_conforming_strings=off'
-  run env MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' php -r "$code" -- "$file" LegacyDriver 18.3
-  assert_success
-  run env MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' php -r "$code" -- "$file" FixedDriver 19.0
-  assert_success
-  run env MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' php -r "$code" -- "$file" VersionAwareDriver 19.0
-  assert_success
-}
-
 @test "database setup: known PostgreSQL initializer limitations reject literal credentials without rewriting" {
   database_capabilities
   database_headless

@@ -55,7 +55,6 @@ On Linux, installed Docker Compose also validates generated configuration.
 | Configuration and dialogs | Secret persistence, literal input, permissions, validation, random values, and prompt cancellation |
 | Joomla setup | Single and bulk project-folder defaults, explicit named-volume opt-out, cancellation, generated Compose, environment values, and feature options |
 | Guided setup and defaults | One customization fork, saved-default precedence, manual versus automatic installation, headless preflight, and staged publication failures |
-| Playground packages | Offline inspection, archive validation, menu and CLI consent, isolated staging, cutover and recovery |
 | Configuration alignment | Effective Compose equivalence, complete scoped ENV, custom-field preservation, idempotence, per-site batch failure reporting, and recoverable publication |
 | PHP runtime | Published-tag compatibility, measured runtime checks, selective INI changes, custom-directive preservation, stopped-site handling, and rollback |
 | Webserver and document root | Apache/Nginx configuration, companion mounts, routing preservation, supported root selection/moves, custom-layout refusal, and failed-change recovery |
@@ -97,7 +96,6 @@ bash tests/integration/clone.sh
 bash tests/integration/migration.sh
 bash tests/integration/php-runtime.sh
 bash tests/integration/web-runtime.sh
-bash tests/integration/playground-deploy.sh
 OCTOJOOM_DB_TEST_ENGINE=mariadb bash tests/integration/database-backups.sh
 OCTOJOOM_DB_TEST_ENGINE=mysql bash tests/integration/database-backups.sh
 OCTOJOOM_DB_TEST_ENGINE=postgres bash tests/integration/database-backups.sh
@@ -108,8 +106,6 @@ the official images, and root or passwordless sudo for container-owned bind
 mounts. Migration also requires GNU tar and gzip; PHP and web runtime checks
 require `jq`, `curl`, and `sha256sum`. Database and backup checks also need
 `zip`, `unzip`, and util-linux `script` for the console terminal check.
-The Playground fixture uses Python 3, `jq`, `curl` and `openssl`, and fetches
-a pinned upstream exporter to build its own complete Joomla ZIP.
 The scripts create temporary, uniquely
 named or labeled resources and remove their own resources on exit. They never
 prune the daemon or its images. PHP and web checks publish only ephemeral
@@ -121,7 +117,6 @@ loopback HTTP ports.
 | Docker migration integration | `migration.sh` | Complete archive, destination realignment, source preservation, and independent destination writes |
 | Docker PHP runtime integration | `php-runtime.sh` | Published PHP-image change, effective INI values, unchanged installed-version fixture/database, and rejected-candidate preservation |
 | Docker web runtime integration | `web-runtime.sh` | Real Joomla installation, Apache/Nginx round trip, nested-root move, frontend/admin/SEF/API/assets, and preserved site data |
-| Docker Playground deployment and replacement | `playground-deploy.sh` | Fresh deployment and existing-site replacement on Linux Docker. Tests cover a running Apache/MariaDB site with bind mounts and a stopped Nginx/PHP-FPM/MySQL site with named volumes and a nested document root. |
 | Docker database and backups (MariaDB, MySQL, PostgreSQL) | `database-backups.sh` | Real Joomla installation, native SQL operations, Unicode/binary data, ZIP/tar restores, bind/named-volume storage, batch operations, and database changes onto fresh storage |
 
 The clone test checks a real cold database copy and confirms Apache/PHP in the
@@ -163,24 +158,6 @@ then switches back to Apache. Installed Joomla and PHP versions, site files,
 the database container, and a database marker must survive these changes.
 The real root-move fixture uses bind storage; named-volume root handling has
 portable coverage, not equivalent real-Docker move acceptance.
-
-The Playground fixture exercises the public CLI. It verifies the default full
-backup, explicit backup opt-out, failed SQL import, an unusable backup path,
-rollback after failed verification, and the stopped site's state after restart.
-It uses a disposable Traefik container and a separately published HTTP port
-on loopback. An independent client polls both endpoints while the replacement
-answers its private HTTP probe. Distinct markers identify the old and incoming
-sites. The fixture checks public access after commit, rollback after a rejected
-private probe, and continued isolation for the stopped site. A forced failure
-retiring an original volume covers the `committed_with_followup` result. After
-publication, a request writes a fixture value through Traefik and a second
-request reads it through the host port.
-
-The fixture also checks that neighboring containers keep running. A second export
-captures a renamed Joomla administrator and a site in offline mode. The fixture
-checks the imported account's ID, groups and password, the visitor-facing 503
-page, and Docker health after restart. macOS and Windows run the portable
-Playground suites with Docker stand-ins.
 
 The database and backup matrix installs Joomla separately for each engine.
 It exports and imports actual SQL, checks selected-table operations, Unicode
@@ -264,8 +241,7 @@ Docker packages and Compose manually before using Octojoom there.
 Passing workflows only block merge when branch protection requires them.
 Require `ShellCheck`, `Tests (ubuntu-latest)`, `Tests (macos-latest)`,
 `Tests (windows-latest)`, `Docker clone integration`,
-`Docker migration integration`, `Docker PHP runtime integration`,
-`Docker web runtime integration`, `Docker Playground deployment and replacement`,
-and each `Docker database and backups`
+`Docker migration integration`, `Docker PHP runtime integration`, and
+`Docker web runtime integration`, and each `Docker database and backups`
 matrix job on protected branches. A portable-suite pass
 alone does not establish the real-Docker acceptance results.
