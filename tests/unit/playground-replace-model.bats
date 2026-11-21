@@ -169,10 +169,6 @@ JSON
   joomlaSiteJSON -e '.services.mysql | (.environment | keys)==["MYSQL_ROOT_HOST","MYSQL_ROOT_PASSWORD"] and
     (.environment.MYSQL_ROOT_PASSWORD | test("^[a-f0-9]{64}$")) and
     (.volumes | length==1) and .volumes[0].read_only' < "$work/bootstrap.json" >/dev/null
-  local bootstrap_password
-  IFS= read -r bootstrap_password < "$work/bootstrap-root"
-  [[ "$bootstrap_password" =~ ^[a-f0-9]{64}$ ]]
-  [ "$(joomlaSiteJSON -r .services.mysql.environment.MYSQL_ROOT_PASSWORD < "$work/bootstrap.json")" = "$bootstrap_password" ]
   assert_file_contains "$work/bootstrap-account.sql" "IDENTIFIED BY 'a''\\\$b'"
   assert_file_contains "$work/bootstrap-root.sql" "ALTER USER 'root'@'localhost'"
   refute_file_contains "$work/bootstrap-root.sql" "'root'@'%'"

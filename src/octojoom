@@ -13036,7 +13036,7 @@ for prefix in prefixes:
 if unsafe_root:
     bootstrap = secrets.token_hex(32)
     env["MYSQL_ROOT_PASSWORD"] = bootstrap
-    Path("bootstrap-root").write_bytes(bootstrap.encode("ascii") + b"\n")
+    Path("bootstrap-root").write_text(bootstrap + "\n", encoding="ascii")
     host = value("ROOT_HOST", "%")
     hosts = ["localhost"] + ([host] if host and host != "localhost" else [])
     rotation = ["ALTER USER 'root'@" + literal(h) + " IDENTIFIED BY " + literal(root_password)
@@ -13086,7 +13086,7 @@ function joomlaPlaygroundImportCandidate() {
         (
           VDM_DB_USER=root VDM_DB_NAME=mysql
           IFS= read -r VDM_DB_PASSWORD < "$work/bootstrap-root" &&
-            joomlaDatabaseClient sql --protocol=SOCKET --host=localhost --connect-expired-password < "$work/bootstrap-root.sql" >/dev/null
+            joomlaDatabaseClient sql --connect-expired-password < "$work/bootstrap-root.sql" >/dev/null
         ) || exit 1
       fi
       # Recreate on initialized storage so the healthcheck and PHP use the
