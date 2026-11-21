@@ -13230,7 +13230,7 @@ function joomlaPlaygroundImportPackage() {
     set +x
     umask 077
     local prepared="$1" site="$2" work="$3" app="$4" root="$5" image="$6" mount="$7" mode="$8" original="${9:-}"
-    local engine="$VDM_DB_ENGINE" relative=. bytes token tables ini_host status ids child helpers_started=false
+    local engine="$VDM_DB_ENGINE" relative=. bytes token tables ini_host status ids child helpers_started=false cleanup_failed=false
     local VDM_DB_COMPOSE="${VDM_DB_COMPOSE:-}" VDM_DB_ENV="${VDM_DB_ENV:-}" VDM_DB_PROJECT_DIR="${VDM_DB_PROJECT_DIR:-}"
     local MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
     local -a account_options=()
@@ -13253,13 +13253,14 @@ function joomlaPlaygroundImportPackage() {
       if "$helpers_started"; then
         if ids=$(docker ps -aq --filter "label=com.octoleo.octojoom.playground=$token"); then
           while IFS= read -r child; do
-            [ -z "$child" ] || docker rm -f "$child" >/dev/null || status=1
+            [ -z "$child" ] || docker rm -f "$child" >/dev/null || cleanup_failed=true
           done <<< "$ids"
         else
           printf "Could not confirm cleanup of the import helper containers.\n" >&2
-          status=1
+          cleanup_failed=true
         fi
       fi
+      if "$cleanup_failed"; then : > "$work/import-cleanup-failed"; status=1; fi
       exit "$status"
     ' EXIT
     account_options=(run --rm --no-deps -T --label traefik.enable=false
@@ -13703,23 +13704,25 @@ PYTHON
 }
 
 # Write beside the destination so a failed copy cannot truncate the installed
-# environment. The private directory also protects a replacement whose final
-# permissions allow other users to read it. Recheck the expected bytes before
-# the same-filesystem rename; callers serialize replacements with the env lock.
+# environment. Recheck expected bytes before the same-filesystem rename; a
+# literal - expectation means the destination must still be absent. The same
+# writer publishes the prepared Compose and PHP files without partial copies.
 function joomlaPlaygroundInstallEnvironment() {
   (
     set +x
     umask 077
     local source="$1" destination="$2" expected="$3" metadata="${4:-$1}" temporary='' status
-    [ -f "$source" ] && [ ! -L "$source" ] && [ -f "$expected" ] && [ ! -L "$expected" ] &&
-      [ -f "$metadata" ] && [ ! -L "$metadata" ] && [ -f "$destination" ] && [ ! -L "$destination" ] || exit 1
+    [ -f "$source" ] && [ ! -L "$source" ] && [ -f "$metadata" ] && [ ! -L "$metadata" ] && [ ! -L "$destination" ] || exit 1
+    if [ "$expected" = - ]; then [ ! -e "$destination" ] || exit 1
+    else [ -f "$expected" ] && [ ! -L "$expected" ] && [ -f "$destination" ] || exit 1; fi
     temporary=$(mktemp -d "${destination%/*}/.octojoom-env.XXXXXXXX") || exit 1
     trap 'status=$?; trap - EXIT; runPrivileged rm -rf -- "$temporary" || status=1; exit "$status"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM HUP
     runPrivileged cp -a -- "$metadata" "$temporary/environment" &&
       runPrivileged cp -- "$source" "$temporary/environment" || exit 1
-    if [ -L "$destination" ] || ! cmp -s "$expected" "$destination"; then
+    if [ -L "$destination" ] || { [ "$expected" = - ] && [ -e "$destination" ]; } ||
+      { [ "$expected" != - ] && ! cmp -s "$expected" "$destination"; }; then
       printf 'The website environment changed before its atomic update: %s\n' "$destination" >&2
       exit 1
     fi
@@ -13900,7 +13903,10 @@ function joomlaPlaygroundReplaceSite() {
         fi
       fi
       "$env_locked" && rmdir "$env_lock" || { [ "$env_locked" != true ] || status=1; }
-      rmdir "$lock" || status=1
+      if [ -f "$work/import-cleanup-failed" ]; then
+        reason+=" Import helper cleanup is unconfirmed; inspect containers labelled com.octoleo.octojoom.playground=$token before removing the site lock at $lock."
+        public_running=null status=1
+      else rmdir "$lock" || status=1; fi
       if ! runPrivileged rm -rf -- "$work"; then reason+=" Import scratch cleanup failed at $work."; status=1; fi
       joomlaSiteJSON -nc --arg site "$site" --arg stage "$stage" --arg reason "$reason" --arg enabled "$enabled" \
         --argjson running "$public_running" --argjson destructive_started "$destructive_started" --argjson status "$status" --arg backup "$verified" \
@@ -13984,12 +13990,18 @@ function joomlaPlaygroundReplaceSite() {
       joomlaPlaygroundInstallEnvironment "$work/published-mirror.env" "$mirror/.env" "$work/initial-mirror.env" "$work/initial-mirror.env" || exit 1
     fi
     joomlaPlaygroundCheckIni "$work"/ini-*.path && IFS= read -r ini < "$work/ini-destination.path" || exit 1
-    runPrivileged cp -- "$work/candidate.ini" "$ini" || exit 1
+    if [ -f "$work/ini-destination" ]; then
+      joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$ini" "$work/ini-destination" "$work/ini-destination" || exit 1
+    else joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$ini" - || exit 1; fi
     # Atomic publication uses the same checked-file writer; no rollback journal.
     joomlaPlaygroundInstallEnvironment "$work/candidate.yml" "$compose" "$work/initial-compose" "$work/initial-compose" || exit 1
     if [ -n "$mirror" ]; then
       joomlaPlaygroundInstallEnvironment "$work/candidate.yml" "$mirror/docker-compose.yml" "$work/initial-compose" "$work/initial-compose" || exit 1
-      if [[ "$ini" == "$directory/"* ]]; then runPrivileged cp -- "$work/candidate.ini" "$mirror/${ini#"$directory/"}" || exit 1; fi
+      if [[ "$ini" == "$directory/"* ]]; then
+        if [ -f "$work/ini-mirror" ]; then
+          joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$mirror/${ini#"$directory/"}" "$work/ini-mirror" "$work/ini-mirror" || exit 1
+        else joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$mirror/${ini#"$directory/"}" - || exit 1; fi
+      fi
     fi
     stage=start
     if "$db_started"; then joomlaSiteCompose "$site" stop "$database" >/dev/null || exit 1; db_started=false; fi
