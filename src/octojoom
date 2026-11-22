@@ -6,8 +6,8 @@
 # shellcheck disable=SC2030,SC2031
 
 # The most recent program version.
-_VERSION="3.9.2"
-_V="3.9"
+_VERSION="4.0.0"
+_V="4.0"
 
 # Bash version required
 _bash_v=4
