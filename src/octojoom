@@ -6170,10 +6170,13 @@ function joomlaDatabaseConfigurationFile() {
   else return 1; fi
   [[ "$source" != *,* && "$VDM_SITE_MOUNT_TARGET" != *,* ]] || return 1
   mount="type=$VDM_SITE_MOUNT_TYPE,source=$source,target=$VDM_SITE_MOUNT_TARGET"
-  if [ "$operation" = read ] || [ "$operation" = read-optional ]; then
+  if [[ "$operation" = read || "$operation" = read-optional || "$operation" = read-contained ]]; then
     MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker run --rm --network none --read-only --user 0 \
       --mount "$mount,readonly" --entrypoint php "$VDM_SITE_IMAGE" -r '
         $file=$argv[1]; if($argv[2]==="read-optional" && !file_exists($file) && !is_link($file)){exit(0);}
+        if ($argv[2]==="read-contained" && realpath(dirname($file)) !== dirname($file)) {
+            fwrite(STDERR,"The selected Joomla document root is missing or traverses a symbolic link.\n"); exit(1);
+        }
         if(is_link($file)||!is_file($file)){exit(1);} if(readfile($file)===false){exit(1);}
       ' -- "$VDM_SITE_DOCROOT/configuration.php" "$operation" > "$file" || return 1
     chmod 600 "$file"
@@ -9356,7 +9359,7 @@ function joomlaBackupRestoreCurrentAction() {
     old_engine="$VDM_DB_ENGINE" host="$VDM_DB_HOST" dbname="$VDM_DB_NAME" dbuser="$VDM_DB_USER" dbpass="$VDM_DB_PASSWORD" prefix="$VDM_DB_PREFIX"
     if [ "$old_engine" = postgres ]; then driver=pgsql; else driver=mysqli; fi
     case "$engine:$old_engine:$scope" in none:*:files|postgres:postgres:*|mysql:mysql:*|mariadb:mariadb:*|mysql:mariadb:*|mariadb:mysql:*) ;; *) joomlaBackupError 'Cross-family database restoration is unsupported.'; exit 17;; esac
-    joomlaDatabaseCopyConfiguration "$site" "$work/target-configuration.php" || exit 1
+    joomlaDatabaseConfigurationFile "$site" read-contained "$work/target-configuration.php" &&
     cp "$original_compose" "$work/original.yml" && cp "$original_env" "$work/original.env" || exit 1
     [ ! -f "$original_dir/.env" ] || : > "$work/had-private-env"
     joomlaSiteCompose "$site" stop >/dev/null || exit $?
@@ -12842,30 +12845,34 @@ function joomlaPlaygroundImportWebsite() {
       docker run --rm -i --network none --read-only --user 0:0 --entrypoint sh \
         --label traefik.enable=false --label "com.octoleo.octojoom.playground=$token" --mount "$mount" "$image" -ceu '
         base=/octojoom-joomla
+        root=$base
+        [ "$1" = . ] || root="$base/$1"
         if [ "$5" = fresh ]; then
           [ -z "$(ls -A "$base")" ] || { echo "Website storage is already populated." >&2; exit 1; }
+        elif [ "$(CDPATH= cd -P "$root" && pwd -P)" != "$root" ]; then
+          echo "The selected Joomla document root is missing or traverses a symbolic link." >&2; exit 1
         fi
         free=$(df -Pk "$base" | awk "END{print \$4}")
         required=$(( ($4 + 1023) / 1024 ))
         if [ "$5" = replace ]; then
-          usage=$(du -sk "$base")
+          usage=$(du -sk "$root")
           reclaim=${usage%%[!0-9]*}
           [ -n "$reclaim" ] && [ "$((free + reclaim))" -ge "$required" ] || {
             echo "Insufficient space for the replacement website files." >&2; exit 1;
           }
-          find "$base" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          find "$root" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
           # Other hard links or filesystem reservations can reduce reclaimed
           # space. Confirm actual capacity after the deliberate in-place clear.
           free=$(df -Pk "$base" | awk "END{print \$4}")
         fi
         [ "$free" -ge "$required" ] || { echo "Insufficient space for the website files." >&2; exit 1; }
-        root=$base
-        if [ "$1" != . ]; then root="$base/$1"; mkdir -p "$root"; fi
+        ownership=$root
+        if [ "$5" = fresh ]; then mkdir -p "$root"; ownership=$base; fi
         uid=${2:-$(id -u www-data)}; gid=${3:-$(id -g www-data)}
         tar -xf - -C "$root"
-        chmod -R u=rwX,go=rX "$base"
+        chmod -R u=rwX,go=rX "$ownership"
         chmod 640 "$root/configuration.php"
-        chown -R "$uid:$gid" "$base"
+        chown -R "$uid:$gid" "$ownership"
       ' sh "$relative" "${uid#\#}" "${gid#\#}" "$file_bytes" "$mode"
   )
 }
@@ -13205,20 +13212,26 @@ function joomlaPlaygroundClearDatabase() {
   local scope="${2:-tables}" statements="$1/clear-${2:-tables}.sql"
   case "$VDM_DB_ENGINE" in mariadb|mysql) ;; *) return 1;; esac
   case "$scope" in programs|tables) ;; *) return 1;; esac
-  printf "SET SESSION sql_mode='NO_BACKSLASH_ESCAPES';\n" > "$statements" || return 1
   if [ "$scope" = programs ]; then
-    joomlaDatabaseClient query >> "$statements" <<'SQL' || return 1
+    joomlaDatabaseClient query > "$statements" <<'SQL' || return 1
 SELECT CONCAT('DROP EVENT IF EXISTS `', REPLACE(EVENT_NAME,'`','``'), '`;') FROM information_schema.EVENTS WHERE EVENT_SCHEMA=DATABASE();
 SELECT CONCAT('DROP ', ROUTINE_TYPE, ' IF EXISTS `', REPLACE(ROUTINE_NAME,'`','``'), '`;') FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=DATABASE() AND ROUTINE_TYPE IN ('FUNCTION','PROCEDURE');
 SQL
+    # Inventory is read-only. Mark the write boundary only when there are
+    # scheduled events or stored programs to remove from the selected schema.
+    [ -s "$statements" ] || return 0
+    : > "$1/import-writing" || return 1
   else
-    printf 'SET FOREIGN_KEY_CHECKS=0;\n' >> "$statements" || return 1
+    printf 'SET FOREIGN_KEY_CHECKS=0;\n' > "$statements" || return 1
     joomlaDatabaseClient query >> "$statements" <<'SQL' || return 1
 SELECT CONCAT('DROP ', IF(TABLE_TYPE='VIEW','VIEW','TABLE'), ' IF EXISTS `', REPLACE(TABLE_NAME,'`','``'), '`;') FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() ORDER BY TABLE_TYPE DESC, TABLE_NAME;
 SQL
     printf 'SET FOREIGN_KEY_CHECKS=1;\n' >> "$statements" || return 1
   fi
-  joomlaDatabaseClient sql < "$statements" >/dev/null
+  (
+    set -o pipefail
+    { printf "SET SESSION sql_mode='NO_BACKSLASH_ESCAPES';\n" && cat "$statements"; } | joomlaDatabaseClient sql >/dev/null
+  )
 }
 
 # Both destinations use this import step with the normal site Compose context.
@@ -13294,12 +13307,12 @@ function joomlaPlaygroundImportPackage() {
       tables=$(joomlaDatabaseTablesResolved) || exit 1
       [ -z "$tables" ] || { printf 'The destination database already contains tables.\n' >&2; exit 1; }
     fi
-    : > "$work/import-writing" || exit 1
     if [ "$mode" = replace ]; then
       printf 'database-programs\n' > "$work/import-stage" || exit 1
       joomlaPlaygroundClearDatabase "$work" programs || exit 1
     fi
     printf 'files\n' > "$work/import-stage" || exit 1
+    : > "$work/import-writing" || exit 1
     helpers_started=true
     joomlaPlaygroundImportWebsite "$prepared/site" "$mount" "$image" "$relative" "$bytes" "$token" "$mode" || exit 1
     if [ "$mode" = replace ]; then
@@ -14032,7 +14045,7 @@ function joomlaPlaygroundReplaceSite() {
     kind=$(joomlaSiteJSON -er .type < "$work/web/mount.json") && source=$(joomlaSiteJSON -er .source < "$work/web/mount.json") || exit 1
     [ "$kind" != bind ] || source=$(joomlaWebHostPath "$source") || exit 1
     mount="type=$kind,src=$source,dst=/octojoom-joomla"
-    joomlaDatabaseCopyConfiguration "$site" "$work/target-configuration.php" &&
+    joomlaDatabaseConfigurationFile "$site" read-contained "$work/target-configuration.php" &&
       joomlaPlaygroundConfigureImport "$prepared" "$work/target-configuration.php" "$VDM_DB_HOST" "$VDM_DB_DRIVER" \
         "$VDM_DB_NAME" "$VDM_DB_USER" "$VDM_DB_PASSWORD" "$root" || exit 1
     joomlaPlaygroundCheckOriginalSite "$site" "$work" "$compose" "$old_env" "$old_digest" "$enabled" "$mirror" "$project" || exit 1
@@ -14054,7 +14067,7 @@ function joomlaPlaygroundReplaceSite() {
     stage=preflight
     joomlaPlaygroundCheckOriginalSite "$site" "$work" "$compose" "$old_env" "$old_digest" "$enabled" "$mirror" "$project" &&
       joomlaPlaygroundReplacementStorage "$site" "$work" "$prepared" "$archive" "$directory" "$compose" "$old_env" "$mirror" && joomlaPlaygroundCheckIni "$work" || exit 1
-    if ! joomlaDatabaseCopyConfiguration "$site" "$work/current-configuration.php" ||
+    if ! joomlaDatabaseConfigurationFile "$site" read-contained "$work/current-configuration.php" ||
       ! cmp -s "$work/target-configuration.php" "$work/current-configuration.php"; then
       printf 'The destination Joomla configuration changed during import preparation.\n' >&2; exit 1
     fi

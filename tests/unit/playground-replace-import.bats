@@ -58,7 +58,9 @@ setup() {
       [ "$7" = existing-password ] && [ "$8" = /var/www/html ] || return 1
     printf 'configure\n' >> "$TX_EVENTS"
   }
-  joomlaDatabaseCopyConfiguration() { cp "$TX_PROJECT/joomla/content" "$2"; }
+  joomlaDatabaseConfigurationFile() {
+    [ "$1" = "$TX_SITE" ] && [ "$2" = read-contained ] && cp "$TX_PROJECT/joomla/content" "$3"
+  }
   joomlaPHPValidateIni() { return 0; }
   joomlaPHPIniShared() { unexpected_call php-ownership "$1" "$2"; }
   joomlaPlaygroundPlanReplacement() {
