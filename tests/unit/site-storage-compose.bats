@@ -162,24 +162,19 @@ storage_original_snapshot() {
   assert_command '^docker ps -aq$'
 }
 
-@test "in-place ownership permits the selected project to mount its exact store at another target" {
+@test "persistence conversion refuses a configured same-project mount at another target" {
   storage_render_fixture
   joomlaSiteJSON '.services.worker={image:"busybox:latest",volumes:[
     .services.web.volumes[0] | .target="/srv/application"]}' \
     < "$SANDBOX/model.json" > "$SANDBOX/aliases.json"
   mv "$SANDBOX/aliases.json" "$SANDBOX/model.json"
 
-  # Moving persistence still needs matching targets; in-place import keeps
-  # every owned mount intact and pauses all writers belonging to the selected site.
   run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html
   assert_failure
   assert_output_contains 'Storage is shared or overlaps another mount'
-  run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html true
-  assert_success
-  assert_equal "$output" ''
 }
 
-@test "in-place ownership permits actual same-project aliases but persistence changes still refuse them" {
+@test "persistence conversion refuses an actual same-project mount at another target" {
   storage_render_fixture
   joomlaSiteJSON -nc --arg source "$VDM_PROJECT_PATH/alpha/joomla" '[
     {Id:"own-web",Mounts:[{Type:"bind",Source:$source,Destination:"/var/www/html"}]},
@@ -197,18 +192,15 @@ storage_original_snapshot() {
   run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html
   assert_failure
   assert_output_contains 'Another container shares this storage.'
-  run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html true
-  assert_success
-  assert_equal "$output" ''
 }
 
-@test "in-place ownership still refuses an exact store declared by a different project" {
+@test "persistence conversion refuses an exact store declared by a different project" {
   storage_render_fixture
   local other="$VDM_REPO_PATH/joomla/available/neighbor.example.test"
   mkdir "$other"
   cp "$compose" "$other/docker-compose.yml"
   cp "$directory/.env" "$other/.env"
-  run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html true
+  run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html
   assert_failure
   assert_output_contains 'Storage is shared or overlaps another mount (neighbor.example.test)'
 }
@@ -238,12 +230,9 @@ storage_original_snapshot() {
       *) return 99;;
     esac
   }
-  local allow_same_project
-  for allow_same_project in false true; do
-    run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html "$allow_same_project"
-    assert_failure
-    assert_output_contains 'Another container shares this storage.'
-  done
+  run joomlaPersistenceCheckShared "$site" bind "$VDM_PROJECT_PATH/alpha/joomla" /var/www/html
+  assert_failure
+  assert_output_contains 'Another container shares this storage.'
 }
 
 @test "real Compose original-state checks accept an unchanged model and reject a changed external service environment" {
@@ -274,7 +263,7 @@ YAML
   assert_equal "$(joomlaSiteJSON -r '.services.web.environment.DEPLOYMENT_MARKER' < "$original_work/current-model.json")" changed
 }
 
-@test "real Compose cannot turn an incomplete stopped neighbor environment into safe storage" {
+@test "persistence conversion refuses an incomplete stopped neighbor environment with real Compose" {
   storage_real_compose
   local other=neighbor.example.test neighbor="$VDM_REPO_PATH/joomla/available/neighbor.example.test"
   mkdir "$neighbor"

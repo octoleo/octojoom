@@ -11367,7 +11367,6 @@ function joomlaStorageComposeModel() {
 # shellcheck disable=SC2016
 function joomlaPersistenceCheckShared() {
   local site="$1" kind="$2" storage="$3" target="$4" other model type path mount ids containers own rows container owned id env_file compose_file
-  local same_project="${5:-false}"
   [ "$kind" != bind ] || storage=$(joomlaPersistenceCanonicalPath "$storage") || return 1
   for other in "$VDM_REPO_PATH/joomla/available/"*/docker-compose.yml; do
     [ -f "$other" ] || continue
@@ -11382,7 +11381,7 @@ function joomlaPersistenceCheckShared() {
       [ -n "$type" ] || continue
       [ "$type" != bind ] || path=$(joomlaPersistenceCanonicalPath "$path") || return 1
       if [ "$other" = "$site" ] && [ "$type" = "$kind" ] && [ "$path" = "$storage" ] &&
-        { [ "$mount" = "$target" ] || [ "$same_project" = true ]; }; then continue; fi
+        [ "$mount" = "$target" ]; then continue; fi
       if [ "$type" = "$kind" ] && { [ "$path" = "$storage" ] || { [ "$kind" = bind ] && [[ "$path/" = "$storage/"* || "$storage/" = "$path/"* ]]; }; }; then
         printf 'Storage is shared or overlaps another mount (%s); separate it before changing persistence.\n' "$other" >&2; return 1
       fi
@@ -11401,7 +11400,7 @@ function joomlaPersistenceCheckShared() {
     if [ "$path" = "$storage" ] || { [ "$kind" = bind ] && [[ "$path/" = "$storage/"* || "$storage/" = "$path/"* ]]; }; then
       owned=false
       while IFS= read -r id; do [[ -z "$id" || "$container" != "$id"* ]] || owned=true; done <<< "$own"
-      if ! "$owned" || { [ "$mount" != "$target" ] && [ "$same_project" != true ]; }; then
+      if ! "$owned" || [ "$mount" != "$target" ]; then
         printf 'Another container shares this storage. Separate that deployment before changing persistence.\n' >&2; return 1
       fi
     fi
