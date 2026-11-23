@@ -8761,10 +8761,12 @@ function joomlaBackupRestoreWebsiteVolume() {
 # it never enables a website or leaves its application service running.
 function joomlaBackupResume() {
   local site="$1" previous="$2" database="$3" db_started="$4" service status=0
-  if [ "$db_started" = true ]; then joomlaSiteCompose "$site" stop "$database" >/dev/null 2>&1 || status=$?; fi
+  shift 4
+  if [ "$#" -eq 0 ]; then set -- joomlaSiteCompose "$site"; fi
+  if [ "$db_started" = true ]; then "$@" stop "$database" >/dev/null 2>&1 || status=$?; fi
   while IFS= read -r service; do
     [ -n "$service" ] || continue
-    joomlaSiteCompose "$site" start "$service" >/dev/null 2>&1 || status=$?
+    "$@" start "$service" >/dev/null 2>&1 || status=$?
   done <<< "$previous"
   return "$status"
 }
@@ -8784,6 +8786,13 @@ function joomlaBackupCreateAction() {
     set +x
     umask 077
     local site="$1" archive="$2" scope="${3:-full}" format="${4:-tar.gz}" overwrite="${5:-false}"
+    local -a backup_compose=(joomlaSiteCompose "$site")
+    if [ -n "${7:-}" ]; then
+      # Replacement has already identified this project. Keep nested database
+      # discovery and service changes on it even if its public definition changes.
+      local -x COMPOSE_PROJECT_NAME="$7"
+      backup_compose+=(--project-name "$7")
+    fi
     local package='' temporary='' lock='' running='' database='' db_started=false paused=false result=0 config engine=none backup_prefix='' source_lock='' source_locked=false key env_key project relative name value digest suffix original='' original_digest=''
     case "$scope:$format" in full:tar.gz|website:tar.gz|database:tar.gz|files:tar.gz|full:zip|website:zip|database:zip|files:zip) ;; *) joomlaBackupError 'Choose full, website, database or files scope and tar.gz or zip format.'; exit 17;; esac
     command -v jq >/dev/null 2>&1 || { joomlaBackupError 'Backup inspection requires jq.'; exit 1; }
@@ -8808,7 +8817,7 @@ function joomlaBackupCreateAction() {
     trap 'exit 143' TERM HUP
     trap '
       result=$?
-      if "$paused"; then joomlaBackupResume "$site" "$running" "$database" "$db_started" || { joomlaBackupError "Source services could not be returned to their prior state."; result=1; }; fi
+      if "$paused"; then joomlaBackupResume "$site" "$running" "$database" "$db_started" "${backup_compose[@]}" || { joomlaBackupError "Source services could not be returned to their prior state."; result=1; }; fi
       [ -z "$package" ] || runPrivileged rm -rf -- "$package"
       [ -z "$temporary" ] || rm -f -- "$temporary" "$temporary.sha256"
       if [ -n "$original" ] && [ -f "$original" ]; then mv -f -- "$original" "$archive" || result=1; fi
@@ -8821,7 +8830,7 @@ function joomlaBackupCreateAction() {
     key="${VDM_SITE_KEY:-unknown}" env_key="${VDM_SITE_ENV_KEY:-UNKNOWN}"
     project="$key"
     if getJoomlaComposeIdentity "$VDM_SITE_COMPOSE"; then project="${VDM_SRC_PROJECT_FOLDER:-$key}"; fi
-    config=$(joomlaSiteCompose "$site" config --format json 2>/dev/null) || exit $?
+    config=$("${backup_compose[@]}" config --format json 2>/dev/null) || exit $?
     database=$(printf '%s' "$config" | joomlaSiteJSON -r '[.services|to_entries[]|select((.value.image//"")|test("(^|/)(mysql|mariadb|postgres)(:|@|$)"))|.key]|if length==1 then .[0] else empty end') || exit 1
     if [ "$scope" != files ] && [ -z "$database" ]; then joomlaBackupError 'A single local supported database service is required.'; exit 1; fi
     package=$(mktemp -d "${TMPDIR:-/tmp}/octojoom-backup.XXXXXX") || exit 1
@@ -8836,15 +8845,15 @@ function joomlaBackupCreateAction() {
       joomlaBackupDependencies "$site" "$package" "$config" "$database" "$project_root" || exit 1
     fi
     actionProgressStep 15 'Pausing website writes for a consistent backup.'
-    running=$(joomlaSiteCompose "$site" ps --status running --services 2>/dev/null) || exit $?
+    running=$("${backup_compose[@]}" ps --status running --services 2>/dev/null) || exit $?
     paused=true
     while IFS= read -r name; do
-      [ -z "$name" ] || [ "$name" = "$database" ] || joomlaSiteCompose "$site" stop "$name" >/dev/null || exit $?
+      [ -z "$name" ] || [ "$name" = "$database" ] || "${backup_compose[@]}" stop "$name" >/dev/null || exit $?
     done <<< "$running"
     if [ "$scope" != files ]; then
       if ! printf '%s\n' "$running" | grep -qxF "$database"; then
         db_started=true
-        joomlaSiteCompose "$site" up -d --no-deps "$database" >/dev/null || exit $?
+        "${backup_compose[@]}" up -d --no-deps "$database" >/dev/null || exit $?
       fi
       actionProgressStep 25 'Waiting for the database to accept an export connection.'
       local attempt ready=false
@@ -8863,7 +8872,7 @@ function joomlaBackupCreateAction() {
     actionProgressStep 55 'Copying website files and deployment configuration.'
     [ "$scope" = database ] || joomlaBackupCopyWebsite "$package/project/joomla" || exit $?
     actionProgressStep 65 'Returning source services to their previous state.'
-    joomlaBackupResume "$site" "$running" "$database" "$db_started" || exit $?
+    joomlaBackupResume "$site" "$running" "$database" "$db_started" "${backup_compose[@]}" || exit $?
     paused=false
     relative="${VDM_SITE_DOCROOT#"$VDM_SITE_MOUNT_TARGET"}"; relative="${relative#/}"; relative="${relative:-.}"
     for suffix in FORMAT CONTAINER KEY ENV_KEY PROJECT_FOLDER SCOPE PAYLOAD DB_ENGINE DB_PREFIX CREATED LABEL DOCROOT; do
@@ -9359,7 +9368,7 @@ function joomlaBackupRestoreCurrentAction() {
     old_engine="$VDM_DB_ENGINE" host="$VDM_DB_HOST" dbname="$VDM_DB_NAME" dbuser="$VDM_DB_USER" dbpass="$VDM_DB_PASSWORD" prefix="$VDM_DB_PREFIX"
     if [ "$old_engine" = postgres ]; then driver=pgsql; else driver=mysqli; fi
     case "$engine:$old_engine:$scope" in none:*:files|postgres:postgres:*|mysql:mysql:*|mariadb:mariadb:*|mysql:mariadb:*|mariadb:mysql:*) ;; *) joomlaBackupError 'Cross-family database restoration is unsupported.'; exit 17;; esac
-    joomlaDatabaseConfigurationFile "$site" read-contained "$work/target-configuration.php" &&
+    joomlaDatabaseCopyConfiguration "$site" "$work/target-configuration.php" || exit 1
     cp "$original_compose" "$work/original.yml" && cp "$original_env" "$work/original.env" || exit 1
     [ ! -f "$original_dir/.env" ] || : > "$work/had-private-env"
     joomlaSiteCompose "$site" stop >/dev/null || exit $?
@@ -10861,7 +10870,7 @@ function readJoomlaSiteFacts() {
   if command -v jq >/dev/null 2>&1; then
     config=$(joomlaSiteCompose "$site" config --format json 2>/dev/null) || config=''
     printf '%s' "$config" | joomlaSiteJSON -e '.services | type=="object"' >/dev/null 2>&1 || config=''
-    if [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ]; then
+    if [ "${VDM_SITE_READ_ROUTES:-true}" = true ] && [ -f "${VDM_REPO_PATH}/traefik/docker-compose.yml" ]; then
       proxy=$(traefikRunCompose "$VDM_REPO_PATH/traefik/docker-compose.yml" config --format json 2>/dev/null) || proxy=''
       printf '%s' "$proxy" | joomlaSiteJSON -e '.services | type=="object"' >/dev/null 2>&1 || proxy=''
     fi
@@ -10942,8 +10951,11 @@ function readJoomlaSiteFacts() {
       image=$(printf '%s\n' "$block" | joomlaSourceScalar image)
     fi
     VDM_SITE_SERVICE_IMAGES+="${service}: ${image:-unknown}"$'\n'
-    candidate=$(joomlaRouteURL "$block" "$proxy")
-    [ -n "$candidate" ] || candidate=$(joomlaPublishedURL "$site" "$service" "$config")
+    candidate=''
+    if [ "${VDM_SITE_READ_ROUTES:-true}" = true ]; then
+      candidate=$(joomlaRouteURL "$block" "$proxy")
+      [ -n "$candidate" ] || candidate=$(joomlaPublishedURL "$site" "$service" "$config")
+    fi
     case "$image" in
       *phpmyadmin*|*adminer*) VDM_SITE_VIEWER_URL="$candidate" ;;
       *mailcatcher*|*mailpit*|*mailhog*) VDM_SITE_MAIL_URL="$candidate" ;;
@@ -13924,7 +13936,7 @@ function joomlaPlaygroundCreateReplacementBackup() {
     done
     VDM_DESTINATION="$directory"
     path=$(joomlaBackupFilename "$site") || return 1
-    joomlaBackupCreateAction "$site" "$path" full "$VDM_FORMAT" false true >/dev/null &&
+    joomlaBackupCreateAction "$site" "$path" full "$VDM_FORMAT" false true "$4" >/dev/null &&
       joomlaBackupVerifyAction "$path" >/dev/null || return 1
     printf '%s\n' "$path" > "$work/verified-backup"
   )
@@ -13965,9 +13977,11 @@ function joomlaPlaygroundReplaceSite() {
   (
     set +x
     umask 077
+    # Nested database and backup fact reads need the selected service and mounts only.
+    local VDM_SITE_READ_ROUTES=false
     local prepared="$1" site="$2" backup="$3" archive="${4:-}" stage=preflight reason='' verified='' enabled='' running=''
     local token='' work='' lock='' env_lock='' env_locked=false paused=false db_started=false destructive_started=false success=false status
-    local directory compose mirror='' database='' app='' web='' root image mount kind source ini service old_env old_digest project='' public_running=null
+    local directory compose mirror='' database='' app='' web='' root image mount kind source ini='' service old_env old_digest project='' public_running=null
     local -a previous_running=()
     case "$backup" in true|false) ;; *) exit 17;; esac
     resolveJoomlaSite "$site" || exit 1
@@ -13999,7 +14013,8 @@ function joomlaPlaygroundReplaceSite() {
           else reason+=" No backup was requested; the previous data cannot be restored by this import."; fi
         else
           reason="No website files or database contents were overwritten."
-          if "$paused" && ! joomlaBackupResume "$site" "$running" "$database" "$db_started"; then
+          if "$paused" && ! joomlaBackupResume "$site" "$running" "$database" "$db_started" \
+            joomlaPlaygroundOriginalCompose "$work" "$directory" "$project"; then
             reason+=" The previous service state could not be restored; inspect the selected project."; public_running=null
           fi
         fi
@@ -14062,7 +14077,7 @@ function joomlaPlaygroundReplaceSite() {
     done <<< "$running"
     if "$backup"; then
       stage=backup
-      joomlaPlaygroundCreateReplacementBackup "$site" "$work" "$token" && [ -s "$work/verified-backup" ] || exit 1
+      joomlaPlaygroundCreateReplacementBackup "$site" "$work" "$token" "$project" && [ -s "$work/verified-backup" ] || exit 1
     fi
     stage=preflight
     joomlaPlaygroundCheckOriginalSite "$site" "$work" "$compose" "$old_env" "$old_digest" "$enabled" "$mirror" "$project" &&

@@ -101,11 +101,19 @@ setup() {
     fi
     [ "$TX_FAULT" != import ]
   }
-  joomlaPlaygroundOriginalCompose() { shift 3; joomlaSiteCompose "$TX_SITE" "$@"; }
+  joomlaPlaygroundOriginalCompose() {
+    [ "$2" = "$TX_DIR" ] && [ "$3" = shop ] || { unexpected_call project "$@"; return $?; }
+    shift 3
+    local original_compose=true
+    joomlaSiteCompose "$TX_SITE" "$@"
+  }
   joomlaSiteCompose() {
     [ "$1" = "$TX_SITE" ] || { unexpected_call compose "$@"; return $?; }
     shift
     printf 'compose %s\n' "$*" >> "$TX_EVENTS"
+    if [ -f "$SANDBOX/project-changed" ] && [ "${original_compose:-false}" != true ]; then
+      unexpected_call edited-project "$@"; return $?
+    fi
     case "$1" in
       ps)
         case "$*" in
@@ -152,7 +160,7 @@ setup() {
   }
   joomlaPersistenceCheckShared() { unexpected_call ownership "$@"; }
   joomlaBackupCreateAction() {
-    [ "$1" = "$TX_SITE" ] && [ "$3" = full ] && [ "$6" = true ] || return 1
+    [ "$1" = "$TX_SITE" ] && [ "$3" = full ] && [ "$6" = true ] && [ "$7" = shop ] || return 1
     [ "$(cat "$TX_PROJECT/joomla/content")" = 'original web' ] &&
       [ "$(cat "$TX_PROJECT/db/content")" = 'original database' ] || return 1
     printf 'verified full backup fixture\n' > "$2" || return 1
@@ -162,6 +170,10 @@ setup() {
     [ -f "$1" ] || return 1
     printf 'backup-verified\n' >> "$TX_EVENTS"
     if [ "$TX_FAULT" = env-edit ]; then printf 'VDM_OTHER_NOTE="operator edit"\n' >> "$TX_ENV"; fi
+    if [ "$TX_FAULT" = project-edit ]; then
+      printf '\nname: otherproject\n' >> "$TX_DIR/docker-compose.yml"
+      : > "$SANDBOX/project-changed"
+    fi
     if [ "$TX_FAULT" = ini-edit ]; then printf 'operator ini edit' > "$TX_PROJECT/php.ini"; fi
     [ "$TX_FAULT" != backup ]
   }
@@ -444,6 +456,17 @@ assert_imported_data() {
   assert_failure
   assert_old_data
   assert_file_contains "$TX_ENV" 'operator edit'
+  refute_file_contains "$TX_EVENTS" import
+  assert_file_contains "$SANDBOX/running" app
+  assert_import_cleaned
+}
+
+@test "a project-name edit during backup resumes only the original project" {
+  TX_FAULT=project-edit
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" true
+  assert_failure
+  assert_old_data
+  assert_file_contains "$TX_DIR/docker-compose.yml" 'name: otherproject'
   refute_file_contains "$TX_EVENTS" import
   assert_file_contains "$SANDBOX/running" app
   assert_import_cleaned

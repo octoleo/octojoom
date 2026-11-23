@@ -49,6 +49,26 @@ YAML
   refute_output_contains 'secret'
 }
 
+@test "replacement reads the selected site facts without consulting the proxy or published routes" {
+  make_joomla_container alpha ALPHA first
+  site_proxy
+  local package="$SANDBOX/prepared"
+  mkdir "$package"
+  traefikRunCompose() { echo render >> "$SANDBOX/routes"; return 1; }
+  joomlaRouteURL() { echo route >> "$SANDBOX/routes"; return 1; }
+  joomlaPublishedURL() { echo port >> "$SANDBOX/routes"; return 1; }
+  joomlaDatabaseContext() {
+    readJoomlaSiteFacts "$1" || return 1
+    printf '%s\n' "$VDM_SITE_SERVICE" "$VDM_SITE_HOST_PATH" > "$SANDBOX/selected"
+    return 1
+  }
+  run joomlaPlaygroundReplaceSite "$package" first.vdm.dev false
+  assert_failure
+  assert_file_contains "$SANDBOX/selected" joomlaalpha
+  assert_file_contains "$SANDBOX/selected" "$VDM_PROJECT_PATH/alpha/joomla"
+  refute_file_exists "$SANDBOX/routes"
+}
+
 @test "site reads use their own effective ENV and never assign credential globals" {
   make_joomla_container alpha ALPHA first
   make_joomla_container beta BETA second
