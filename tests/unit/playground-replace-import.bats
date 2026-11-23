@@ -102,7 +102,7 @@ setup() {
     [ "$TX_FAULT" != import ]
   }
   joomlaPlaygroundOriginalCompose() {
-    [ "$2" = "$TX_DIR" ] && [ "$3" = shop ] || { unexpected_call project "$@"; return $?; }
+    if [ "$2" != "$TX_DIR" ] || [ "$3" != shop ]; then unexpected_call project "$@"; return $?; fi
     shift 3
     local original_compose=true
     joomlaSiteCompose "$TX_SITE" "$@"
