@@ -486,6 +486,11 @@ shared_import_standins() {
   printf '%s\n' 1234567890abcdef1234567890abcdef > "$work/token"
   VDM_DB_ENGINE=mariadb VDM_DB_HOST=db VDM_DB_DRIVER=mysqli VDM_DB_NAME=shop
   VDM_DB_USER=shop VDM_DB_PASSWORD=private-fixture-db
+  if [ "${1:-fresh}" = replace ]; then
+    cp "$prepared/site/configuration.php" "$work/existing.php"
+    joomlaPlaygroundConfigureImport "$prepared" "$work/existing.php" "$VDM_DB_HOST" "$VDM_DB_DRIVER" \
+      "$VDM_DB_NAME" "$VDM_DB_USER" "$VDM_DB_PASSWORD" /var/www/html
+  fi
   joomlaDatabaseDiscoverClients() { :; }
   joomlaPlaygroundWaitDatabase() { :; }
   joomlaDatabaseTablesResolved() { printf '%s' "${fixture_tables:-}"; }
@@ -537,8 +542,8 @@ shared_import_standins() {
   assert_equal "$(cat "$SANDBOX/import-order")" $'files:fresh\nsql\naccount'
   refute_file_exists "$SANDBOX/reset-query"
   : > "$SANDBOX/import-order"
-  cp "$prepared/site/configuration.php" "$work/existing.php"
-  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace "$work/existing.php"
+  joomlaPlaygroundConfigureImport() { return 93; }
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace
   assert_success
   assert_equal "$(cat "$SANDBOX/import-order")" $'programs\nfiles:replace\nclear\nsql\naccount'
   assert_file_contains "$SANDBOX/programs-query" 'WHERE EVENT_SCHEMA=DATABASE()'
@@ -548,6 +553,17 @@ shared_import_standins() {
   assert_file_exists "$work/import-writing"
   assert_equal "$(cat "$work/import-stage")" administrator
   refute_command '^docker .* (up|create|start|restart|down)( |$)'
+}
+
+@test "replacement requires its prepared Joomla configuration before clearing data" {
+  shared_import_standins replace
+  rm "$prepared/site/configuration.php"
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace
+  assert_failure
+  assert_output_contains 'prepared Joomla configuration'
+  assert_equal "$(cat "$work/import-stage")" configuration
+  refute_file_exists "$SANDBOX/import-order"
+  refute_file_exists "$work/import-writing"
 }
 
 @test "shared fresh import refuses a populated database before changing its website files" {
@@ -562,16 +578,13 @@ shared_import_standins() {
 
 @test "both targets run administrator updates as the website owner so Joomla caches remain writable" {
   shared_import_standins
-  cp "$prepared/site/configuration.php" "$work/existing.php"
-  local mode owner original VDM_PUID VDM_PGID
+  local mode owner VDM_PUID VDM_PGID
   for mode in fresh replace; do
-    original=''
-    [ "$mode" != replace ] || original="$work/existing.php"
     for owner in www-data:www-data 1234:5678 '#1234:#5678' 1234:www-data www-data:5678; do
       IFS=: read -r VDM_PUID VDM_PGID <<< "$owner"
       [ "$VDM_PUID" != www-data ] || VDM_PUID=''
       [ "$VDM_PGID" != www-data ] || VDM_PGID=''
-      run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount "$mode" "$original"
+      run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount "$mode"
       assert_success
       assert_equal "$(awk 'previous=="--user" {print; exit} {previous=$0}' "$SANDBOX/account-args")" "${owner//#/}"
     done
@@ -579,16 +592,15 @@ shared_import_standins() {
 }
 
 @test "a failed selected-database reset or SQL import cannot reach administrator setup" {
-  shared_import_standins
-  cp "$prepared/site/configuration.php" "$work/existing.php"
+  shared_import_standins replace
   fixture_clear_status=1
-  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace "$work/existing.php"
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace
   assert_failure
   assert_equal "$(cat "$SANDBOX/import-order")" $'programs\nfiles:replace\nclear'
   assert_equal "$(cat "$work/import-stage")" database-clear
   : > "$SANDBOX/import-order"
   fixture_clear_status=0 fixture_sql_status=1
-  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace "$work/existing.php"
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace
   assert_failure
   assert_output_contains 'database import failed'
   assert_equal "$(cat "$SANDBOX/import-order")" $'programs\nfiles:replace\nclear\nsql'
@@ -619,10 +631,9 @@ shared_import_standins() {
 }
 
 @test "old schema program removal must succeed before website files are replaced" {
-  shared_import_standins
+  shared_import_standins replace
   fixture_program_status=1
-  cp "$prepared/site/configuration.php" "$work/existing.php"
-  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace "$work/existing.php"
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace
   assert_failure
   assert_equal "$(cat "$SANDBOX/import-order")" programs
   assert_equal "$(cat "$work/import-stage")" database-programs
@@ -631,12 +642,11 @@ shared_import_standins() {
 }
 
 @test "replacement administrator uses the normal selected context and readable prepared PHP settings" {
-  shared_import_standins
-  cp "$prepared/site/configuration.php" "$work/existing.php"
+  shared_import_standins replace
   joomlaPHPPatchIni '' "$work/candidate.ini" memory_limit 768M
   local VDM_PHP_INI_TARGET=/usr/local/etc/php/conf.d/zz-octojoom.ini
   local VDM_DB_COMPOSE="$work/candidate.yml" VDM_DB_ENV="$work/published.env" VDM_DB_PROJECT_DIR="$SANDBOX/selected-site"
-  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace "$work/existing.php"
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace
   assert_success
   assert_file_contains "$SANDBOX/account-args" --volume
   assert_file_contains "$SANDBOX/account-args" "$(joomlaWebHostPath "$work/candidate.ini"):$VDM_PHP_INI_TARGET:ro"
