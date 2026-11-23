@@ -14,6 +14,7 @@ domain="$run_id.localhost"
 network="octojoom-pg-$run_id"
 ssh_network="octojoom-ssh-$run_id"
 proxy="octojoom-traefik-$run_id"
+retired_container="retired$run_id"
 route_file="octojoom-$run_id.txt"
 write_file="octojoom-$run_id.php"
 export OCTOJOOM_HOME="$work/home"
@@ -55,7 +56,7 @@ cleanup() {
     fi
   done
   if [ -f "$work/donor.yml" ]; then donor down -v --remove-orphans >/dev/null; fi
-  docker rm -f "$proxy" >/dev/null 2>&1
+  docker rm -f "$proxy" "$retired_container" >/dev/null 2>&1
   docker network rm "$network" "$ssh_network" >/dev/null 2>&1
   if ((EUID == 0)); then rm -rf -- "$work"; else sudo -n rm -rf -- "$work"; fi
   exit "$status"
@@ -361,30 +362,47 @@ VDM_RETIRED_NOTE='literal $value # preserved'
 ENV
 rm "$sites/new.$domain/.env"
 retired_dir="$sites/retired.$domain"
-mkdir "$retired_dir"
+malformed_dir="$sites/malformed.$domain"
+mkdir "$retired_dir" "$malformed_dir"
+# The retired site's private ENV lacks the variable needed to resolve its bind.
+printf 'VDM_RETIRED_DB=retired_fixture\n' > "$retired_dir/.env"
 cat > "$retired_dir/docker-compose.yml" <<YAML
 version: '3.8'
 services:
   retired:
     image: nginx:alpine
-    container_name: retired$run_id
+    container_name: $retired_container
     environment:
       RETIRED_DATABASE: \${VDM_RETIRED_DB}
       OPTIONAL_UNRELATED_SETTING: \${VDM_RETIRED_ABSENT}
     volumes:
       - "\${VDM_PROJECT_PATH}/retired-$run_id:/fixture:ro"
 YAML
-cp "$retired_dir/docker-compose.yml" "$work/retired-before.yml"
+printf 'services: [\n' > "$malformed_dir/docker-compose.yml"
+cp -R "$retired_dir" "$work/retired-before"
+cp -R "$malformed_dir" "$work/malformed-before"
+# A real exited container and the running proxy must retain their lifecycles.
+docker run --name "$retired_container" --network none \
+  --mount "type=bind,src=$retired_dir,dst=/fixture,readonly" traefik:v3.6 version >/dev/null
+unrelated_container_state() {
+  docker inspect --format '{{.Id}} {{.State.Status}} {{.State.StartedAt}} {{.State.FinishedAt}} {{.RestartCount}}' \
+    "$proxy" "$retired_container"
+}
+unrelated_container_state > "$work/unrelated-containers.before"
 sed "/^VDM_${first^^}_/d" "$shared_env" > "$work/shared-unrelated.env"
 assert_shared_environment() {
   [ "$(destination_env new)" = "$shared_env" ]
   [ ! -e "$sites/new.$domain/.env" ]
   sed "/^VDM_${first^^}_/d" "$shared_env" > "$work/shared-unrelated.current"
   cmp "$work/shared-unrelated.env" "$work/shared-unrelated.current"
-  cmp "$work/retired-before.yml" "$retired_dir/docker-compose.yml"
-  if docker container inspect "retired$run_id" >/dev/null 2>&1; then
-    echo 'A configured but retired neighbor was started.' >&2; return 1
-  fi
+}
+assert_unrelated_sites() {
+  diff -r "$work/retired-before" "$retired_dir"
+  diff -r "$work/malformed-before" "$malformed_dir"
+  [ ! -e "$OCTOJOOM_HOME/Docker/joomla/enabled/retired.$domain" ]
+  [ ! -e "$OCTOJOOM_HOME/Docker/joomla/enabled/malformed.$domain" ]
+  unrelated_container_state > "$work/unrelated-containers.current"
+  cmp "$work/unrelated-containers.before" "$work/unrelated-containers.current"
 }
 assert_clean_replacement_log() {
   if grep -Eq 'the attribute .version. is obsolete|variable is not set|Defaulting to a blank string' "$1"; then
@@ -593,6 +611,7 @@ original_db=$(destination new ps -q "mariadb$first")
 neighbor_ids=$(destination stopped ps --status running -q | sort)
 assert_preserved() {
   assert_shared_environment
+  assert_unrelated_sites
   cmp "$sites/new.$domain/docker-compose.yml" "$work/before/docker-compose.yml"
   storage_identity new "$first" > "$work/current-storage"
   cmp "$work/before/bind-storage" "$work/current-storage"
@@ -681,8 +700,10 @@ private_env=$(destination_env stopped)
 destination stopped stop >/dev/null
 new_neighbor_ids=$(destination new ps --status running -q | sort)
 started_after=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
-replace_site stopped "$renamed_package" "${without_backup[@]}" --input-json "$work/request.json"
+replace_site stopped "$renamed_package" "${without_backup[@]}" --input-json "$work/request.json" 2> "$work/stopped-replacement.log"
 jq -e '.success and .data.target=="current" and .data.backup==null and .data.running==false' "$work/result" >/dev/null
+assert_clean_replacement_log "$work/stopped-replacement.log"
+assert_unrelated_sites
 [ "$(destination_env stopped)" = "$private_env" ]
 [ ! -e "$OCTOJOOM_HOME/Docker/joomla/enabled/stopped.$domain" ]
 [ -z "$(destination stopped ps -q --status running)" ]
@@ -722,6 +743,7 @@ if replace_site new "$work/failing.zip" "${without_backup[@]}" 2> "$work/failed-
 fi
 jq -e '.success==false and .data.destructive_started==true and .data.backup==null' "$work/result" >/dev/null
 grep -Fq 'The Playground database import failed.' "$work/failed-in-place.log"
+assert_unrelated_sites
 [ -z "$(destination new ps -q --status running "joomla$first")" ]
 [ "$backup_listing" = "$(find "${backup%/*}" -maxdepth 1 -type f -print | sort)" ]
 resource_inventory > "$work/current-resources"
@@ -738,4 +760,5 @@ check_admin_login new shopmanager "$CONFIRMED_PASSWORD"
 storage_identity new "$first" > "$work/current-storage"
 cmp "$work/before/bind-storage" "$work/current-storage"
 assert_shared_environment
+assert_unrelated_sites
 echo 'Playground in-place import passed: unchanged bind/named storage, selected database, routing and custom settings; shared/private ENV; old-only files/tables removed; administrator login; verified backup, opt-out, failed-backup refusal and truthful import failure.'
