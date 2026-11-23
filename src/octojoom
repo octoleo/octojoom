@@ -13485,13 +13485,23 @@ function joomlaPlaygroundPlanReplacement() {
   image="$VDM_J_REPO:$VDM_JV"
   if [ "$image" = "$VDM_SITE_IMAGE" ]; then cp -- "$VDM_SITE_COMPOSE" "$work/with-image.yml" || return 1
   else siteReplaceServiceScalar "$VDM_SITE_COMPOSE" "$work/with-image.yml" "$VDM_SITE_SERVICE" image "$image" || return 1; fi
-  joomlaPlaygroundReplacementEnvironment "$work/with-image.yml" "$VDM_SITE_SERVICE" "$VDM_SITE_ENV_KEY" "$work/app-env" &&
-    joomlaSetServiceProperty "$work/with-image.yml" "$work/with-env.yml" "$VDM_SITE_SERVICE" environment "$work/app-env" || return 1
   siteWriteScopedEnv "$VDM_SITE_COMPOSE" "$VDM_SITE_ENV" "$VDM_SITE_ENV_KEY" "$work/candidate.env" || return 1
   joomlaPlaygroundReplaceEnv "$work/candidate.env" "$VDM_SITE_ENV_KEY" || return 1
   writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE=$image" true &&
     writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE_SOURCE=$VDM_J_REPO" true &&
     writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_IMAGE_TAG=$VDM_JV" true || return 1
+  # The updated site ENV may already supply the imported prefix. Preserve the
+  # original YAML verbatim when its effective application settings are ready.
+  joomlaStorageComposeModel "$site" "$work/candidate.env" "$work/with-image.yml" "$VDM_SITE_DIR" > "$work/import-env-model.json" || return 1
+  if joomlaSiteJSON -e --arg app "$VDM_SITE_SERVICE" --arg prefix "$VDM_J_DB_PREFIX" '
+    .services[$app].environment | .JOOMLA_DB_PREFIX==$prefix and
+    all(keys[]; test("^JOOMLA_(SITE_NAME|ADMIN_|EXTENSIONS_URLS|CLI_COMMANDS)")|not)
+  ' < "$work/import-env-model.json" >/dev/null; then
+    cp -- "$work/with-image.yml" "$work/with-env.yml" || return 1
+  else
+    joomlaPlaygroundReplacementEnvironment "$work/with-image.yml" "$VDM_SITE_SERVICE" "$VDM_SITE_ENV_KEY" "$work/app-env" &&
+      joomlaSetServiceProperty "$work/with-image.yml" "$work/with-env.yml" "$VDM_SITE_SERVICE" environment "$work/app-env" || return 1
+  fi
   joomlaPlaygroundReplacementIni "$site" "$work" "$image" "${4:-}" || return 1
   joomlaStorageComposeModel "$site" "$work/candidate.env" "$work/candidate.yml" "$VDM_SITE_DIR" > "$work/proposed.json" || return 1
   (
@@ -13503,8 +13513,8 @@ function joomlaPlaygroundPlanReplacement() {
     ' < proposed.json >/dev/null
   ) || { printf 'The import would change database storage, networking or the configured health check.\n' >&2; return 1; }
   joomlaSiteJSON -n --arg app "$VDM_SITE_SERVICE" --arg db "$VDM_DB_SERVICE" --arg web "$web" --arg root "$VDM_SITE_DOCROOT" \
-    --arg engine "$VDM_DB_ENGINE" --arg image "$image" --arg project "$project" --arg ini "$VDM_PHP_INI_TARGET" --arg driver "$VDM_DB_DRIVER" \
-    '{app:$app,db:$db,web:$web,root:$root,engine:$engine,image:$image,project:$project,ini:$ini,driver:$driver}' > "$work/services.json"
+    --arg image "$image" --arg project "$project" \
+    '{app:$app,db:$db,web:$web,root:$root,image:$image,project:$project}' > "$work/services.json"
 }
 
 
@@ -13717,10 +13727,23 @@ function joomlaPlaygroundInstallEnvironment() {
   (
     set +x
     umask 077
-    local source="$1" destination="$2" expected="$3" metadata="${4:-$1}" temporary='' status
-    [ -f "$source" ] && [ ! -L "$source" ] && [ -f "$metadata" ] && [ ! -L "$metadata" ] && [ ! -L "$destination" ] || exit 1
-    if [ "$expected" = - ]; then [ ! -e "$destination" ] || exit 1
-    else [ -f "$expected" ] && [ ! -L "$expected" ] && [ -f "$destination" ] || exit 1; fi
+    local source="$1" destination="$2" expected="$3" metadata temporary='' status
+    [ -f "$source" ] && [ ! -L "$source" ] && [ ! -L "$destination" ] || exit 1
+    if [ "$expected" = - ]; then
+      [ ! -e "$destination" ] || exit 1
+      metadata="$source"
+    else
+      [ -f "$expected" ] && [ ! -L "$expected" ] && [ -f "$destination" ] || exit 1
+      if ! cmp -s "$expected" "$destination"; then
+        printf 'The website configuration changed before its atomic update: %s\n' "$destination" >&2
+        exit 1
+      fi
+      # A bind mount of a single file retains its inode across container starts.
+      # Leave a compatible file in place and preserve each destination's own
+      # permissions and ownership when its contents actually need changing.
+      cmp -s "$source" "$expected" && exit 0
+      metadata="$destination"
+    fi
     temporary=$(mktemp -d "${destination%/*}/.octojoom-env.XXXXXXXX") || exit 1
     trap 'status=$?; trap - EXIT; runPrivileged rm -rf -- "$temporary" || status=1; exit "$status"' EXIT
     trap 'exit 130' INT
@@ -13729,7 +13752,7 @@ function joomlaPlaygroundInstallEnvironment() {
       runPrivileged cp -- "$source" "$temporary/environment" || exit 1
     if [ -L "$destination" ] || { [ "$expected" = - ] && [ -e "$destination" ]; } ||
       { [ "$expected" != - ] && ! cmp -s "$expected" "$destination"; }; then
-      printf 'The website environment changed before its atomic update: %s\n' "$destination" >&2
+      printf 'The website configuration changed before its atomic update: %s\n' "$destination" >&2
       exit 1
     fi
     runPrivileged mv -f -- "$temporary/environment" "$destination"
@@ -13988,21 +14011,21 @@ function joomlaPlaygroundReplaceSite() {
     destructive_started=true public_running=false
     stage=configuration
     joomlaPlaygroundCheckOriginalSite "$site" "$work" "$compose" "$old_env" "$old_digest" "$enabled" "$mirror" "$project" || exit 1
-    joomlaPlaygroundInstallEnvironment "$work/published.env" "$old_env" "$work/initial.env" "$work/initial.env" || exit 1
+    joomlaPlaygroundInstallEnvironment "$work/published.env" "$old_env" "$work/initial.env" || exit 1
     if [ -n "$mirror" ] && [ "$old_env" = "$directory/.env" ]; then
-      joomlaPlaygroundInstallEnvironment "$work/published-mirror.env" "$mirror/.env" "$work/initial-mirror.env" "$work/initial-mirror.env" || exit 1
+      joomlaPlaygroundInstallEnvironment "$work/published-mirror.env" "$mirror/.env" "$work/initial-mirror.env" || exit 1
     fi
     joomlaPlaygroundCheckIni "$work"/ini-*.path && IFS= read -r ini < "$work/ini-destination.path" || exit 1
     if [ -f "$work/ini-destination" ]; then
-      joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$ini" "$work/ini-destination" "$work/ini-destination" || exit 1
+      joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$ini" "$work/ini-destination" || exit 1
     else joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$ini" - || exit 1; fi
     # Atomic publication uses the same checked-file writer; no rollback journal.
-    joomlaPlaygroundInstallEnvironment "$work/candidate.yml" "$compose" "$work/initial-compose" "$work/initial-compose" || exit 1
+    joomlaPlaygroundInstallEnvironment "$work/candidate.yml" "$compose" "$work/initial-compose" || exit 1
     if [ -n "$mirror" ]; then
-      joomlaPlaygroundInstallEnvironment "$work/candidate.yml" "$mirror/docker-compose.yml" "$work/initial-compose" "$work/initial-compose" || exit 1
+      joomlaPlaygroundInstallEnvironment "$work/candidate.yml" "$mirror/docker-compose.yml" "$work/initial-compose" || exit 1
       if [[ "$ini" == "$directory/"* ]]; then
         if [ -f "$work/ini-mirror" ]; then
-          joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$mirror/${ini#"$directory/"}" "$work/ini-mirror" "$work/ini-mirror" || exit 1
+          joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$mirror/${ini#"$directory/"}" "$work/ini-mirror" || exit 1
         else joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$mirror/${ini#"$directory/"}" - || exit 1; fi
       fi
     fi
