@@ -164,13 +164,15 @@ atomic rename, preserving the file's mode. Concurrent imports for the same
 site or shared environment are serialized, and an operator edit detected
 before publication is preserved and reported.
 
-Storage checks establish ownership before any destructive operation. They
-consider both configured sites and actual Docker mounts, including stopped
-sites, so another site's storage cannot be overwritten. An unrelated Compose
-warning by itself does not cause refusal. Octojoom refuses a destination when
-it cannot establish safe ownership, such as an unresolved mount path or a
-shared website mount. It does not rewrite neighboring configurations to make
-them pass inspection.
+Before pausing writers and again before importing, Octojoom compares the
+selected project's website and database mounts with its Compose definition.
+It checks for overlapping data paths, unsupported nested mounts, and import
+inputs or deployment files inside the data being replaced. These checks use
+the selected site's effective environment. An incomplete registration for
+another site or an unrelated stopped container does not participate in the
+replacement. Use a website directory or named volume and a database schema
+dedicated to the selected site. Any other consumer intentionally pointed at
+those same files or schema will see the imported data.
 
 ### Service state and failures
 

@@ -55,7 +55,7 @@ On Linux, installed Docker Compose also validates generated configuration.
 | Configuration and dialogs | Secret persistence, literal input, permissions, validation, random values, and prompt cancellation |
 | Joomla setup | Single and bulk project-folder defaults, explicit named-volume opt-out, cancellation, generated Compose, environment values, and feature options |
 | Guided setup and defaults | One customization fork, saved-default precedence, manual versus automatic installation, headless preflight, and staged publication failures |
-| Playground packages | Package inspection and validation, menu and CLI consent, shared import through normal setup, in-place overwrite, selected-site storage ownership, existing environment location, neighboring-setting preservation, optional verified backup and explicit partial-import failures |
+| Playground packages | Package inspection and validation, menu and CLI consent, shared import through normal setup, in-place overwrite, selected-site mount identity and overlap checks, existing environment location, neighboring-setting preservation, optional verified backup and explicit partial-import failures |
 | Configuration alignment | Effective Compose equivalence, complete scoped ENV, custom-field preservation, idempotence, per-site batch failure reporting, and recoverable publication |
 | PHP runtime | Published-tag compatibility, measured runtime checks, selective INI changes, custom-directive preservation, stopped-site handling, and rollback |
 | Webserver and document root | Apache/Nginx configuration, companion mounts, routing preservation, supported root selection/moves, custom-layout refusal, and failed-change recovery |
@@ -179,7 +179,11 @@ must leave no archive, old storage copy, private stack or recovery directory.
 A failed-backup case checks that no destructive write begins. Failed imports
 must report failure; once writes begin, the site's writers stay stopped.
 Successful import resumes only the services that were previously running.
-Neighboring sites and settings remain unchanged.
+The fixture keeps two disabled registrations beside the destination. One lacks
+a storage variable and one contains malformed YAML. It compares their files
+and checks the identities and lifecycle timestamps of unrelated running and
+stopped containers after replacement. Portable tests record calls to the
+Compose and Docker helpers to catch attempts to inspect a neighbor.
 
 The fixture retains SQL numeric, binary and character-set checks and tests
 administrator changes against the imported account. Existing health probes
