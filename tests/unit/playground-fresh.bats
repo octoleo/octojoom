@@ -440,6 +440,42 @@ fresh_command() {
   assert_equal "$output" ':'
 }
 
+@test "website replacement confines clearing, permissions and ownership to the selected nested root" {
+  local mount="$SANDBOX/mount" incoming="$SANDBOX/incoming" token=1234567890abcdef1234567890abcdef
+  mkdir -p "$mount/store/public" "$incoming"
+  mount=$(cd "$mount" && pwd -P)
+  printf 'previous' > "$mount/store/public/old-only"
+  printf 'neighbour' > "$mount/store/private"
+  printf 'new configuration' > "$incoming/configuration.php"
+  if ! is_windows; then chmod 600 "$mount/store/private"; fi
+  local VDM_PUID VDM_PGID
+  VDM_PUID=$(id -u)
+  VDM_PGID=$(id -g)
+  docker() {
+    # Execute the guest's real import commands against the disposable mount.
+    while [ "$#" -gt 0 ] && [ "$1" != -ceu ]; do shift; done
+    [ "$#" -ge 2 ] || return 1
+    local script="$2"
+    shift 2
+    sh -ceu "${script/base=\/octojoom-joomla/base=\$OCTOJOOM_TEST_MOUNT}" "$@"
+  }
+  export OCTOJOOM_TEST_MOUNT="$mount"
+  run joomlaPlaygroundImportWebsite "$incoming" web image store/public 0 "$token" replace
+  assert_success
+  refute_file_exists "$mount/store/public/old-only"
+  assert_equal "$(cat "$mount/store/public/configuration.php")" 'new configuration'
+  assert_equal "$(cat "$mount/store/private")" neighbour
+  if ! is_windows; then
+    assert_equal "$(file_mode "$mount/store/private")" 600
+    ln -s store "$mount/alias"
+    run joomlaPlaygroundImportWebsite "$incoming" web image alias/public 0 "$token" replace
+    assert_failure
+    assert_output_contains 'symbolic link'
+    assert_equal "$(cat "$mount/store/public/configuration.php")" 'new configuration'
+    assert_equal "$(cat "$mount/store/private")" neighbour
+  fi
+}
+
 @test "fresh MySQL bootstrap provisions literal credentials without changing the final Compose model" {
   local work="$SANDBOX/import"
   mkdir "$work"
@@ -628,6 +664,20 @@ shared_import_standins() {
   assert_equal "$(cat "$work/import-stage")" files
   assert_file_exists "$work/import-writing"
   refute_file_exists "$SANDBOX/account-args"
+}
+
+@test "a failed read-only schema inventory keeps replacement before its first write" {
+  shared_import_standins replace
+  joomlaDatabaseClient() {
+    [ "$1" = query ] && cat > "$SANDBOX/inventory-query"
+    return 1
+  }
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace
+  assert_failure
+  assert_file_contains "$SANDBOX/inventory-query" 'FROM information_schema.EVENTS'
+  assert_equal "$(cat "$work/import-stage")" database-programs
+  refute_file_exists "$work/import-writing"
+  refute_file_exists "$SANDBOX/import-order"
 }
 
 @test "old schema program removal must succeed before website files are replaced" {
