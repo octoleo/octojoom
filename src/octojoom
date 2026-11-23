@@ -13367,8 +13367,8 @@ function joomlaPlaygroundSnapshotIni() {
 
 function joomlaPlaygroundCheckIni() {
   local entry path
-  [ "$#" -gt 0 ] || return 1
-  for entry in "$@"; do
+  for entry in "$1"/ini-*.path; do
+    [ -e "$entry" ] || continue
     if IFS= read -r path < "$entry" && ! migrationPathHasSymlink "$path"; then
       if [ -f "${entry%.path}" ]; then
         [ -f "$path" ] && cmp -s "${entry%.path}" "$path" && continue
@@ -13385,8 +13385,8 @@ function joomlaPlaygroundCheckIni() {
 # /var/www/html/php.ini mounts. Move the mount to the selected image's scan dir.
 # shellcheck disable=SC2016
 function joomlaPlaygroundReplacementIni() {
-  local site="$1" work="$2" image="$3" mirror="${4:-}" mounts source='' old_target='' destination host setting variable
-  local -a changes=()
+  local site="$1" work="$2" image="$3" mirror="${4:-}" mounts source='' old_target='' destination host setting variable value snapshot='' current
+  local -a changes=() requested=()
   mounts=$(joomlaSiteJSON -ce --arg app "$VDM_SITE_SERVICE" '[.services[$app].volumes[]? |
     select((.target | endswith("/php.ini")) or (.target | endswith("/zz-octojoom.ini")))] |
     select(length<=1 and all(.[]; .type=="bind"))' < "$work/original-model.json") || {
@@ -13396,39 +13396,48 @@ function joomlaPlaygroundReplacementIni() {
     source=$(joomlaSiteJSON -er '.[0].source' <<< "$mounts") || return 1
     source=$(joomlaBackupFilesystemPath "$source") || return 1
     old_target=$(joomlaSiteJSON -er '.[0].target' <<< "$mounts") || return 1
-    [ -f "$source" ] && ! migrationPathHasSymlink "$source" || return 1
-  fi
-  destination=$(joomlaPHPIniDestination "$site" "$source" "$(cat "$work/original-model.json")") || return 1
-  joomlaPlaygroundSnapshotIni "$destination" "$work/ini-destination" || return 1
-  if [ -n "$source" ]; then
-    if [ "$source" = "$destination" ]; then
-      source="$work/ini-destination"
-    else
-      joomlaPlaygroundSnapshotIni "$source" "$work/ini-source" || return 1
-      source="$work/ini-source"
-    fi
-  fi
-  if [[ -n "$mirror" && "$destination" == "$VDM_SITE_DIR/"* ]]; then
-    joomlaPlaygroundSnapshotIni "$mirror/${destination#"$VDM_SITE_DIR/"}" "$work/ini-mirror" || return 1
+    snapshot="$work/ini-source"
+    [ -f "$source" ] && joomlaPlaygroundSnapshotIni "$source" "$snapshot" || return 1
   fi
   if [ "${VDM_PHP_SETTINGS:-true}" != false ]; then
     for setting in max_execution_time max_input_time max_input_vars error_reporting upload_max_filesize post_max_size memory_limit; do
       variable="VDM_${setting}"
       cliHasValue "$variable" || continue
-      changes+=("$setting" "${!variable}")
-      writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_PHP_${setting^^}=${!variable}" true || return 1
+      value="${!variable}"
+      joomlaPHPValidateValue "$setting" "$value" || { printf 'Invalid PHP value for %s.\n' "$setting" >&2; return 1; }
+      requested+=("$setting" "$value")
+      current=''
+      if [ -n "$snapshot" ]; then current=$(joomlaPHPReadValue "$snapshot" "$setting") || return 1; fi
+      if [ -z "$current" ] || [ "$current" != "$value" ]; then changes+=("$setting" "$value"); fi
+      writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_PHP_${setting^^}=$value" true || return 1
     done
   fi
-  if [ "${#changes[@]}" -gt 0 ]; then
+  if [ "${#requested[@]}" -gt 0 ]; then
     writeEnvVariable "$work/candidate.env" "VDM_${VDM_SITE_ENV_KEY}_PHP_CUSTOM=true" true || return 1
-  fi
-  joomlaPHPPatchIni "$source" "$work/candidate.ini" "${changes[@]}" || return 1
-  joomlaPHPValidateIni "$image" "$work/candidate.ini" "$VDM_PHP_INI_TARGET" "${changes[@]}" || return 1
-  host=$(joomlaWebHostPath "$destination") || return 1
-  if [ "$old_target" = "$VDM_PHP_INI_TARGET" ] && [ "$source" = "$work/ini-destination" ]; then
+  elif [ -z "$source" ]; then
     cp -- "$work/with-env.yml" "$work/candidate.yml"
     return $?
   fi
+  joomlaPHPPatchIni "$snapshot" "$work/candidate.ini" "${changes[@]}" || return 1
+  joomlaPHPValidateIni "$image" "$work/candidate.ini" "$VDM_PHP_INI_TARGET" "${requested[@]}" || return 1
+  destination="$source"
+  if [ "${#changes[@]}" -gt 0 ]; then
+    # Keep per-site files in their selected registration or project. Copy
+    # external overrides before applying changes so their other users keep them.
+    if [ "$source" != "$VDM_SITE_DIR/php.ini" ]; then
+      destination=$(joomlaPHPProjectIni "$site") || return 1
+      if [[ "$destination" == */bulk/php.ini ]]; then destination="$VDM_SITE_DIR/php.ini"; fi
+    fi
+    [ -d "${destination%/*}" ] && joomlaPlaygroundSnapshotIni "$destination" "$work/ini-destination" || return 1
+    if [[ -n "$mirror" && "$destination" == "$VDM_SITE_DIR/"* ]]; then
+      joomlaPlaygroundSnapshotIni "$mirror/${destination#"$VDM_SITE_DIR/"}" "$work/ini-mirror" || return 1
+    fi
+  fi
+  if [ "$old_target" = "$VDM_PHP_INI_TARGET" ] && [ "$source" = "$destination" ]; then
+    cp -- "$work/with-env.yml" "$work/candidate.yml"
+    return $?
+  fi
+  host=$(joomlaWebHostPath "$destination") || return 1
   joomlaPHPReplaceMount "$work/with-env.yml" "$work/candidate.yml" "$VDM_SITE_SERVICE" "$old_target" "$host" "$VDM_PHP_INI_TARGET"
 }
 
@@ -13994,7 +14003,7 @@ function joomlaPlaygroundReplaceSite() {
     fi
     stage=preflight
     joomlaPlaygroundCheckOriginalSite "$site" "$work" "$compose" "$old_env" "$old_digest" "$enabled" "$mirror" "$project" &&
-      joomlaPlaygroundReplacementStorage "$site" "$work" && joomlaPlaygroundCheckIni "$work"/ini-*.path || exit 1
+      joomlaPlaygroundReplacementStorage "$site" "$work" && joomlaPlaygroundCheckIni "$work" || exit 1
     if ! joomlaDatabaseCopyConfiguration "$site" "$work/current-configuration.php" ||
       ! cmp -s "$work/target-configuration.php" "$work/current-configuration.php"; then
       printf 'The destination Joomla configuration changed during import preparation.\n' >&2; exit 1
@@ -14015,15 +14024,18 @@ function joomlaPlaygroundReplaceSite() {
     if [ -n "$mirror" ] && [ "$old_env" = "$directory/.env" ]; then
       joomlaPlaygroundInstallEnvironment "$work/published-mirror.env" "$mirror/.env" "$work/initial-mirror.env" || exit 1
     fi
-    joomlaPlaygroundCheckIni "$work"/ini-*.path && IFS= read -r ini < "$work/ini-destination.path" || exit 1
-    if [ -f "$work/ini-destination" ]; then
-      joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$ini" "$work/ini-destination" || exit 1
-    else joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$ini" - || exit 1; fi
+    joomlaPlaygroundCheckIni "$work" || exit 1
+    if [ -f "$work/ini-destination.path" ]; then
+      IFS= read -r ini < "$work/ini-destination.path" || exit 1
+      if [ -f "$work/ini-destination" ]; then
+        joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$ini" "$work/ini-destination" || exit 1
+      else joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$ini" - || exit 1; fi
+    fi
     # Atomic publication uses the same checked-file writer; no rollback journal.
     joomlaPlaygroundInstallEnvironment "$work/candidate.yml" "$compose" "$work/initial-compose" || exit 1
     if [ -n "$mirror" ]; then
       joomlaPlaygroundInstallEnvironment "$work/candidate.yml" "$mirror/docker-compose.yml" "$work/initial-compose" || exit 1
-      if [[ "$ini" == "$directory/"* ]]; then
+      if [ -f "$work/ini-mirror.path" ]; then
         if [ -f "$work/ini-mirror" ]; then
           joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$mirror/${ini#"$directory/"}" "$work/ini-mirror" || exit 1
         else joomlaPlaygroundInstallEnvironment "$work/candidate.ini" "$mirror/${ini#"$directory/"}" - || exit 1; fi
