@@ -13762,8 +13762,7 @@ if os.path.exists("/proc/self/mountinfo"):
 PYMOUNT
 }
 
-# Resolve the actual stores and verify ownership. No replacement directories,
-# volumes or database services are allocated by an existing-site import.
+# Match the selected services to their configured stores before importing in place.
 # shellcheck disable=SC2016
 function joomlaPlaygroundReplacementStorage() {
   local site="$1" work="$2" role service target row kind source path logical ids id actual actual_type actual_source
@@ -13783,8 +13782,6 @@ function joomlaPlaygroundReplacementStorage() {
     kind=$(joomlaSiteJSON -er .type <<< "$row") && source=$(joomlaSiteJSON -er .source <<< "$row") &&
       logical=$(joomlaSiteJSON -r .logical <<< "$row") && path=$(joomlaPlaygroundStoragePath "$row") || return 1
     if [ "$kind" = bind ]; then source=$(joomlaPersistenceCanonicalPath "$path") || return 1; fi
-    joomlaPersistenceCheckShared "$site" "$kind" "$source" "$target" true || return 1
-    if [ "$kind" = volume ]; then joomlaPersistenceCheckShared "$site" bind "$path" '' || return 1; fi
     if [ "$role" = web ]; then
       if [ "$kind" = bind ]; then joomlaPlaygroundValidateWebsiteDirectory "$source" || {
         printf 'The website directory contains another host mount.\n' >&2; return 1;
