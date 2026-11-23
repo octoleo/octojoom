@@ -86,11 +86,38 @@ ENV
   cp -p "$original" "$SANDBOX/expected.env"
   printf 'VDM_SHOP_JOOMLA_SITE_NAME="Imported shop"\n' > "$candidate"
   if ! is_windows; then chmod 640 "$original"; fi
-  run joomlaPlaygroundInstallEnvironment "$candidate" "$original" "$SANDBOX/expected.env" "$original"
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$original" "$SANDBOX/expected.env"
   assert_success
   cmp "$original" "$candidate"
   if ! is_windows; then assert_equal "$(file_mode "$original")" 640; fi
   assert_equal "$(find "${original%/*}" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
+}
+
+@test "unchanged deployment configuration keeps the original file and still detects an operator edit" {
+  local expected="$SANDBOX/initial-compose"
+  cp "$compose" "$expected"
+  cp "$compose" "$candidate"
+  # The linked copy observes inode replacement even if bytes and timestamps match.
+  ln "$compose" "$SANDBOX/linked-compose"
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$compose" "$expected"
+  assert_success
+  [ "$compose" -ef "$SANDBOX/linked-compose" ]
+  printf '# operator edit\n' >> "$compose"
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$compose" "$expected"
+  assert_failure
+  assert_file_contains "$compose" '# operator edit'
+}
+
+@test "changed Compose keeps deployment permissions despite a private scratch snapshot" {
+  local expected="$SANDBOX/initial-compose"
+  (umask 077; cp "$compose" "$expected")
+  cp "$expected" "$candidate"
+  printf '# imported settings\n' >> "$candidate"
+  if ! is_windows; then chmod 644 "$compose"; fi
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$compose" "$expected"
+  assert_success
+  cmp "$candidate" "$compose"
+  if ! is_windows; then assert_equal "$(file_mode "$compose")" 644; fi
 }
 
 @test "an interrupted environment or PHP copy leaves the installed file intact" {
@@ -106,7 +133,7 @@ ENV
   for destination in "$original" "$SANDBOX/php.ini"; do
     [ -f "$destination" ] || printf 'precision = 15\n' > "$destination"
     cp -p "$destination" "$SANDBOX/expected.file"
-    run joomlaPlaygroundInstallEnvironment "$candidate" "$destination" "$SANDBOX/expected.file" "$destination"
+    run joomlaPlaygroundInstallEnvironment "$candidate" "$destination" "$SANDBOX/expected.file"
     assert_failure
     cmp "$destination" "$SANDBOX/expected.file"
     assert_equal "$(find "${destination%/*}" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
@@ -116,12 +143,12 @@ ENV
 @test "atomic PHP creation requires the destination to be absent and preserves an existing file" {
   local destination="$SANDBOX/new-php.ini"
   printf 'precision = 15\n' > "$candidate"
-  run joomlaPlaygroundInstallEnvironment "$candidate" "$destination" - "$candidate"
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$destination" -
   assert_success
   cmp "$candidate" "$destination"
   printf '; operator edit\n' >> "$destination"
   cp "$destination" "$SANDBOX/expected.ini"
-  run joomlaPlaygroundInstallEnvironment "$candidate" "$destination" - "$candidate"
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$destination" -
   assert_failure
   cmp "$destination" "$SANDBOX/expected.ini"
   assert_equal "$(find "$SANDBOX" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
@@ -136,7 +163,7 @@ ENV
     fi
     "$@"
   }
-  run joomlaPlaygroundInstallEnvironment "$candidate" "$destination" - "$candidate"
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$destination" -
   assert_failure
   assert_equal "$(cat "$destination")" '; concurrent operator file'
   assert_equal "$(find "$SANDBOX" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
@@ -151,9 +178,9 @@ ENV
     fi
     "$@"
   }
-  run joomlaPlaygroundInstallEnvironment "$candidate" "$original" "$SANDBOX/expected.env" "$original"
+  run joomlaPlaygroundInstallEnvironment "$candidate" "$original" "$SANDBOX/expected.env"
   assert_failure
-  assert_output_contains 'environment changed'
+  assert_output_contains 'configuration changed'
   assert_file_contains "$original" 'VDM_OTHER_NOTE="edit at publication"'
   refute_file_contains "$original" 'Imported shop'
   assert_equal "$(find "${original%/*}" -maxdepth 1 -name '.octojoom-env.*' -print)" ''
