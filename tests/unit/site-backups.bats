@@ -38,6 +38,7 @@ PHP
   joomlaSiteCompose() {
     local site="$1"; shift
     printf '%s %s\n' "$site" "$*" >> "$BACKUP_CALLS"
+    if [ "${1:-}" = --project-name ]; then [ "$2" = "$COMPOSE_PROJECT_NAME" ] || return 1; shift 2; fi
     case "$*" in
       'config --format json') cat "$BACKUP_MODEL";;
       'ps --status running --services') printf '%s\n' "$BACKUP_RUNNING";;
@@ -57,6 +58,7 @@ PHP
   joomlaDatabaseRollbackStorage() { return 0; }
   joomlaDatabaseExport() {
     printf 'dump %s\n' "$1" >> "$BACKUP_CALLS"
+    printf 'dump project %s\n' "${COMPOSE_PROJECT_NAME:-}" >> "$BACKUP_CALLS"
     printf 'CREATE TABLE abc_test (id INT);\nINSERT INTO abc_test VALUES (7);\n' > "$2"
     return "$BACKUP_DUMP_STATUS"
   }
@@ -83,6 +85,16 @@ PHP
     assert_equal "$(file_mode "$BACKUP_DIRECTORY/full.tar.gz")" 600
     assert_equal "$(file_mode "$stage/project/joomla/upload.txt")" 640
   fi
+}
+
+@test "replacement backup uses the resolved project for service changes and SQL export" {
+  COMPOSE_PROJECT_NAME=unrelated
+  run joomlaBackupCreateAction first.vdm.dev "$BACKUP_DIRECTORY/replacement.tar.gz" full tar.gz false true original
+  assert_success
+  assert_file_exists "$BACKUP_DIRECTORY/replacement.tar.gz.sha256"
+  assert_file_contains "$BACKUP_CALLS" '--project-name original stop joomlaalpha'
+  assert_file_contains "$BACKUP_CALLS" '--project-name original start joomlaalpha'
+  assert_file_contains "$BACKUP_CALLS" 'dump project original'
 }
 
 @test "website ZIP contains SQL and restores payload metadata" {

@@ -596,7 +596,8 @@ jq -e '.test==["CMD","curl","-f","http://localhost/"]' <<< "$original_health" >/
 printf '    healthcheck:\n      test: ["CMD", "curl", "--silent", "--fail", "http://localhost/"]\n      interval: 17s\n      timeout: 4s\n      retries: 7\n' > "$work/custom-health.property"
 joomlaSetServiceProperty "$sites/new.$domain/docker-compose.yml" "$work/custom-health.yml" \
   "joomla$first" healthcheck "$work/custom-health.property"
-cat "$work/custom-health.yml" > "$sites/new.$domain/docker-compose.yml"
+awk '/^[[:space:]]+(- )?JOOMLA_DB_PREFIX[:=]/ { $0=$0 " # Keep the existing site prefix binding"; matched++ }
+  { print } END { if (matched!=1) exit 1 }' "$work/custom-health.yml" > "$sites/new.$domain/docker-compose.yml"
 destination new up -d --no-deps --wait --wait-timeout 240 "joomla$first" >/dev/null
 other_database <<'SQL'
 CREATE DATABASE octojoom_other_fixture;
@@ -605,6 +606,7 @@ INSERT INTO octojoom_other_fixture.keep_me VALUES ('another database survives');
 SQL
 mkdir "$work/before"
 cp "$(destination_env new)" "$sites/new.$domain/docker-compose.yml" "$work/before/"
+ln "$sites/new.$domain/docker-compose.yml" "$work/before/compose-inode"
 storage_identity new "$first" > "$work/before/bind-storage"
 resource_inventory > "$work/before/resources"
 original_db=$(destination new ps -q "mariadb$first")
@@ -613,6 +615,7 @@ assert_preserved() {
   assert_shared_environment
   assert_unrelated_sites
   cmp "$sites/new.$domain/docker-compose.yml" "$work/before/docker-compose.yml"
+  [ "$sites/new.$domain/docker-compose.yml" -ef "$work/before/compose-inode" ]
   storage_identity new "$first" > "$work/current-storage"
   cmp "$work/before/bind-storage" "$work/current-storage"
   resource_inventory > "$work/current-resources"
@@ -697,7 +700,26 @@ nginx_port=$(publish_fixture_port stopped "nginx$second")
 storage_identity stopped "$second" > "$work/before/named-storage"
 cp "$sites/stopped.$domain/docker-compose.yml" "$work/before/nginx-compose.yml"
 private_env=$(destination_env stopped)
+destination stopped exec -T --user 0 --workdir /var/www/html "joomla$second" sh -ceu '
+  mkdir store/companion
+  printf "%s\n" "private companion content" > store/companion/keep.txt
+  chmod 640 store/companion/keep.txt
+  chown 1234:1235 store/companion/keep.txt
+  mv store real-store
+  ln -s real-store store
+'
 destination stopped stop >/dev/null
+if replace_site stopped "$renamed_package" "${without_backup[@]}" --input-json "$work/request.json" 2> "$work/symlinked-root.log"; then
+  echo 'Replacement followed a symlinked document-root ancestor.' >&2; exit 1
+fi
+jq -e '.success==false and .data.destructive_started==false' "$work/result" >/dev/null
+[ -z "$(destination stopped ps -q --status running)" ]
+destination stopped run --rm -T --no-deps --user 0 --workdir /var/www/html --entrypoint sh "joomla$second" -ceu '
+  test -L store
+  test "$(cat real-store/public/.octojoom-ci-previous)" = "original website"
+  rm store
+  mv real-store store
+'
 new_neighbor_ids=$(destination new ps --status running -q | sort)
 started_after=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
 replace_site stopped "$renamed_package" "${without_backup[@]}" --input-json "$work/request.json" 2> "$work/stopped-replacement.log"
@@ -725,6 +747,10 @@ for port in "$proxy_port" "$nginx_port"; do
   fi
 done
 destination stopped up -d --wait --wait-timeout 240 >/dev/null
+destination stopped exec -T --user 0 --workdir /var/www/html "joomla$second" sh -ceu '
+  test "$(cat store/companion/keep.txt)" = "private companion content"
+  test "$(stat -c %a:%u:%g store/companion/keep.txt)" = "640:1234:1235"
+'
 storage_identity stopped "$second" > "$work/current-storage"
 cmp "$work/before/named-storage" "$work/current-storage"
 check_site stopped "$second" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD" \
