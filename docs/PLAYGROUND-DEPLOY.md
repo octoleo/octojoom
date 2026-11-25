@@ -101,12 +101,10 @@ imported data between starts. Setup refuses an occupied destination.
 
 ## Replace an existing site
 
-Choose the existing-site option, select the website by its hostname, and
-confirm that its Joomla files and database tables should be replaced with the
-package contents. Octojoom validates the complete ZIP and identifies the
-selected site's storage before pausing its writers. Replacement imports into
-that site's existing website mount and selected database. Old-only files and
-tables are removed; the package is not merged into the old installation.
+Choose **Replace an existing Joomla site**, select its hostname, choose whether
+to take a backup, and keep the Playground settings or choose **Edit**. Replacement writes the
+exported website files and SQL to the selected site's existing storage. Files
+and tables that belonged only to the previous site are removed.
 
 The backup question defaults to **Yes**. With that choice, Octojoom creates
 and verifies its normal full-site backup before the first destructive write.
@@ -135,67 +133,33 @@ To deliberately skip the backup, add both `--pre-backup no` and
 `--confirm-no-backup yes` to the same command. The general `--yes` switch
 cannot approve skipping the backup.
 
-### What stays with the destination
+### Import into the existing site
 
-Existing-site import runs on the local Docker host and requires an installed
-Joomla site using MariaDB or MySQL. It preserves the site's Compose project,
-website bind path or named volume, database service and storage, database
-connection credentials, hostname, TLS, routing, enabled registration and
-custom settings. The web root can be a subdirectory of `/var/www/html`.
-The selected database is replaced; other databases in its service are not
-cleared or recreated. Use the separate database-management operations to
-change database identity or credentials. An existing-site import refuses
-`db-*` options that would change its connection settings.
+The selected Compose project supplies the Joomla service, its document root,
+and its MariaDB or MySQL database connection. Octojoom uses the site's current
+image, routing, Compose file, environment and PHP configuration. The app can be
+stopped and the previous Joomla installation can be broken.
 
-The destination's Joomla configuration supplies hosting and mail settings.
-The imported application supplies its secret and database table prefix.
-Both fresh setup and existing-site import use the same package reader, file
-and SQL importer, configuration adapter and administrator handling. SQL
-values and character encodings use the same conversion rules described above.
-Only Compose settings required by the incoming runtime and import change.
-The stock Apache health check and any custom probe remain as configured.
+The Playground export supplies the website files, SQL, table prefix and Joomla
+secret. Octojoom adapts the imported configuration to the destination database.
+When the old `configuration.php` can be reused, its hosting and mail settings
+carry over. When it is missing or unusable, Octojoom uses the exported
+configuration as the starting point. Administrator edits apply to the imported
+Joomla account.
 
-Confirmed site and administrator details are applied to Joomla and saved in
-the site's existing effective environment file. A site using the shared
-`joomla/.env` continues using it; only that site's assignments change, while
-other settings and comments are retained. A site with a private `.env` keeps
-that file. Environment publication uses a complete temporary file and an
-atomic rename, preserving the file's mode. Concurrent imports for the same
-site or shared environment are serialized, and an operator edit detected
-before publication is preserved and reported.
+### Running and stopped sites
 
-Before pausing writers and again before importing, Octojoom compares the
-selected project's website and database mounts with its Compose definition.
-It checks for overlapping data paths, unsupported nested mounts, and import
-inputs or deployment files inside the data being replaced. These checks use
-the selected site's effective environment. An incomplete registration for
-another site or an unrelated stopped container does not participate in the
-replacement. Use a website directory or named volume and a database schema
-dedicated to the selected site. Any other consumer intentionally pointed at
-those same files or schema will see the imported data.
+For a running site, Octojoom pauses its writers, imports the package and resumes
+the services that were running. For a stopped site, it starts the database for
+the import and stops it afterward. Keeping the imported account preserves its
+SQL password hash. If you edit the administrator, a one-off PHP process applies
+the change with Joomla’s user API.
 
-### Service state and failures
-
-Plan for a service interruption while the selected site's writers are
-paused. The importer uses the existing database service and writes directly
-to the selected website storage and database. It does not allocate replacement
-storage, switch mount identities, start a private website stack, or require
-Docker Engine 28's isolated bridge mode. After a successful import, it resumes
-previously running services through the normal Compose path. A site that was
-stopped remains stopped.
-
-If an error happens before destructive writes, Octojoom reports the failed
-step and restores the previous service state. If an error happens after writes
-begin, it leaves the website's writers stopped and reports a failed import.
-A partly imported website is not presented as successfully deployed. Import
-scratch files and operation locks are cleaned up; no second recovery journal
-or retained old storage is created.
-
-With a verified backup, use Octojoom's existing backup verification and
-restoration tools. The error report identifies that archive. Without a
-backup, overwritten files and database data cannot be recovered by this
-operation. Correct the reported issue before deciding whether to repeat the
-import or use another recovery source.
+A requested full backup must succeed before the import writes data. If an error
+occurs before the first write, Octojoom restores the previous service state.
+After a partial write it leaves the writers stopped and reports the failed step
+and verified backup path, when available. A backup of an already broken site
+contains the files and SQL as they were at the time.
 
 ### Read the replacement result
 
@@ -229,15 +193,14 @@ octojoom --type joomla --task playground --action inspect \
 ```
 
 This optional check reads the site's effective Docker Compose settings and the
-local Docker daemon's metadata. It identifies the connected MySQL or MariaDB
-service, its storage and the website storage, and looks for a runtime candidate
-for the **incoming** Joomla and PHP versions. Runtime discovery can contact
-the image registry. The command leaves the site's services and storage alone.
+local Docker daemon's metadata. It identifies the configured application image,
+the connected MySQL or MariaDB service, and their storage. A stopped site can
+be inspected. Inspection does not start services or contact an image registry.
 
-The result in `data.targetPreflight` distinguishes a runtime candidate from
-an unconfirmed match. `runtimeCheck` explains an empty `runtimeCandidate`.
-Inspection success means that Octojoom completed the inspection. A candidate
-tag still requires verification against the actual image before deployment.
+In JSON output, `data.targetPreflight.runtimeCandidate` contains the existing
+Compose image reference, including any digest. `runtimeCheck` identifies it as
+the configured application image. The package's preferred PHP version appears
+separately in the archive metadata.
 
 The result also reports available bytes on filesystems the
 host can measure. A Docker Desktop volume can have an inaccessible mountpoint,

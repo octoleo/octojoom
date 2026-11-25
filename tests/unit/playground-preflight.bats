@@ -13,7 +13,7 @@ setup() {
   local web_path="$SANDBOX/web" db_path="$SANDBOX/data"
   if is_windows; then web_path=$(cygpath -am "$web_path"); db_path=$(cygpath -am "$db_path"); fi
   joomlaSiteJSON -n --arg web "$web_path" --arg db "$db_path" '{
-    services:{app:{image:"vendor/runtime:old-apache",environment:{JOOMLA_DB_HOST:"data:3306",JOOMLA_ADMIN_PASSWORD:"private-marker"},
+    services:{app:{image:"vendor/runtime:latest",environment:{JOOMLA_DB_HOST:"data:3306",JOOMLA_ADMIN_PASSWORD:"private-marker"},
       volumes:[{type:"bind",source:$web,target:"/var/www/html"}]},
       data:{image:"mariadb:11",volumes:[{type:"bind",source:$db,target:"/var/lib/mysql"}]},
       other:{image:"postgres:16"}}}' > "$SANDBOX/model"
@@ -28,7 +28,6 @@ setup() {
     case "$1 $2" in
       'context inspect') echo 'unix:///var/run/docker.sock';;
       'volume inspect') echo '[{"Name":"existing","Driver":"local","Scope":"local","Options":{},"Mountpoint":"/inaccessible-docker-vm/octojoom"}]';;
-      'image inspect') [ "$3" = vendor/runtime:6.2.0-php8.4-apache ];;
       *) return 91;;
     esac
   }
@@ -38,19 +37,19 @@ modify_model() {
   joomlaSiteJSON "$1" < "$SANDBOX/model" > "$SANDBOX/changed" && mv "$SANDBOX/changed" "$SANDBOX/model"
 }
 
-@test "Playground target preflight reads the connected engine, local space and an incoming runtime candidate" {
+@test "Playground target preflight reports the configured image, connected engine and local space without registry queries" {
   run joomlaPlaygroundTargetPreflight "$site" "$summary"
   assert_success
-  joomlaSiteJSON -e '.targetPreflight | .databaseEngine=="mariadb" and .runtimeCandidate=="vendor/runtime:6.2.0-php8.4-apache" and .websiteStorage=="bind" and .websiteAvailableBytes >= 1024' <<< "$output"
+  joomlaSiteJSON -e '.targetPreflight | .databaseEngine=="mariadb" and .runtimeCandidate=="vendor/runtime:latest" and .runtimeCheck=="using the configured application image" and .websiteStorage=="bind" and .websiteAvailableBytes >= 1024' <<< "$output"
   [[ "$output" != *private-marker* ]]
-  assert_equal "$(awk '{print $1, $2}' "$SANDBOX/docker-calls")" $'context inspect\nimage inspect'
+  assert_equal "$(awk '{print $1, $2}' "$SANDBOX/docker-calls")" 'context inspect'
 }
 
 @test "Playground target preflight rejects external database services, PostgreSQL and unsupported mounts" {
   local change
   cp "$SANDBOX/model" "$SANDBOX/original"
   for change in '.services.app.environment.JOOMLA_DB_HOST="external"' '.services.data.image="postgres:16"' \
-    '.services.data.volumes[0].read_only=true' '.services.data.volumes[0]|=(.type="volume"|.source="test") | .volumes.test={name:"existing",external:true}'; do
+    '.services.data.volumes[0].read_only=true' '.services.data.volumes[0].volume.subpath="subtree"'; do
     cp "$SANDBOX/original" "$SANDBOX/model"
     modify_model "$change"
     run joomlaPlaygroundTargetPreflight "$site" "$summary"
@@ -62,7 +61,7 @@ modify_model() {
 }
 
 @test "Playground target preflight resolves local named volume metadata and identifies unknown capacity" {
-  modify_model '.services.app.volumes[0]|=(.type="volume"|.source="web") | .volumes.web={name:"existing",driver:"local"}'
+  modify_model '.services.app.volumes[0]|=(.type="volume"|.source="web") | .volumes.web={name:"existing",external:true,driver:"local"}'
   run joomlaPlaygroundTargetPreflight "$site" "$summary"
   assert_success
   joomlaSiteJSON -e '.targetPreflight | .websiteStorage=="volume" and .websiteAvailableBytes==null and (.spaceCheck|contains("unavailable"))' <<< "$output"
@@ -121,39 +120,17 @@ modify_model() {
   assert_output_contains 'overlapping document-root mounts'
 }
 
-@test "Playground inspection accepts a site-owned legacy PHP INI bind and rejects foreign or non-file mounts" {
-  local available="$VDM_REPO_PATH/joomla/available/$site" ini
-  ini=$(joomlaWebHostPath "$available/php.ini")
-  printf 'memory_limit=256M\n' > "$available/php.ini"
-  joomlaSiteJSON --arg ini "$ini" '.services.app.volumes += [{type:"bind",source:$ini,target:"/var/www/html/php.ini"}]' \
-    < "$SANDBOX/model" > "$SANDBOX/legacy"
-  cp "$SANDBOX/legacy" "$SANDBOX/model"
+@test "Playground inspection leaves a shared legacy PHP override with the existing runtime" {
+  local override="$SANDBOX/shared/php.ini"
+  mkdir -p "${override%/*}"
+  printf 'memory_limit=256M\n' > "$override"
+  joomlaSiteJSON --arg ini "$(joomlaWebHostPath "$override")" '
+    .services.app.volumes += [{type:"bind",source:$ini,target:"/var/www/html/php.ini",read_only:true}]' \
+    < "$SANDBOX/model" > "$SANDBOX/changed"
+  mv "$SANDBOX/changed" "$SANDBOX/model"
   run joomlaPlaygroundTargetPreflight "$site" "$summary"
   assert_success
-
-  mkdir -p "$VDM_PROJECT_PATH/store"
-  printf 'memory_limit=256M\n' > "$VDM_PROJECT_PATH/store/custom\$php.ini"
-  getJoomlaComposeEnvKey() { echo STORE; }
-  ini=$(joomlaWebHostPath "$VDM_PROJECT_PATH/store/custom\$php.ini")
-  joomlaSiteJSON --arg ini "$ini" '.services.app.volumes[-1].source=($ini|gsub("\\$"; "$$"))' < "$SANDBOX/legacy" > "$SANDBOX/model"
-  run joomlaPlaygroundTargetPreflight "$site" "$summary"
-  assert_success
-
-  printf 'memory_limit=256M\n' > "$SANDBOX/foreign.ini"
-  ini=$(joomlaWebHostPath "$SANDBOX/foreign.ini")
-  joomlaSiteJSON --arg ini "$ini" '.services.app.volumes[-1].source=$ini' < "$SANDBOX/legacy" > "$SANDBOX/model"
-  run joomlaPlaygroundTargetPreflight "$site" "$summary"
-  assert_failure
-  assert_output_contains 'outside the selected site'
-  cp "$SANDBOX/legacy" "$SANDBOX/model"
-  rm "$available/php.ini" && mkdir "$available/php.ini"
-  run joomlaPlaygroundTargetPreflight "$site" "$summary"
-  assert_failure
-  assert_output_contains 'must be a regular file'
-  modify_model '.services.app.volumes[-1].type="volume"'
-  run joomlaPlaygroundTargetPreflight "$site" "$summary"
-  assert_failure
-  assert_output_contains 'overlapping document-root mounts'
+  assert_equal "$(cat "$override")" 'memory_limit=256M'
 }
 
 @test "Playground runtime chooses JoomEngine candidates by Joomla base label or qualified tag" {
@@ -166,76 +143,4 @@ modify_model() {
   run joomlaPlaygroundRuntimeCandidate octoleo/joomengine:latest 6.2.0 8.4 apache
   assert_success
   assert_equal "$output" octoleo/joomengine:6.2.2-joomla6.2.0-php8.4-apache
-}
-
-@test "Playground preflight reports unconfirmed runtime without mistaking archived PHP for Joomla's minimum" {
-  summary=$(joomlaSiteJSON -c '.minimumPhpVersion="8.5.0"' <<< "$summary")
-  run joomlaPlaygroundTargetPreflight "$site" "$summary"
-  assert_success
-  joomlaSiteJSON -e '.targetPreflight | .runtimeCandidate==null and (.runtimeCheck|contains("below"))' <<< "$output"
-}
-
-replacement_ini_fixture() {
-  local target="$1" mounted
-  VDM_SITE_KEY=store VDM_SITE_ENV_KEY=STORE VDM_SITE_SERVICE=app
-  VDM_SITE_DIR="$VDM_REPO_PATH/joomla/available/$site"
-  VDM_PHP_INI_TARGET=/usr/local/etc/php/conf.d/zz-octojoom.ini
-  shared_ini="$VDM_PROJECT_PATH/bulk/php.ini"
-  project_ini="$VDM_PROJECT_PATH/store/php.ini"
-  work="$SANDBOX/plan"
-  mkdir -p "$work" "${shared_ini%/*}" "${project_ini%/*}"
-  printf '; shared defaults\nmemory_limit = 256M ; keep formatting\nprecision = 15\n' > "$shared_ini"
-  cp "$shared_ini" "$SANDBOX/before.ini"
-  mounted=$(joomlaWebHostPath "$shared_ini")
-  joomlaSiteJSON --arg source "$mounted" --arg target "$target" '
-    if $target=="" then . else .services.app.volumes += [{type:"bind",source:$source,target:$target}] end' \
-    < "$SANDBOX/model" > "$work/original-model.json"
-  : > "$work/candidate.env"
-  printf 'services:\n  app:\n    volumes:\n      - ./joomla:/var/www/html\n' > "$work/with-env.yml"
-  if [ -n "$target" ]; then printf '      - "%s:%s:ro"\n' "$mounted" "$target" >> "$work/with-env.yml"; fi
-  joomlaPHPValidateIni() { [ -r "$2" ] && [ "$3" = "$VDM_PHP_INI_TARGET" ]; }
-  joomlaPHPIniShared() { echo called >> "$SANDBOX/foreign-query"; return 2; }
-}
-
-@test "compatible external PHP settings retain their mount and formatting without reading another site" {
-  replacement_ini_fixture /usr/local/etc/php/conf.d/zz-octojoom.ini
-  cliRememberValue VDM_memory_limit 256M
-  run joomlaPlaygroundReplacementIni "$site" "$work" joomla:6
-  assert_success
-  cmp "$work/candidate.yml" "$work/with-env.yml"
-  cmp "$work/candidate.ini" "$SANDBOX/before.ini"
-  cmp "$shared_ini" "$SANDBOX/before.ini"
-  refute_file_exists "$work/ini-destination.path"
-  refute_file_exists "$SANDBOX/foreign-query"
-  printf 'precision = 10\n' >> "$shared_ini"
-  run joomlaPlaygroundCheckIni "$work"
-  assert_failure
-  assert_output_contains 'PHP override changed'
-}
-
-@test "replacement adapts external legacy PHP settings into the selected project" {
-  replacement_ini_fixture /var/www/html/php.ini
-  cliRememberValue VDM_memory_limit 512M
-  run joomlaPlaygroundReplacementIni "$site" "$work" joomla:6
-  assert_success
-  assert_equal "$(cat "$work/ini-destination.path")" "$project_ini"
-  assert_file_contains "$work/candidate.yml" "$(joomlaWebHostPath "$project_ini"):$VDM_PHP_INI_TARGET:ro"
-  refute_file_contains "$work/candidate.yml" '/var/www/html/php.ini'
-  assert_equal "$(joomlaPHPReadValue "$work/candidate.ini" memory_limit)" 512M
-  assert_file_contains "$work/candidate.ini" 'precision = 15'
-  cmp "$shared_ini" "$SANDBOX/before.ini"
-  refute_file_exists "$project_ini"
-  refute_file_exists "$SANDBOX/foreign-query"
-}
-
-@test "replacement keeps native image settings when there is no override or requested PHP value" {
-  replacement_ini_fixture ''
-  run joomlaPlaygroundReplacementIni "$site" "$work" joomla:6
-  assert_success
-  cmp "$work/candidate.yml" "$work/with-env.yml"
-  refute_file_exists "$work/candidate.ini"
-  refute_file_exists "$work/ini-destination.path"
-  refute_file_exists "$SANDBOX/foreign-query"
-  run joomlaPlaygroundCheckIni "$work"
-  assert_success
 }

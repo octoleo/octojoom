@@ -14,6 +14,7 @@ setup() {
   TX_ENV="$VDM_REPO_PATH/joomla/.env"
   TX_FAULT=''
   export TMPDIR="$SANDBOX"
+  TX_IMAGE=registry.example.test/team/site:production
   TX_WEB=127.0.0.1
   mkdir "$TX_PACKAGE"
   make_joomla_container shop SHOP shop example.test
@@ -32,9 +33,9 @@ setup() {
 
   local web_path="$TX_PROJECT/joomla" db_path="$TX_PROJECT/db"
   if is_windows; then web_path=$(cygpath -am "$web_path"); db_path=$(cygpath -am "$db_path"); fi
-  joomlaSiteJSON -n --arg web "$web_path" --arg db "$db_path" '{
+  joomlaSiteJSON -n --arg web "$web_path" --arg db "$db_path" --arg image "$TX_IMAGE" '{
     name:"shop",services:{
-      app:{image:"joomla:6",volumes:[{type:"bind",source:$web,target:"/var/www/html"}]},
+      app:{image:$image,volumes:[{type:"bind",source:$web,target:"/var/www/html"}]},
       db:{image:"mariadb:lts",volumes:[{type:"bind",source:$db,target:"/var/lib/mysql"}]},
       helper:{image:"helper"}}}' > "$SANDBOX/model.json"
 
@@ -42,50 +43,28 @@ setup() {
     VDM_DB_SITE="$TX_SITE" VDM_DB_SERVICE=db VDM_DB_NAME=shop_db VDM_DB_USER=shop_user
     VDM_DB_PASSWORD=existing-password VDM_DB_ENGINE=mariadb VDM_DB_DRIVER=mysqli VDM_DB_INSTALLED=true
     VDM_SITE_SERVICE=app VDM_SITE_DOCROOT=/var/www/html VDM_SITE_ENV_KEY=SHOP VDM_SITE_KEY=shop
-    VDM_SITE_IMAGE=joomla:6 VDM_SITE_WEBSERVER=apache VDM_DB_HOST=db
+    VDM_SITE_IMAGE="$TX_IMAGE" VDM_SITE_WEBSERVER=unknown VDM_DB_HOST=db
     return 0
   }
   joomlaStorageComposeModel() {
     if [ "$1" != "$TX_SITE" ] || [ "$2" != "$TX_ENV" ] || [ "$3" != "$TX_DIR/docker-compose.yml" ]; then
       unexpected_call render "$@"; return $?
     fi
-    cat "$SANDBOX/model.json"
+    if [ -f "$SANDBOX/project-changed" ]; then
+      joomlaSiteJSON '.name="otherproject"' < "$SANDBOX/model.json"
+    else cat "$SANDBOX/model.json"; fi
   }
   joomlaPlaygroundConfirmReplaceSettings() { return 0; }
-  joomlaPlaygroundConfigureImport() {
-    [ "$1" = "$TX_PACKAGE" ] && [ "$(cat "$2")" = 'original web' ] &&
-      [ "$3" = db ] && [ "$4" = mysqli ] && [ "$5" = shop_db ] && [ "$6" = shop_user ] &&
-      [ "$7" = existing-password ] && [ "$8" = /var/www/html ] || return 1
+  joomlaPlaygroundConfigureReplacement() {
+    [ "$1" = "$TX_PACKAGE" ] && [ "$2" = "$TX_SITE" ] && [ "$4" = /var/www/html ] || return 1
     printf 'configure\n' >> "$TX_EVENTS"
-  }
-  joomlaDatabaseConfigurationFile() {
-    [ "$1" = "$TX_SITE" ] && [ "$2" = read-contained ] && cp "$TX_PROJECT/joomla/content" "$3"
-  }
-  joomlaPHPValidateIni() { return 0; }
-  joomlaPHPIniShared() { unexpected_call php-ownership "$1" "$2"; }
-  joomlaPlaygroundPlanReplacement() {
-    local work="$3" ini_source
-    ini_source=$(joomlaWebHostPath "$TX_PROJECT/php.ini") || return 1
-    joomlaSiteJSON --arg ini "$ini_source" --arg web "$TX_WEB" '
-      if $web=="nginx" then .services.nginx={image:"nginx",volumes:[.services.app.volumes[] | .read_only=true]} else . end |
-      .services.app.volumes |= (map(select(.target!="/usr/local/etc/php/conf.d/zz-octojoom.ini")) +
-        [{type:"bind",source:$ini,target:"/usr/local/etc/php/conf.d/zz-octojoom.ini",read_only:true}])' \
-      < "$SANDBOX/model.json" > "$work/original-model.json" || return 1
-    cp "$work/original-model.json" "$SANDBOX/model.json" && cp "$work/original-model.json" "$work/rendered.json" &&
-      cp "$work/original-model.json" "$work/proposed.json" || return 1
-    joomlaSiteJSON -nc --arg web "$TX_WEB" '{project:"shop",app:"app",db:"db",web:$web,
-      root:"/var/www/html",image:"joomla:6"}' > "$work/services.json"
-    cp "$SANDBOX/original.yml" "$work/with-env.yml" || return 1
-    printf 'VDM_SHOP_JOOMLA_SITE_NAME="Imported shop"\n' > "$work/candidate.env"
-    VDM_SITE_SERVICE=app VDM_PHP_INI_TARGET=/usr/local/etc/php/conf.d/zz-octojoom.ini \
-      joomlaPlaygroundReplacementIni "$2" "$work" joomla:6 "${4:-}"
   }
   joomlaPlaygroundImportPackage() {
     local work="$3" expected_mount
     expected_mount=$(joomlaSiteJSON -er '.[0] |
       "type="+.Type+",src="+(.Name//.Source)+",dst=/octojoom-joomla"' < "$SANDBOX/app-id.mounts") || return 1
     [ "$7" = "$expected_mount" ] && [ "$1" = "$TX_PACKAGE" ] && [ "$2" = "$TX_SITE" ] && [ "$4" = app ] &&
-      [ "$5" = /var/www/html ] && [ "$6" = joomla:6 ] && [ "$8" = replace ] || return 91
+      [ "$5" = /var/www/html ] && [ "$6" = "$TX_IMAGE" ] && [ "$8" = replace ] || return 91
     printf 'database-ready\n' > "$work/import-stage"
     [ "$TX_FAULT" != before-write ] || return 1
     : > "$work/import-writing"
@@ -110,6 +89,10 @@ setup() {
   joomlaSiteCompose() {
     [ "$1" = "$TX_SITE" ] || { unexpected_call compose "$@"; return $?; }
     shift
+    if [ "${1:-}" = --project-name ]; then
+      [ "$2" = shop ] || { unexpected_call wrong-project "$@"; return $?; }
+      shift 2
+    fi
     printf 'compose %s\n' "$*" >> "$TX_EVENTS"
     if [ -f "$SANDBOX/project-changed" ] && [ "${original_compose:-false}" != true ]; then
       unexpected_call edited-project "$@"; return $?
@@ -146,6 +129,7 @@ setup() {
   }
   docker() {
     case "$*" in
+      'context inspect --format {{.Endpoints.docker.Host}}') printf 'unix:///var/run/docker.sock\n';;
       'ps -aq --filter label=com.docker.compose.project=shop') printf 'app-id\ndb-id\n';;
       'inspect --type container --format {{index .Config.Labels "com.docker.compose.project.config_files"}} app-id'|\
         'inspect --type container --format {{index .Config.Labels "com.docker.compose.project.config_files"}} db-id')
@@ -173,6 +157,9 @@ setup() {
     if [ "$TX_FAULT" = project-edit ]; then
       printf '\nname: otherproject\n' >> "$TX_DIR/docker-compose.yml"
       : > "$SANDBOX/project-changed"
+    fi
+    if [ "$TX_FAULT" = mount-edit ]; then
+      printf '[{"Type":"volume","Destination":"/var/lib/mysql","Name":"new_store","RW":true}]\n' > "$SANDBOX/db-id.mounts"
     fi
     if [ "$TX_FAULT" = ini-edit ]; then printf 'operator ini edit' > "$TX_PROJECT/php.ini"; fi
     [ "$TX_FAULT" != backup ]
@@ -233,9 +220,16 @@ assert_isolated_replacement() {
   for neighbor in incomplete.example.test malformed.example.test; do
     diff -r "$SANDBOX/$neighbor" "$available/$neighbor"
   done
-  # The service mounts are checked once before quiescing and again before writing.
-  assert_equal "$(awk '/^mounts |^configure$|^compose stop app$|^import$/' "$TX_EVENTS")" \
-    $'mounts app-id\nmounts db-id\nconfigure\ncompose stop app\nmounts app-id\nmounts db-id\nimport'
+  # Every successful import verifies both destinations and quiesces its writer
+  # before any website files or database rows can be overwritten.
+  awk '
+    /^compose stop app$/ {stopped=1}
+    /^mounts app-id$/ {app=1}
+    /^mounts db-id$/ {db=1}
+    /^configure$/ {configured=1}
+    /^import$/ {if (!(stopped && app && db && configured)) invalid=1; imported=1}
+    END {exit (!imported || invalid)}
+  ' "$TX_EVENTS"
   cmp "$SANDBOX/original.yml" "$TX_DIR/docker-compose.yml"
 }
 
@@ -273,7 +267,7 @@ assert_imported_data() {
   joomlaSiteJSON -e '.status=="deployed" and .target=="current" and .destructive_started and
     .running==true and .enabled=="enabled"' < "$TX_PACKAGE/result.json"
   assert_imported_data
-  assert_file_contains "$TX_ENV" 'Imported shop'
+  cmp "$TX_ENV" "$SANDBOX/shared.env"
   assert_isolated_replacement
   refute_file_exists "$TX_DIR/.env"
   assert_import_cleaned
@@ -299,7 +293,7 @@ assert_imported_data() {
   assert_failure
   assert_output_contains 'different storage'
   assert_old_data
-  refute_file_contains "$TX_EVENTS" 'compose stop'
+  assert_file_contains "$SANDBOX/running" app
   assert_import_cleaned
 }
 
@@ -310,6 +304,18 @@ assert_imported_data() {
   assert_output_contains 'Another Compose configuration uses this site project name'
   assert_old_data
   refute_file_contains "$TX_EVENTS" 'compose stop'
+  assert_import_cleaned
+}
+
+@test "a selected database mount that changes during backup prevents writes and resumes the site" {
+  use_named_volumes
+  TX_FAULT=mount-edit
+  run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" true
+  assert_failure
+  assert_output_contains 'different storage'
+  assert_old_data
+  refute_file_contains "$TX_EVENTS" import
+  assert_file_contains "$SANDBOX/running" app
   assert_import_cleaned
 }
 
@@ -388,19 +394,24 @@ assert_imported_data() {
   assert_imported_data
   [ ! -s "$SANDBOX/running" ]
   joomlaSiteJSON -e '.status=="deployed" and .running==false and .enabled=="disabled"' < "$TX_PACKAGE/result.json"
-  refute_file_contains "$TX_EVENTS" 'up -d --no-deps app'
+  assert_file_contains "$TX_EVENTS" 'up -d --no-deps --no-recreate db'
+  assert_file_contains "$TX_EVENTS" 'compose stop db'
   assert_import_cleaned
 }
 
-@test "a partially running FPM site resumes only its original services" {
-  TX_WEB=nginx
+@test "a partially running custom stack resumes exactly its original services" {
+  TX_WEB=edge
   printf 'app\ndb\nhelper\n' > "$SANDBOX/running"
+  cp "$SANDBOX/running" "$SANDBOX/prior-services"
+  joomlaSiteJSON '.services.edge={image:"custom/proxy:stable"}' < "$SANDBOX/model.json" > "$SANDBOX/edge.json"
+  mv "$SANDBOX/edge.json" "$SANDBOX/model.json"
   run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
   assert_success
-  assert_file_contains "$SANDBOX/running" app
-  assert_file_contains "$SANDBOX/running" helper
-  refute_file_contains "$SANDBOX/running" nginx
-  joomlaSiteJSON -e '.status=="deployed" and .running==false' < "$TX_PACKAGE/result.json"
+  sort "$SANDBOX/prior-services" > "$SANDBOX/expected"
+  sort "$SANDBOX/running" > "$SANDBOX/actual"
+  cmp "$SANDBOX/expected" "$SANDBOX/actual"
+  assert_file_contains "$TX_EVENTS" 'compose up -d --no-deps --no-recreate app db helper'
+  refute_file_contains "$TX_EVENTS" '--wait'
   assert_import_cleaned
 }
 
@@ -414,15 +425,17 @@ assert_imported_data() {
   assert_import_cleaned
 }
 
-@test "shared environment publication preserves neighboring settings comments and file mode" {
+@test "replacement preserves the complete custom Compose environment including file mode" {
   printf '# Neighbor comment\nVDM_OTHER_DB_PASS="neighbor-only"\n' >> "$TX_ENV"
+  printf 'APP_TZ=Africa/Windhoek\n' >> "$TX_ENV"
+  cp "$TX_ENV" "$SANDBOX/custom.env"
   if ! is_windows; then chmod 640 "$TX_ENV"; fi
   run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
   assert_success
   refute_file_exists "$TX_DIR/.env"
   assert_file_contains "$TX_ENV" '# Neighbor comment'
   assert_file_contains "$TX_ENV" 'VDM_OTHER_DB_PASS="neighbor-only"'
-  assert_file_contains "$TX_ENV" 'Imported shop'
+  cmp "$TX_ENV" "$SANDBOX/custom.env"
   if ! is_windows; then assert_equal "$(file_mode "$TX_ENV")" 640; fi
   assert_import_cleaned
 }
@@ -439,8 +452,8 @@ assert_imported_data() {
   getJoomlaSiteEnabledState() { printf 'enabled\n'; }
   run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
   assert_success
-  assert_file_contains "$TX_ENV" 'Imported shop'
-  assert_file_contains "$mirror/.env" 'Imported shop'
+  cmp "$TX_ENV" "$SANDBOX/shared.env"
+  cmp "$mirror/.env" "$SANDBOX/shared.env"
   cmp "$mirror/docker-compose.yml" "$TX_DIR/docker-compose.yml"
   cmp "$VDM_REPO_PATH/joomla/.env" "$SANDBOX/shared.env"
   if ! is_windows; then
@@ -450,13 +463,13 @@ assert_imported_data() {
   assert_import_cleaned
 }
 
-@test "an environment edit during backup is preserved and prevents writes" {
+@test "an unrelated environment edit during backup is preserved while the selected import completes" {
   TX_FAULT=env-edit
   run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" true
-  assert_failure
-  assert_old_data
+  assert_success
+  assert_imported_data
   assert_file_contains "$TX_ENV" 'operator edit'
-  refute_file_contains "$TX_EVENTS" import
+  assert_file_contains "$TX_EVENTS" import
   assert_file_contains "$SANDBOX/running" app
   assert_import_cleaned
 }
@@ -472,13 +485,13 @@ assert_imported_data() {
   assert_import_cleaned
 }
 
-@test "a PHP override edited during backup is preserved and prevents writes" {
+@test "a PHP override edited during backup is independent of the content import" {
   TX_FAULT=ini-edit
   run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" true
-  assert_failure
-  assert_old_data
+  assert_success
+  assert_imported_data
   assert_equal "$(cat "$TX_PROJECT/php.ini")" 'operator ini edit'
-  refute_file_contains "$TX_EVENTS" import
+  assert_file_contains "$TX_EVENTS" import
   assert_file_contains "$SANDBOX/running" app
   assert_import_cleaned
 }
@@ -493,13 +506,12 @@ assert_imported_data() {
   [ ! -s "$TX_EVENTS" ]
 }
 
-@test "a competing shared environment operation prevents quiescing and keeps its lock" {
+@test "an operation on the shared environment keeps its lock while content replacement succeeds" {
   mkdir "${TX_ENV}.octojoom-change.lock"
   printf owner > "${TX_ENV}.octojoom-change.lock/owner"
   run joomlaPlaygroundReplaceSite "$TX_PACKAGE" "$TX_SITE" false
-  assert_failure
+  assert_success
   assert_equal "$(cat "${TX_ENV}.octojoom-change.lock/owner")" owner
-  assert_old_data
-  refute_file_contains "$TX_EVENTS" 'compose stop'
+  assert_imported_data
   [ ! -e "$TX_DIR/.octojoom-change.lock" ]
 }

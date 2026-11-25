@@ -465,9 +465,21 @@ fresh_command() {
   refute_file_exists "$mount/store/public/old-only"
   assert_equal "$(cat "$mount/store/public/configuration.php")" 'new configuration'
   assert_equal "$(cat "$mount/store/private")" neighbour
+  run joomlaPlaygroundImportWebsite "$incoming" web image recovered/new/public 0 "$token" check
+  assert_success
+  [ ! -e "$mount/recovered" ]
+  run joomlaPlaygroundImportWebsite "$incoming" web image store/private/child 0 "$token" check
+  assert_failure
+  assert_output_contains 'non-directory'
+  run joomlaPlaygroundImportWebsite "$incoming" web image recovered/new/public 0 "$token" replace
+  assert_success
+  assert_equal "$(cat "$mount/recovered/new/public/configuration.php")" 'new configuration'
   if ! is_windows; then
     assert_equal "$(file_mode "$mount/store/private")" 600
     ln -s store "$mount/alias"
+    run joomlaPlaygroundImportWebsite "$incoming" web image alias/public 0 "$token" check
+    assert_failure
+    assert_output_contains 'symbolic link'
     run joomlaPlaygroundImportWebsite "$incoming" web image alias/public 0 "$token" replace
     assert_failure
     assert_output_contains 'symbolic link'
@@ -514,15 +526,17 @@ JSON
 # Exercise the shared step against each destination. Files and native clients
 # are substituted here; the Docker fixture checks the resulting Joomla sites.
 shared_import_standins() {
+  local mode="${1:-fresh}"
+  if [ "$#" -gt 0 ]; then shift; fi
   joomlaPlaygroundPreparePackage "$package" "$prepared" >/dev/null
-  parseCLI --non-interactive
+  parseCLI --non-interactive "$@"
   joomlaPlaygroundConfirmFreshSettings "$prepared"
   work="$prepared/runtime"
   mkdir "$work"
   printf '%s\n' 1234567890abcdef1234567890abcdef > "$work/token"
   VDM_DB_ENGINE=mariadb VDM_DB_HOST=db VDM_DB_DRIVER=mysqli VDM_DB_NAME=shop
   VDM_DB_USER=shop VDM_DB_PASSWORD=private-fixture-db
-  if [ "${1:-fresh}" = replace ]; then
+  if [ "$mode" = replace ]; then
     cp "$prepared/site/configuration.php" "$work/existing.php"
     joomlaPlaygroundConfigureImport "$prepared" "$work/existing.php" "$VDM_DB_HOST" "$VDM_DB_DRIVER" \
       "$VDM_DB_NAME" "$VDM_DB_USER" "$VDM_DB_PASSWORD" /var/www/html
@@ -531,6 +545,7 @@ shared_import_standins() {
   joomlaPlaygroundWaitDatabase() { :; }
   joomlaDatabaseTablesResolved() { printf '%s' "${fixture_tables:-}"; }
   joomlaPlaygroundImportWebsite() {
+    if [ "$7" = check ]; then return "${fixture_root_status:-0}"; fi
     assert_file_contains "$1/configuration.php" "public \$host = 'db';"
     printf 'files:%s\n' "$7" >> "$SANDBOX/import-order"
     return "${fixture_files_status:-0}"
@@ -571,8 +586,8 @@ shared_import_standins() {
   }
 }
 
-@test "both targets use the same files SQL and administrator import with only selected-database reset" {
-  shared_import_standins
+@test "both targets use the same files SQL and requested administrator edit with only selected-database reset" {
+  shared_import_standins fresh --admin-password private-fixture-reset
   run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount fresh
   assert_success
   assert_equal "$(cat "$SANDBOX/import-order")" $'files:fresh\nsql\naccount'
@@ -613,7 +628,7 @@ shared_import_standins() {
 }
 
 @test "both targets run administrator updates as the website owner so Joomla caches remain writable" {
-  shared_import_standins
+  shared_import_standins fresh --admin-password private-fixture-reset
   local mode owner VDM_PUID VDM_PGID
   for mode in fresh replace; do
     for owner in www-data:www-data 1234:5678 '#1234:#5678' 1234:www-data www-data:5678; do
@@ -666,6 +681,17 @@ shared_import_standins() {
   refute_file_exists "$SANDBOX/account-args"
 }
 
+@test "an unsafe selected document root stops the import before database or file writes" {
+  shared_import_standins replace
+  local fixture_root_status=1
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html/site/public image mount replace
+  assert_failure
+  assert_equal "$(cat "$work/import-stage")" document-root
+  refute_file_exists "$work/import-writing"
+  refute_file_exists "$SANDBOX/programs-query"
+  refute_file_exists "$SANDBOX/import-order"
+}
+
 @test "a failed read-only schema inventory keeps replacement before its first write" {
   shared_import_standins replace
   joomlaDatabaseClient() {
@@ -691,18 +717,52 @@ shared_import_standins() {
   refute_file_exists "$SANDBOX/reset-query"
 }
 
-@test "replacement administrator uses the normal selected context and readable prepared PHP settings" {
+@test "default replacement keeps imported accounts without starting the Joomla administrator process" {
   shared_import_standins replace
-  joomlaPHPPatchIni '' "$work/candidate.ini" memory_limit 768M
-  local VDM_PHP_INI_TARGET=/usr/local/etc/php/conf.d/zz-octojoom.ini
-  local VDM_DB_COMPOSE="$work/candidate.yml" VDM_DB_ENV="$work/published.env" VDM_DB_PROJECT_DIR="$SANDBOX/selected-site"
+  joomlaSiteJSON '.username="stale-login" | .email="old@example.test" | .password="obsolete-password"' \
+    < "$prepared/account.json" > "$work/stale.json"
+  mv "$work/stale.json" "$prepared/account.json"
+  joomlaDatabaseCompose() { echo "Unexpected Joomla process" >&2; return 1; }
   run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace
   assert_success
-  assert_file_contains "$SANDBOX/account-args" --volume
-  assert_file_contains "$SANDBOX/account-args" "$(joomlaWebHostPath "$work/candidate.ini"):$VDM_PHP_INI_TARGET:ro"
-  assert_file_contains "$work/candidate.ini" 'memory_limit = 768M'
+  assert_equal "$(cat "$SANDBOX/import-order")" $'programs\nfiles:replace\nclear\nsql'
+  refute_file_exists "$SANDBOX/account-args"
+}
+
+@test "explicit replacement source account is still checked by Joomla" {
+  shared_import_standins replace --type joomla --task playground --action deploy --source-admin-username real-admin
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace
+  assert_success
+  assert_file_contains "$SANDBOX/account-args" --entrypoint
+  assert_file_contains "$SANDBOX/account-args" php
+}
+
+@test "replacement administrator reset uses the installed Compose service and its existing PHP mounts" {
+  shared_import_standins replace --admin-password private-fixture-reset
+  local VDM_DB_COMPOSE="$SANDBOX/selected-site/docker-compose.yml" VDM_DB_ENV="$SANDBOX/shared.env" VDM_DB_PROJECT_DIR="$SANDBOX/selected-site"
+  run joomlaPlaygroundImportPackage "$prepared" "$site" "$work" app /var/www/html image mount replace
+  assert_success
+  refute_file_contains "$SANDBOX/account-args" --volume
+  assert_file_contains "$SANDBOX/account-args" --no-deps
+  assert_file_contains "$SANDBOX/account-args" --entrypoint
   assert_equal "$(cat "$SANDBOX/account-context")" "$(joomlaWebHostPath "$VDM_DB_COMPOSE")"$'\n'"$(joomlaWebHostPath "$VDM_DB_ENV")"$'\n'"$(joomlaWebHostPath "$VDM_DB_PROJECT_DIR")"
-  if ! is_windows; then assert_equal "$(file_mode "$work/candidate.ini")" 644; fi
+}
+
+@test "replacement pins native Compose commands to the selected installed project" {
+  local VDM_DB_PROJECT_DIR="$SANDBOX/installed-site" VDM_DB_PROJECT=operator_project
+  local VDM_DB_COMPOSE="$VDM_DB_PROJECT_DIR/docker-compose.yml" VDM_DB_ENV="$SANDBOX/shared.env" VDM_PLAYGROUND_REPAIR=true
+  mkdir "$VDM_DB_PROJECT_DIR"
+  cat > "$VDM_DB_COMPOSE" <<'YAML'
+services:
+  app:
+    image: ${CUSTOM_IMAGE:-joomla}
+YAML
+  printf '%s\n' 'CUSTOM_IMAGE=operator/joomla' 'COMPOSE_PROJECT_NAME=operator_project' > "$VDM_DB_ENV"
+  runComposeProgress() { printf '%s\n' "$@"; }
+  run joomlaDatabaseCompose run --no-deps --entrypoint php app -v
+  assert_success
+  assert_equal "$output" "$(printf '%s\n' "$VDM_DB_COMPOSE" compose --env-file "$VDM_DB_ENV" --file "$VDM_DB_COMPOSE" \
+    --project-directory "$VDM_DB_PROJECT_DIR" --project-name operator_project run --no-deps --entrypoint php app -v)"
 }
 
 @test "database reset retains literal identifier bytes and confines its SQL mode to the reset session" {

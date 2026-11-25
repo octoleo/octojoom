@@ -25,6 +25,7 @@ renamed_package="$work/Renamed donor store.zip"
 image=joomla:6.2.0-php8.4-apache
 database_image=mariadb:11.4
 fpm_image=joomla:6.2.0-php8.4-fpm
+repair_image="octojoom-ci-repair:opaque-$run_id"
 mysql_image=mysql:8.4
 nginx_docroot=store/public
 DONOR_PASSWORD=$(openssl rand -hex 18)
@@ -56,6 +57,7 @@ cleanup() {
     fi
   done
   if [ -f "$work/donor.yml" ]; then donor down -v --remove-orphans >/dev/null; fi
+  docker image rm "$repair_image" >/dev/null 2>&1
   docker rm -f "$proxy" "$retired_container" >/dev/null 2>&1
   docker network rm "$network" "$ssh_network" >/dev/null 2>&1
   if ((EUID == 0)); then rm -rf -- "$work"; else sudo -n rm -rf -- "$work"; fi
@@ -237,14 +239,18 @@ check_site() {
   migrationReadEnvValue "$env_file" "VDM_${key^^}_PGID" gid || gid=''
   uid="${uid#\#}"; gid="${gid#\#}"
   [ "$(stat -c %a "$env_file")" = 600 ] || { echo 'Site environment permissions are too broad.' >&2; return 1; }
-  for var in SITE_NAME ADMIN_USERNAME ADMIN_USER ADMIN_EMAIL ADMIN_PASSWORD DB_PREFIX; do
-    case "$var" in
-      SITE_NAME) expected="$sitename";; ADMIN_USERNAME) expected="$username";; ADMIN_USER) expected="$display";;
-      ADMIN_EMAIL) expected="$email";; ADMIN_PASSWORD) expected="$password";; DB_PREFIX) expected=demo_;;
-    esac
-    migrationReadEnvValue "$env_file" "VDM_${key^^}_JOOMLA_$var" observed
-    [ "$observed" = "$expected" ] || { echo "Unexpected effective environment field: $var" >&2; return 1; }
-  done
+  # Fresh setup records installation choices. Existing imports change Joomla
+  # content and accounts while preserving the operator's original environment.
+  if [ "${check_fresh_env:-true}" = true ]; then
+    for var in SITE_NAME ADMIN_USERNAME ADMIN_USER ADMIN_EMAIL ADMIN_PASSWORD DB_PREFIX; do
+      case "$var" in
+        SITE_NAME) expected="$sitename";; ADMIN_USERNAME) expected="$username";; ADMIN_USER) expected="$display";;
+        ADMIN_EMAIL) expected="$email";; ADMIN_PASSWORD) expected="$password";; DB_PREFIX) expected=demo_;;
+      esac
+      migrationReadEnvValue "$env_file" "VDM_${key^^}_JOOMLA_$var" observed
+      [ "$observed" = "$expected" ] || { echo "Unexpected effective environment field: $var" >&2; return 1; }
+    done
+  fi
   # Check the original donor ID, groups and Joomla permissions independently
   # of CLI output. The confirmed password travels through standard input.
   # Joomla API calls may write language caches; use the selected website owner.
@@ -350,6 +356,7 @@ fi
 check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 echo 'Fresh Playground deployment passed for Apache/MariaDB and Nginx/PHP-FPM/MySQL, including SQL values and administrator accounts.'
 
+check_fresh_env=false
 # Reproduce a long-lived installation whose Apache site uses the shared ENV.
 # The stopped/FPM site keeps its private ENV throughout the remaining tests.
 cp "$sites/new.$domain/.env" "$shared_env"
@@ -442,8 +449,12 @@ replacement_state() {
         exit;
     }
     $old = $mode === "original";
-    if ($c->smtphost !== "mail.fixture.invalid" || ($c->ciTargetPolicy ?? null) !== true
-        || ($c->secret === $oldSecret) !== $old || is_file($marker) !== $old) exit(4);
+    if ($mode === "recovered") {
+        if ($c->smtphost !== "localhost" || isset($c->ciTargetPolicy)) exit(4);
+    } elseif ($c->smtphost !== "mail.fixture.invalid" || ($c->ciTargetPolicy ?? null) !== true) {
+        exit(4);
+    }
+    if (($c->secret === $oldSecret) !== $old || is_file($marker) !== $old) exit(4);
     $table=(bool)$db->query("SHOW TABLES LIKE \"ci_previous_data\"")->num_rows;
     if ($table !== $old || ($old && (int)$db->query("SELECT id FROM ci_previous_data")->fetch_row()[0] !== 2026)) exit(5);
     foreach ([
@@ -613,6 +624,7 @@ original_db=$(destination new ps -q "mariadb$first")
 neighbor_ids=$(destination stopped ps --status running -q | sort)
 assert_preserved() {
   assert_shared_environment
+  cmp "$(destination_env new)" "$work/before/.env"
   assert_unrelated_sites
   cmp "$sites/new.$domain/docker-compose.yml" "$work/before/docker-compose.yml"
   [ "$sites/new.$domain/docker-compose.yml" -ef "$work/before/compose-inode" ]
@@ -698,8 +710,17 @@ for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$r
 replacement_state stopped "$second" seed "/var/www/html/$nginx_docroot"
 nginx_port=$(publish_fixture_port stopped "nginx$second")
 storage_identity stopped "$second" > "$work/before/named-storage"
+# The selected app runs a locally tagged image with an opaque repository and tag.
+# Its service and mount declarations supply the information required for repair.
+docker tag "$fpm_image" "$repair_image"
+siteReplaceServiceScalar "$sites/stopped.$domain/docker-compose.yml" "$work/repair-compose.yml" \
+  "joomla$second" image "$repair_image"
+cp "$work/repair-compose.yml" "$sites/stopped.$domain/docker-compose.yml"
 cp "$sites/stopped.$domain/docker-compose.yml" "$work/before/nginx-compose.yml"
 private_env=$(destination_env stopped)
+sed "/^VDM_${second^^}_WEBSERVER=/d" "$private_env" > "$work/custom-private.env"
+printf 'CUSTOM_DOMAIN=example.test\n' >> "$work/custom-private.env"
+cat "$work/custom-private.env" > "$private_env"
 destination stopped exec -T --user 0 --workdir /var/www/html "joomla$second" sh -ceu '
   mkdir store/companion
   printf "%s\n" "private companion content" > store/companion/keep.txt
@@ -719,6 +740,7 @@ destination stopped run --rm -T --no-deps --user 0 --workdir /var/www/html --ent
   test "$(cat real-store/public/.octojoom-ci-previous)" = "original website"
   rm store
   mv real-store store
+  rm store/public/configuration.php
 '
 new_neighbor_ids=$(destination new ps --status running -q | sort)
 started_after=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
@@ -727,6 +749,7 @@ jq -e '.success and .data.target=="current" and .data.backup==null and .data.run
 assert_clean_replacement_log "$work/stopped-replacement.log"
 assert_unrelated_sites
 [ "$(destination_env stopped)" = "$private_env" ]
+cmp "$work/custom-private.env" "$private_env"
 [ ! -e "$OCTOJOOM_HOME/Docker/joomla/enabled/stopped.$domain" ]
 [ -z "$(destination stopped ps -q --status running)" ]
 cmp "$sites/stopped.$domain/docker-compose.yml" "$work/before/nginx-compose.yml"
@@ -756,7 +779,7 @@ cmp "$work/before/named-storage" "$work/current-storage"
 check_site stopped "$second" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD" \
   "/var/www/html/$nginx_docroot" "nginx$second"
 check_admin_login stopped shopmanager "$CONFIRMED_PASSWORD"
-replacement_state stopped "$second" replaced "/var/www/html/$nginx_docroot"
+replacement_state stopped "$second" recovered "/var/www/html/$nginx_docroot"
 [ "$(destination new ps --status running -q | sort)" = "$new_neighbor_ids" ]
 for port in "$proxy_port" "$nginx_port"; do require_routed_text stopped "$port" "$route_file" "exported-renamed-$run_id"; done
 assert_shared_environment

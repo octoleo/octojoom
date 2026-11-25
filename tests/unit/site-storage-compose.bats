@@ -57,9 +57,6 @@ storage_original_snapshot() {
   cp "$compose" "$original_work/initial-compose"
   original_digest=$(migrationArchiveDigest "$directory/.env")
   joomlaStorageComposeModel "$site" "$directory/.env" "$compose" > "$original_work/rendered.json"
-  # Project ownership needs a daemon; the configuration and original-state
-  # checks remain real and must finish before this ownership check is reached.
-  joomlaPlaygroundReplacementProject() { return 0; }
 }
 
 @test "storage rejects unset interpolation from successful Compose without exposing native diagnostics" {
@@ -109,16 +106,14 @@ storage_original_snapshot() {
   assert_equal "$(tail -c 1 "$SANDBOX/model.json")" '}'
   run cmp -s "$SANDBOX/model.json" "$original_work/rendered.json"
   assert_failure
-  run joomlaPlaygroundCheckOriginalSite "$site" "$original_work" "$compose" "$directory/.env" "$original_digest" disabled '' alpha
-  assert_success
-  assert_equal "$output" ''
+  joomlaStorageComposeModel "$site" "$directory/.env" "$compose" > "$original_work/current-model.json"
   cmp "$original_work/rendered.json" "$original_work/current-model.json"
 
   joomlaSiteJSON '.services.web.volumes[0].source += "/changed"' < "$SANDBOX/model.json" > "$SANDBOX/changed.json"
   mv "$SANDBOX/changed.json" "$SANDBOX/model.json"
-  run joomlaPlaygroundCheckOriginalSite "$site" "$original_work" "$compose" "$directory/.env" "$original_digest" disabled '' alpha
-  assert_failure
-  assert_output_contains 'The original Compose settings or site registration changed during deployment.'
+  joomlaStorageComposeModel "$site" "$directory/.env" "$compose" > "$original_work/current-model.json"
+  run cmp -s "$original_work/rendered.json" "$original_work/current-model.json"
+  assert_status 1
 }
 
 @test "storage rejects malformed JSON and unresolved mount identities" {
@@ -247,9 +242,7 @@ services:
 YAML
   printf 'DEPLOYMENT_MARKER=original\n' > "$directory/service.env"
   storage_original_snapshot
-  run joomlaPlaygroundCheckOriginalSite "$site" "$original_work" "$compose" "$directory/.env" "$original_digest" disabled '' alpha
-  assert_success
-  assert_equal "$output" ''
+  joomlaStorageComposeModel "$site" "$directory/.env" "$compose" > "$original_work/current-model.json"
   cmp "$original_work/rendered.json" "$original_work/current-model.json"
 
   # A dependency changes while the checked Compose and interpolation files
@@ -257,9 +250,9 @@ YAML
   printf 'DEPLOYMENT_MARKER=changed\n' > "$directory/service.env"
   cmp "$original_work/initial-compose" "$compose"
   assert_equal "$(migrationArchiveDigest "$directory/.env")" "$original_digest"
-  run joomlaPlaygroundCheckOriginalSite "$site" "$original_work" "$compose" "$directory/.env" "$original_digest" disabled '' alpha
-  assert_failure
-  assert_output_contains 'The original Compose settings or site registration changed during deployment.'
+  joomlaStorageComposeModel "$site" "$directory/.env" "$compose" > "$original_work/current-model.json"
+  run cmp -s "$original_work/rendered.json" "$original_work/current-model.json"
+  assert_status 1
   assert_equal "$(joomlaSiteJSON -r '.services.web.environment.DEPLOYMENT_MARKER' < "$original_work/current-model.json")" changed
 }
 
