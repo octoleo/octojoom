@@ -267,7 +267,7 @@ record_calls() {
   assert_answers_used
 }
 
-@test "showJoomla: pending update count refreshes after applying existing configurations" {
+@test "showJoomla: alignment runs only when the operator selects it" {
   make_joomla_container_with_php jcb JCB jcb
   # Called by the application functions loaded through the test harness.
   # shellcheck disable=SC2317
@@ -281,11 +281,17 @@ record_calls() {
   run showJoomla
   assert_success
   assert_answers_used
-  assert_file_contains "${SANDBOX}/menu-arguments" 'Update existing configurations (pending: 1)'
-  # The reopened menu no longer shows a pending count after the actual update.
-  [ "$(grep -cxF 'Update existing configurations' "${SANDBOX}/menu-arguments")" -eq 1 ]
+  [ "$(grep -cxF 'Update existing configurations' "${SANDBOX}/menu-arguments")" -eq 2 ]
   assert_file_exists "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/.env"
-  assert_equal "$(configurationAlignmentCount)" 0
+}
+
+@test "showJoomla: opening the menu never reads other sites' settings" {
+  make_joomla_container_with_php jcb JCB jcb
+  siteAlignmentPlan() { touch "${SANDBOX}/unrequested-scan"; return 1; }
+  answers back
+  run showJoomla
+  assert_success
+  refute_file_exists "${SANDBOX}/unrequested-scan"
 }
 
 @test "mainMenu: existing-site updates belong to the Joomla menu" {

@@ -57,11 +57,14 @@ start with a letter and contain at most 15 letters, digits or underscores.
 Invalid explicit prefixes fail before setup creates files. In bulk setup an
 explicit prefix applies to every site's separate database.
 
-Missing identity, invalid options and conflicting shared database credentials
-are rejected before first-run directory creation in noninteractive mode. A
-shared environment key can be reused with the same database credentials. Use a
-new environment key for independent credentials; setup will not overwrite
-another website's shared credentials.
+For a single new website, setup uses the chosen project key and hostname. It
+reads saved database defaults for the selected environment key. Explicit database
+values take precedence. If `joomla/.env` already exists, setup writes the new
+site’s settings to `joomla/available/<hostname>/.env`. Existing sites keep
+their environments. In a new registry, the first site can create `joomla/.env`.
+
+Setup renders the new site's Compose file with its generated settings. Choosing
+**Enable Container** starts that project on its configured Traefik network.
 
 ## Change an existing site's persistence
 

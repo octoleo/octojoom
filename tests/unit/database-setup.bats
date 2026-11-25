@@ -132,7 +132,7 @@ database_capabilities() {
   VDM_KEY=bravo VDM_DB_ENGINE=postgres VDM_DB_IMAGE=postgres:chosen
   joomla__TRuST__setup
   assert_equal "$VDM_DEFAULT_JOOMLA_DB_IMAGE" mysql:saved
-  assert_file_contains "$VDM_REPO_PATH/joomla/.env" 'VDM_BRAVO_DB_IMAGE="postgres:chosen"'
+  assert_file_contains "$(getContainerEnvFile joomla bravo.example.test available)" 'VDM_BRAVO_DB_IMAGE="postgres:chosen"'
   assert_file_contains "$VDM_REPO_PATH/joomla/.env" 'VDM_ALPHA_DB_IMAGE="mysql:saved"'
 }
 

@@ -147,6 +147,14 @@ make_single_container() {
   done
 }
 
+@test "setup: new Joomla sites require only their configured gateway" {
+  main() { return 0; }
+  run setupContainer joomla
+  assert_success
+  assert_command '^docker network inspect traefik_webgateway'
+  refute_command '^docker network .*openssh_gateway'
+}
+
 @test "setup: network creation failure stops before collecting container details" {
   fail_command docker-network-create 5
   run setupContainer joomla

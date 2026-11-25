@@ -125,7 +125,10 @@ fail_php_publication() {
   assert_equal "$(grep -c '^VDM_ABC_DB=' "$(shared_env)")" 1
 }
 
-@test "joomla setup: answering yes to enable starts the container" {
+@test "joomla setup: answering yes starts only the newly generated site" {
+  # Existing-site enable does PHP discovery. Setup has just written this INI.
+  joomlaPHPEnsureSiteIni() { return 41; }
+  hasDirectories() { return 41; }
   octojoom_config
   answers 4.2 jcb JCB jcb no jcb_db jcb_user userpass rootpass yes yes
   run joomla__TRuST__setup
@@ -543,4 +546,57 @@ EOF
   run setDockerEntrypoint
   assert_status 7
   assert_equal "$(cat "${VDM_PROJECT_PATH}/abc/entrypoint.sh")" 'original entrypoint'
+}
+
+@test "joomla setup: an operator-owned Joomla environment stays byte-for-byte intact" {
+  octojoom_config
+  local shared site
+  shared="$(shared_env)"
+  site="${VDM_REPO_PATH}/joomla/available/alpha.vdm.dev"
+  mkdir -p "${shared%/*}"
+  cat > "$shared" <<'ENV'
+# Local Compose project
+COMPOSE_PROJECT_NAME=operators
+CUSTOM_LITERAL='first line
+VDM_ALPHA_DB_PASS="should never become a password"
+VDM_PROJECT_PATH="/not-a-project"
+'
+export VDM_ALPHA_DB='operator_db'
+UNRELATED=${LOCAL_TAG:-default}
+VDM_BRAVO_DB_PASS="sibling secret"
+this is managed by another tool
+ENV
+  # The absent trailing newline is deliberate.
+  printf '%s' 'CUSTOM_LAST=unchanged' >> "$shared"
+  cp "$shared" "$SANDBOX/original.env"
+  answers 4.2 alpha ALPHA alpha no chosen_user chosen_pass chosen_root no
+  run joomla__TRuST__setup
+  assert_success
+  assert_answers_used
+  cmp "$SANDBOX/original.env" "$shared"
+  assert_file_contains "$site/.env" 'VDM_ALPHA_DB="operator_db"'
+  assert_file_contains "$site/.env" 'VDM_ALPHA_DB_USER="chosen_user"'
+  assert_file_contains "$site/.env" 'VDM_ALPHA_DB_PASS="chosen_pass"'
+  assert_file_contains "$site/.env" "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
+  assert_file_contains "$site/docker-compose.yml" 'container_name: joomlaalpha'
+  ! grep -Eq 'CUSTOM_|COMPOSE_PROJECT_NAME|VDM_BRAVO_' "$site/.env"
+}
+
+@test "setup defaults: only requested keys are read and quoted foreign records cannot supply values" {
+  local env_file="$SANDBOX/custom.env"
+  local VDM_OK='' VDM_OTHER=untouched VDM_FAKE=untouched VDM_SECURE=true
+  cat > "$env_file" <<'ENV'
+CUSTOM: "line one with an escaped \" quote
+VDM_FAKE=forged
+"
+VDM_OTHER=no
+export VDM_OK=earlier
+VDM_OK='literal $(pwd)'
+VDM_SECURE=bogus
+ENV
+  readSetupEnvValues "$env_file" VDM_OK VDM_FAKE VDM_SECURE
+  assert_equal "$VDM_OK" 'literal $(pwd)'
+  assert_equal "$VDM_OTHER" untouched
+  assert_equal "$VDM_FAKE" untouched
+  assert_equal "$VDM_SECURE" true
 }
