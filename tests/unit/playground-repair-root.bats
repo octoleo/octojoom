@@ -11,7 +11,8 @@ setup() {
   tree="$VDM_PROJECT_PATH/shop/joomla"
   mkdir -p "$tree/host/store" "$tree/host/sibling"
   echo 'keep me' > "$tree/host/sibling/data"
-  jq -n --arg tree "$tree" '{services:{app:{image:"joomla:latest",environment:{JOOMLA_DB_HOST:"db"},volumes:[{type:"bind",source:$tree,target:"/var/www/html"}]},db:{image:"mariadb:latest"}}}' > "$SANDBOX/model"
+  mount_source=$(joomlaWebHostPath "$tree")
+  joomlaSiteJSON -n --arg tree "$mount_source" '{services:{app:{image:"joomla:latest",environment:{JOOMLA_DB_HOST:"db"},volumes:[{type:"bind",source:$tree,target:"/var/www/html"}]},db:{image:"mariadb:latest"}}}' > "$SANDBOX/model"
   joomlaSiteCompose() {
     [ "$1" = shop.example.test ] && [ "$2" = config ] && cat "$SANDBOX/model"
   }
@@ -28,7 +29,7 @@ VDM_SHOP_DOCROOT="host/store" # actual selected site
 ENV
   readJoomlaSiteFacts shop.example.test
   assert_equal "$VDM_SITE_DOCROOT" /var/www/html/host/store
-  assert_equal "$VDM_SITE_HOST_PATH" "$tree/host/store"
+  assert_equal "$VDM_SITE_HOST_PATH" "$mount_source/host/store"
   assert_file_contains "$tree/host/sibling/data" 'keep me'
 }
 
@@ -47,10 +48,10 @@ ENV
 }
 
 @test "repair infers the selected Compose root and stops when explicit root declarations disagree" {
-  jq '.services.app.working_dir="/var/www/html/host/store/" | .services.app.environment.APACHE_DOCUMENT_ROOT="/var/www/html/host/store"' "$SANDBOX/model" > "$SANDBOX/updated"
+  joomlaSiteJSON '.services.app.working_dir="/var/www/html/host/store/" | .services.app.environment.APACHE_DOCUMENT_ROOT="/var/www/html/host/store"' < "$SANDBOX/model" > "$SANDBOX/updated"
   mv "$SANDBOX/updated" "$SANDBOX/model"
   readJoomlaSiteFacts shop.example.test
-  assert_equal "$VDM_SITE_HOST_PATH" "$tree/host/store"
+  assert_equal "$VDM_SITE_HOST_PATH" "$mount_source/host/store"
   echo 'VDM_SHOP_DOCROOT=.' >> "$shared_env"
   run readJoomlaSiteFacts shop.example.test
   assert_failure

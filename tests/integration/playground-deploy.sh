@@ -543,6 +543,9 @@ check_admin_login() {
   local sub="$1" username="$2" password="$3" token http_status url="http://$1.$domain:$proxy_port"
   local -a request=(curl --noproxy '*' --fail-with-body --silent --show-error --max-time 30
     --resolve "$sub.$domain:$proxy_port:127.0.0.1")
+  # Traefik publishes the route after Docker reports a healthy service.
+  # Wait for this export's public marker before sending the login request.
+  require_routed_text "$sub" "$proxy_port" "$route_file" "$4" || return 1
   rm -f "$work/cookies"
   if ! http_status=$("${request[@]}" -c "$work/cookies" -o "$work/login.html" -w '%{http_code}' "$url/administrator/"); then
     printf 'Administrator login form returned HTTP %s.\n' "$http_status" >&2
@@ -594,12 +597,12 @@ other_database() {
     'exec mariadb --user=root --password="$MARIADB_ROOT_PASSWORD" --batch --skip-column-names'
 }
 without_backup=(--pre-backup no --confirm-no-backup yes)
-check_admin_login new shopmanager "$CONFIRMED_PASSWORD"
+check_admin_login new shopmanager "$CONFIRMED_PASSWORD" "exported-online-$run_id"
 replacement_state new "$first" seed
 destination new exec -T --user 0 "joomla$first" sh -c 'echo "$1" > "$2"' sh "previous-new-$run_id" "/var/www/html/$route_file"
 apache_port=$(publish_fixture_port new "joomla$first")
-for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "previous-new-$run_id"; done
-check_admin_login new shopmanager "$CONFIRMED_PASSWORD"
+require_routed_text new "$apache_port" "$route_file" "previous-new-$run_id"
+check_admin_login new shopmanager "$CONFIRMED_PASSWORD" "previous-new-$run_id"
 printf '\nprecision = 15\n' >> "$OCTOJOOM_HOME/Projects/$first/php.ini"
 # A custom probe belongs to the operator. Import must leave it unchanged.
 original_health=$(destination new config --format json | jq -cS --arg app "joomla$first" '.services[$app].healthcheck')
@@ -686,10 +689,10 @@ PY
 [ "$(find "${backup%/*}" -maxdepth 1 -name '*.sha256' | wc -l)" -eq 1 ]
 assert_preserved
 check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
-check_admin_login new shopmanager "$CONFIRMED_PASSWORD"
+check_admin_login new shopmanager "$CONFIRMED_PASSWORD" "exported-renamed-$run_id"
 replacement_state new "$first" replaced
 [ "$(destination new exec -T "joomla$first" php -r 'echo ini_get("precision");')" = 15 ]
-for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "exported-renamed-$run_id"; done
+require_routed_text new "$apache_port" "$route_file" "exported-renamed-$run_id"
 require_routed_text new "$proxy_port" "$write_file" 'stored fixture write' POST
 require_routed_text new "$apache_port" "$write_file" 'stored fixture write'
 
@@ -701,9 +704,9 @@ assert_clean_replacement_log "$work/running-no-backup.log"
 [ "$backup_listing" = "$(find "${backup%/*}" -maxdepth 1 -type f -print | sort)" ]
 assert_preserved
 check_site new "$first" 'Playground Donor' donoradmin 'Donor Administrator' donor@example.test "$DONOR_PASSWORD"
-check_admin_login new donoradmin "$DONOR_PASSWORD"
+check_admin_login new donoradmin "$DONOR_PASSWORD" "exported-online-$run_id"
 replacement_state new "$first" replaced
-for port in "$proxy_port" "$apache_port"; do require_routed_text new "$port" "$route_file" "exported-online-$run_id"; done
+require_routed_text new "$apache_port" "$route_file" "exported-online-$run_id"
 
 # A stopped Nginx/MySQL site imports into its existing named volumes and stays
 # stopped. Only the selected database and one-shot PHP helpers may start.
@@ -778,10 +781,10 @@ storage_identity stopped "$second" > "$work/current-storage"
 cmp "$work/before/named-storage" "$work/current-storage"
 check_site stopped "$second" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD" \
   "/var/www/html/$nginx_docroot" "nginx$second"
-check_admin_login stopped shopmanager "$CONFIRMED_PASSWORD"
+check_admin_login stopped shopmanager "$CONFIRMED_PASSWORD" "exported-renamed-$run_id"
 replacement_state stopped "$second" recovered "/var/www/html/$nginx_docroot"
 [ "$(destination new ps --status running -q | sort)" = "$new_neighbor_ids" ]
-for port in "$proxy_port" "$nginx_port"; do require_routed_text stopped "$port" "$route_file" "exported-renamed-$run_id"; done
+require_routed_text stopped "$nginx_port" "$route_file" "exported-renamed-$run_id"
 assert_shared_environment
 
 # A native SQL failure after overwrite starts is a failed import. The running
@@ -805,7 +808,7 @@ replace_site new "$renamed_package" "${without_backup[@]}" --input-json "$work/r
 jq -e '.success and .data.running==false and .data.backup==null' "$work/result" >/dev/null
 destination new up -d --wait --wait-timeout 240 >/dev/null
 check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
-check_admin_login new shopmanager "$CONFIRMED_PASSWORD"
+check_admin_login new shopmanager "$CONFIRMED_PASSWORD" "exported-renamed-$run_id"
 storage_identity new "$first" > "$work/current-storage"
 cmp "$work/before/bind-storage" "$work/current-storage"
 assert_shared_environment

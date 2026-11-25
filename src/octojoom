@@ -5862,7 +5862,7 @@ function joomlaDatabaseDiscoverClients() {
 # named by the app. A second database in this project cannot become the target.
 # shellcheck disable=SC2016
 function joomlaPlaygroundDatabaseEnvironment() {
-  jq -ce --arg service "$1" '
+  joomlaSiteJSON -ce --arg service "$1" '
     .services as $services | $services[$service].environment // {} |
     . as $app | (.JOOMLA_DB_HOST // "" | sub(":[0-9]+$"; "")) as $host |
     [$services | to_entries[] | select($host != "" and
@@ -5897,26 +5897,26 @@ function joomlaDatabaseContext() {
   if [ "${VDM_PLAYGROUND_REPAIR:-false}" = true ]; then
     app=$(joomlaPlaygroundDatabaseEnvironment "$VDM_SITE_SERVICE" <<< "$model") || return 1
     installed='{"installed":false}'
-    if ! jq -e '[.JOOMLA_DB_HOST,.JOOMLA_DB_NAME,.JOOMLA_DB_USER,.JOOMLA_DB_PASSWORD] | all(.[]; type=="string" and length>0)' <<< "$app" >/dev/null; then
+    if ! joomlaSiteJSON -e '[.JOOMLA_DB_HOST,.JOOMLA_DB_NAME,.JOOMLA_DB_USER,.JOOMLA_DB_PASSWORD] | all(.[]; type=="string" and length>0)' <<< "$app" >/dev/null; then
       installed=$(joomlaDatabaseReadConfiguration 2>/dev/null) || installed='{"installed":false}'
     fi
   else
-    app=$(jq -c --arg service "$VDM_SITE_SERVICE" '.services[$service].environment // {}' <<< "$model") || return 1
+    app=$(joomlaSiteJSON -c --arg service "$VDM_SITE_SERVICE" '.services[$service].environment // {}' <<< "$model") || return 1
     installed=$(joomlaDatabaseReadConfiguration) || { printf 'The installed Joomla connection could not be inspected.\n' >&2; return 1; }
   fi
-  jq -e 'has("installed")' >/dev/null <<< "$installed" || return 1
-  driver=$(jq -r '.driver // empty' <<< "$installed")
-  [ -n "$driver" ] || driver=$(jq -r '.JOOMLA_DB_TYPE // "mysqli"' <<< "$app")
+  joomlaSiteJSON -e 'has("installed")' >/dev/null <<< "$installed" || return 1
+  driver=$(joomlaSiteJSON -r '.driver // empty' <<< "$installed")
+  [ -n "$driver" ] || driver=$(joomlaSiteJSON -r '.JOOMLA_DB_TYPE // "mysqli"' <<< "$app")
   case "$driver" in pgsql|postgresql|pdo_pgsql) VDM_DB_ENGINE=postgres; VDM_DB_PORT=5432;; mysqli|mysql|pdomysql|pdo_mysql) VDM_DB_ENGINE=mysql; VDM_DB_PORT=3306;; *) printf 'Unsupported installed database driver.\n' >&2; return 1;; esac
   for field in host name user password; do
     case "$field" in host) configured=JOOMLA_DB_HOST;; name) configured=JOOMLA_DB_NAME;; user) configured=JOOMLA_DB_USER;; password) configured=JOOMLA_DB_PASSWORD;; esac
-    value=$(jq -r --arg key "$configured" '.[$key] // empty' <<< "$app") || return 1
+    value=$(joomlaSiteJSON -r --arg key "$configured" '.[$key] // empty' <<< "$app") || return 1
     # `compose config` emits reusable Compose data: every literal dollar is
     # escaped as $$. Decode that serialization once, without interpolation or
     # evaluation, before comparing it with the installed application's value.
     value="${value//\$\$/\$}"
-    if [ "$(jq -r '.installed' <<< "$installed")" = true ]; then
-      host=$(jq -r --arg key "$field" '.[$key] // empty' <<< "$installed") || return 1
+    if [ "$(joomlaSiteJSON -r '.installed' <<< "$installed")" = true ]; then
+      host=$(joomlaSiteJSON -r --arg key "$field" '.[$key] // empty' <<< "$installed") || return 1
       if [ "$field" = host ]; then value="${value%:"$VDM_DB_PORT"}"; host="${host%:"$VDM_DB_PORT"}"; fi
       if [ -n "$value" ] && [ "$value" != "$host" ]; then
         printf 'Database %s differs between %s/configuration.php and the connection in %s (effective ENV: %s). Correct those selected-site settings before retrying.\n' "$field" "$VDM_SITE_DOCROOT" "$VDM_SITE_COMPOSE" "$VDM_SITE_ENV" >&2; return 1
@@ -5926,20 +5926,20 @@ function joomlaDatabaseContext() {
     [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || { printf 'Database %s is missing or contains unsupported line breaks. Check %s/configuration.php and %s.\n' "$field" "$VDM_SITE_DOCROOT" "$VDM_SITE_ENV" >&2; return 1; }
     printf -v "VDM_DB_${field^^}" '%s' "$value"
   done
-  VDM_DB_PREFIX=$(jq -r '.prefix // empty' <<< "$installed")
+  VDM_DB_PREFIX=$(joomlaSiteJSON -r '.prefix // empty' <<< "$installed")
   if [ "${VDM_PLAYGROUND_REPAIR:-false}" = true ] && [ -z "$VDM_DB_PREFIX" ]; then
-    VDM_DB_PREFIX=$(jq -r '.JOOMLA_DB_PREFIX // empty' <<< "$app") || return 1
+    VDM_DB_PREFIX=$(joomlaSiteJSON -r '.JOOMLA_DB_PREFIX // empty' <<< "$app") || return 1
   fi
   host="$VDM_DB_HOST"
   if [[ "$host" =~ ^([^:]+):([0-9]+)$ ]]; then host="${BASH_REMATCH[1]}"; VDM_DB_PORT="${BASH_REMATCH[2]}"; fi
   [[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && "$VDM_DB_PORT" =~ ^[0-9]+$ ]] || return 1
-  candidates=$(jq -r --arg host "$host" '[.services | to_entries[] | select(.key==$host or .value.container_name==$host or any(.value.networks[]?.aliases[]?; .==$host)) | .key] | unique | .[]' <<< "$model") || return 1
+  candidates=$(joomlaSiteJSON -r --arg host "$host" '[.services | to_entries[] | select(.key==$host or .value.container_name==$host or any(.value.networks[]?.aliases[]?; .==$host)) | .key] | unique | .[]' <<< "$model") || return 1
   [[ -n "$candidates" && "$candidates" != *$'\n'* ]] || { printf 'Joomla does not identify one database service in this Compose project.\n' >&2; return 1; }
   VDM_DB_SERVICE="$candidates"
-  VDM_DB_IMAGE=$(jq -r --arg service "$VDM_DB_SERVICE" '.services[$service].image // empty' <<< "$model")
+  VDM_DB_IMAGE=$(joomlaSiteJSON -r --arg service "$VDM_DB_SERVICE" '.services[$service].image // empty' <<< "$model")
   VDM_DB_DRIVER="$driver"
   [ "$VDM_DB_SERVICE" != "$VDM_SITE_SERVICE" ] || return 1
-  VDM_DB_INSTALLED=$(jq -r '.installed' <<< "$installed")
+  VDM_DB_INSTALLED=$(joomlaSiteJSON -r '.installed' <<< "$installed")
   joomlaDatabaseDiscoverClients
 }
 

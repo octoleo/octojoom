@@ -19,6 +19,11 @@ JSON
 }
 
 @test "repair resolves this site's connection without needing the old Joomla PHP" {
+  # Native Windows jq writes CRLF even when Bash captures the result.
+  jq() {
+    set -o pipefail
+    command jq "$@" | sed $'s/\r$//;s/$/\r/'
+  }
   joomlaDatabaseContext shop.example.test
   assert_equal "$VDM_DB_SERVICE" store
   assert_equal "$VDM_DB_NAME" inventory
