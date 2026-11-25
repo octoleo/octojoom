@@ -97,6 +97,37 @@ PHP
   assert_file_contains "$BACKUP_CALLS" 'dump project original'
 }
 
+@test "Playground backs up a stopped site without a functioning Joomla or a VDM-only shared environment" {
+  local work="$SANDBOX/import" shared="$VDM_REPO_PATH/joomla/.env" archive
+  mkdir -p "$work/web" "$work/db"
+  jq -n --arg path "$VDM_PROJECT_PATH/alpha/joomla" '{path:$path}' > "$work/web/mount.json"
+  jq -n --arg path "$VDM_PROJECT_PATH/alpha/db" '{path:$path}' > "$work/db/mount.json"
+  rm "$VDM_PROJECT_PATH/alpha/joomla/configuration.php"
+  printf '%s\n' 'TZ=Africa/Windhoek' 'VDM_OTHER_DB_PASS=unrelated-secret' \
+    "VDM_ALPHA_BACKUP_PATH=\"$BACKUP_DIRECTORY\"" >> "$shared"
+  cp "$shared" "$SANDBOX/original.env"
+  BACKUP_RUNNING='' VDM_PLAYGROUND_REPAIR=true VDM_DB_SERVICE=mariadbalpha
+  # The selected connection still identifies its database in a project that
+  # has another DB service. Only that database may be started for this dump.
+  jq '.services.reporting={image:"mysql:8"}' "$BACKUP_MODEL" > "$BACKUP_MODEL.next"
+  mv "$BACKUP_MODEL.next" "$BACKUP_MODEL"
+  run joomlaPlaygroundCreateReplacementBackup first.vdm.dev "$work" example selected
+  assert_success
+  IFS= read -r archive < "$work/verified-backup"
+  [[ "$archive" == "$BACKUP_DIRECTORY/"* ]]
+  mkdir "$SANDBOX/recovered"
+  joomlaBackupExtract "$archive" "$SANDBOX/recovered"
+  assert_file_exists "$SANDBOX/recovered/project/database.sql"
+  assert_file_exists "$SANDBOX/recovered/project/joomla/upload.txt"
+  refute_file_contains "$SANDBOX/recovered/compose/.env" unrelated-secret
+  refute_file_contains "$SANDBOX/recovered/compose/.env" 'TZ='
+  assert_file_contains "$BACKUP_CALLS" '--project-name selected up -d --no-deps mariadbalpha'
+  assert_file_contains "$BACKUP_CALLS" '--project-name selected stop mariadbalpha'
+  refute_file_contains "$BACKUP_CALLS" 'start joomlaalpha'
+  refute_file_contains "$BACKUP_CALLS" 'up -d --no-deps reporting'
+  cmp "$shared" "$SANDBOX/original.env"
+}
+
 @test "website ZIP contains SQL and restores payload metadata" {
   command -v zip >/dev/null && command -v unzip >/dev/null || skip 'zip tools unavailable'
   joomlaBackupCreate first.vdm.dev "$BACKUP_DIRECTORY/website.zip" website zip false >/dev/null

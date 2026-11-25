@@ -55,7 +55,7 @@ edit_json() {
   assert_output_contains 'different or unsupported mounts'
 }
 
-@test "replacement rejects the input ZIP and prospective PHP configuration inside the selected store" {
+@test "replacement rejects the input ZIP and the selected Compose file inside the website store" {
   local archive="$SANDBOX/web/site.zip"
   : > "$archive"
   run joomlaPlaygroundReplacementStorage fixture "$work" "$archive"
@@ -65,8 +65,8 @@ edit_json() {
   run joomlaPlaygroundReplacementStorage fixture "$work" web/site.zip
   assert_failure
   assert_output_contains 'overlaps its import inputs or deployment configuration'
-  printf '%s\n' "$SANDBOX/web/php.ini" > "$work/ini-destination.path"
-  run joomlaPlaygroundReplacementStorage fixture "$work"
+  touch "$SANDBOX/web/docker-compose.yml"
+  run joomlaPlaygroundReplacementStorage fixture "$work" "$SANDBOX/web/docker-compose.yml"
   assert_failure
   assert_output_contains 'overlaps its import inputs or deployment configuration'
 }

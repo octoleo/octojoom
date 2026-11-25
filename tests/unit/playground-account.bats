@@ -23,9 +23,15 @@ apply_account() {
   assert_success
   joomlaSiteJSON -e '.id==42 and .username=="owner" and .email=="new@example.test" and .newPasswordWorks' <<< "$output"
 
-  run apply_account '.password="stale-export-password"'
-  assert_equal "$status" 28
+  run apply_account '.password="stale-export-password" | .name="Old display name" | .email="old@example.test"'
+  assert_success
   assert_equal "$output" ''
+}
+
+@test "a confirmed edit preserves the imported hash and untouched email despite stale metadata" {
+  run apply_account '.password="stale-export-password" | .email="old@example.test" | .name="Updated owner" | .changed.name=true'
+  assert_success
+  joomlaSiteJSON -e '.id==42 and .email=="owner@example.test" and .keptHash' <<< "$output"
 }
 
 @test "an explicit source account can be renamed independently of stale export metadata" {

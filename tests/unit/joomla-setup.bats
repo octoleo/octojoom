@@ -579,7 +579,8 @@ ENV
   assert_file_contains "$site/.env" 'VDM_ALPHA_DB_PASS="chosen_pass"'
   assert_file_contains "$site/.env" "VDM_PROJECT_PATH=\"${VDM_PROJECT_PATH}\""
   assert_file_contains "$site/docker-compose.yml" 'container_name: joomlaalpha'
-  ! grep -Eq 'CUSTOM_|COMPOSE_PROJECT_NAME|VDM_BRAVO_' "$site/.env"
+  run grep -Eq 'CUSTOM_|COMPOSE_PROJECT_NAME|VDM_BRAVO_' "$site/.env"
+  assert_status 1
 }
 
 @test "setup defaults: only requested keys are read and quoted foreign records cannot supply values" {

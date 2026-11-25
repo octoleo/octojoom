@@ -257,40 +257,21 @@ PHP
   refute_file_contains "$candidate" 'private-new-admin-password'
 }
 
-@test "proposed environment keeps database identity and stores confirmed administrator values privately" {
-  local shared="$VDM_REPO_PATH/joomla/.env" candidate="$SANDBOX/site.env" value
-  cp "$shared" "$SANDBOX/shared.before"
-  printf 'VDM_SHOP_DOCROOT="public"\nVDM_SHOP_DB_ROOT="private-db-root"\n' > "$candidate"
+@test "existing-site administrator changes are applied through the private account request without editing the site environment" {
+  local env_file="$VDM_REPO_PATH/joomla/.env"
+  local VDM_DB_NAME=target_shop VDM_DB_USER=target_user VDM_DB_PASSWORD=private-target-password
+  cp "$env_file" "$SANDBOX/original.env"
   joomlaPlaygroundPreparePackage "$package" "$prepared" >/dev/null
-  local VDM_DB_NAME=old_db VDM_DB_USER=old_user VDM_DB_PASSWORD=private-old-db-password VDM_DB_DRIVER=mysqli
-  parseCLI --non-interactive --site-name 'Replaced shop' --admin-user 'New owner' --admin-username administrator \
-    --admin-email owner@example.test --admin-password 'private-new-admin-password'
+  parseCLI --non-interactive --admin-username shopowner --admin-password private-new-password
   joomlaPlaygroundConfirmReplaceSettings "$prepared"
-  run joomlaPlaygroundReplaceEnv "$candidate" SHOP
-  assert_success
-  refute_output_contains private-
-  migrationReadEnvValue "$candidate" VDM_SHOP_JOOMLA_SITE_NAME value
-  assert_equal "$value" 'Replaced shop'
-  migrationReadEnvValue "$candidate" VDM_SHOP_JOOMLA_ADMIN_USER value
-  assert_equal "$value" 'New owner'
-  migrationReadEnvValue "$candidate" VDM_SHOP_JOOMLA_ADMIN_USERNAME value
-  assert_equal "$value" administrator
-  migrationReadEnvValue "$candidate" VDM_SHOP_JOOMLA_ADMIN_EMAIL value
-  assert_equal "$value" owner@example.test
-  migrationReadEnvValue "$candidate" VDM_SHOP_JOOMLA_ADMIN_PASSWORD value
-  assert_equal "$value" private-new-admin-password
-  migrationReadEnvValue "$candidate" VDM_SHOP_JOOMLA_DB_PREFIX value
-  assert_equal "$value" demo_
-  migrationReadEnvValue "$candidate" VDM_SHOP_DB value
-  assert_equal "$value" old_db
-  migrationReadEnvValue "$candidate" VDM_SHOP_DB_USER value
-  assert_equal "$value" old_user
-  migrationReadEnvValue "$candidate" VDM_SHOP_DB_PASS value
-  # shellcheck disable=SC2016
-  assert_equal "$value" private-old-db-password
-  assert_file_contains "$candidate" private-db-root
-  assert_file_contains "$candidate" public
-  cmp "$shared" "$SANDBOX/shared.before"
+  joomlaSiteJSON -e '.username=="shopowner" and .password=="private-new-password" and
+    .changed.username and .changed.password' < "$prepared/account.json" >/dev/null
+  if ! is_windows; then assert_equal "$(file_mode "$prepared/account.json")" 600; fi
+  cmp "$env_file" "$SANDBOX/original.env"
+  parseCLI --non-interactive
+  joomlaPlaygroundConfirmReplaceSettings "$prepared"
+  joomlaSiteJSON -e '(.changed.password|not) and (.changed.username|not)' < "$prepared/account.json" >/dev/null
+  cmp "$env_file" "$SANDBOX/original.env"
 }
 
 @test "existing-site import refuses a different database identity or password" {
