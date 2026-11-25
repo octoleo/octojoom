@@ -52,8 +52,13 @@ YAML
 @test "replacement reads the selected site facts without consulting the proxy or published routes" {
   make_joomla_container alpha ALPHA first
   site_proxy
-  local package="$SANDBOX/prepared"
-  mkdir "$package"
+  local package="$SANDBOX/prepared" source
+  source=$(joomlaWebHostPath "$VDM_PROJECT_PATH/alpha/joomla")
+  mkdir -p "$package" "$STUB_DIR/docker/config"
+  joomlaSiteJSON -n --arg source "$source" '{
+    services:{joomlaalpha:{image:"joomla:latest",environment:{JOOMLA_DB_HOST:"mariadbalpha"},
+      volumes:[{type:"bind",source:$source,target:"/var/www/html"}]},mariadbalpha:{image:"mariadb:11"}}}
+  ' > "$STUB_DIR/docker/config/first.vdm.dev.json"
   traefikRunCompose() { echo render >> "$SANDBOX/routes"; return 1; }
   joomlaRouteURL() { echo route >> "$SANDBOX/routes"; return 1; }
   joomlaPublishedURL() { echo port >> "$SANDBOX/routes"; return 1; }
@@ -65,7 +70,7 @@ YAML
   run joomlaPlaygroundReplaceSite "$package" first.vdm.dev false
   assert_failure
   assert_file_contains "$SANDBOX/selected" joomlaalpha
-  assert_file_contains "$SANDBOX/selected" "$VDM_PROJECT_PATH/alpha/joomla"
+  assert_file_contains "$SANDBOX/selected" "$source"
   refute_file_exists "$SANDBOX/routes"
 }
 

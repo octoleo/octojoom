@@ -8129,7 +8129,7 @@ function siteWriteScopedEnv() {
   if [ "${VDM_PLAYGROUND_REPAIR:-false}" = true ]; then
     # Limit a replacement backup to the selected site's keys, including when
     # the shared file also contains operator-defined Compose variables.
-    (
+    if ! (
       local -a keys=()
       while IFS= read -r name; do
         [ -n "$name" ] || continue
@@ -8142,10 +8142,10 @@ function siteWriteScopedEnv() {
         [ "${!name+x}" = x ] || continue
         formatEnvAssignment "$name=\"${!name}\"" || exit 1
       done
-    ) > "$temporary" && migrationValidateScopedEnv "$compose_file" "$temporary" || {
+    ) > "$temporary" || ! migrationValidateScopedEnv "$compose_file" "$temporary"; then
       rm -f -- "$temporary"
       return 1
-    }
+    fi
   else
     while IFS= read -r name; do
       [ -n "$name" ] || continue
@@ -10949,6 +10949,7 @@ function joomlaPlaygroundDocumentRoot() {
       [ -n "$selected" ] && joomlaValidateDocumentRoot "$selected" || return 1
     fi
   fi
+  # shellcheck disable=SC2016 # The service variable belongs to jq.
   declared=$(joomlaSiteJSON -er --arg s "$VDM_SITE_SERVICE" '
     .services[$s] | [.environment.APACHE_DOCUMENT_ROOT, .working_dir] | map(select(. != null)) |
     select(all(.[]; type == "string" and length > 0 and (test("[[:cntrl:]]")|not))) | join("\n")
@@ -13982,11 +13983,11 @@ function joomlaPlaygroundReplaceSite() {
     # Use the recorded project throughout. Before clearing data, make sure a
     # concurrent edit has not redirected its database connection or mounts.
     stage=preflight
-    joomlaStorageComposeModel "$site" "$old_env" "$compose" > "$work/before-import.json" &&
-      cmp -s "$work/rendered.json" "$work/before-import.json" || {
-        printf 'The selected Compose project changed while preparing the import. Retry with its current settings.\n' >&2
-        exit 1
-      }
+    if ! joomlaStorageComposeModel "$site" "$old_env" "$compose" > "$work/before-import.json" ||
+      ! cmp -s "$work/rendered.json" "$work/before-import.json"; then
+      printf 'The selected Compose project changed while preparing the import. Retry with its current settings.\n' >&2
+      exit 1
+    fi
     if "$backup"; then
       joomlaPlaygroundReplacementStorage "$site" "$work" "$prepared" "$archive" "$directory" "$compose" "$old_env" || exit 1
     fi
