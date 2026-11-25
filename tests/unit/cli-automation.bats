@@ -322,3 +322,37 @@ JSON
   cmp "$original" "$SANDBOX/original.yml"
   assert_equal "$(grep -c ' up -d --no-deps joomlaalpha$' "$STUB_DIR/config-calls")" 2
 }
+
+@test "ordinary setup starts its own site beside custom configuration and a broken registration" {
+  octojoom_config 'VDM_memory_limit=384M'
+  printf '%s\n' 'TZ=Africa/Windhoek' >> "$VDM_SRC_PATH/.env"
+  local neighbor="$VDM_REPO_PATH/joomla/available/broken.vdm.dev"
+  mkdir -p "$neighbor"
+  printf 'services: [\n' > "$neighbor/docker-compose.yml"
+  local shared="$VDM_REPO_PATH/joomla/.env"
+  printf '%s\n' 'TZ=Africa/Windhoek' 'custom settings kept verbatim' > "$shared"
+  cp "$shared" "$SANDBOX/original-env"
+
+  hook_command docker <<'DOCKER'
+case "$1" in
+  ps|inspect) exit 67 ;;
+  run) if [[ " $* " == *' --entrypoint sh '* ]]; then printf '%s\n' '{"joomla":"5.3.0","flavor":"apache","ini_dir":"/usr/local/etc/php/conf.d"}'; fi ;;
+  compose) if [ -x "${REAL_DOCKER:-}" ] && [[ " $* " == *' config '* ]]; then exec "$REAL_DOCKER" "$@"; fi ;;
+  info|network) : ;;
+  *) exit 66 ;;
+esac
+exit 0
+DOCKER
+  run_octojoom --type joomla --task setup --key alpha --domain vdm.dev --image-tag 5.3 \
+    --enable true --auto-install false --non-interactive
+  assert_success
+  local site="$VDM_REPO_PATH/joomla/available/alpha.vdm.dev"
+  assert_file_exists "$site/docker-compose.yml"
+  assert_file_exists "$site/.env"
+  assert_file_exists "$VDM_REPO_PATH/joomla/enabled/alpha.vdm.dev/docker-compose.yml"
+  assert_file_contains "$VDM_PROJECT_PATH/alpha/php.ini" 'memory_limit = 384M'
+  assert_command 'docker compose .*alpha.vdm.dev/.* up -d'
+  refute_command 'broken.vdm.dev|openssh_gateway'
+  cmp "$SANDBOX/original-env" "$shared"
+  assert_file_contains "$VDM_SRC_PATH/.env" 'TZ=Africa/Windhoek'
+}

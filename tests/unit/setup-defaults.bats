@@ -35,6 +35,21 @@ headless_setup() {
   refute_command '^docker '
 }
 
+@test "setup: only the new site's destination participates in headless identity checks" {
+  headless_setup
+  local other="${VDM_REPO_PATH}/joomla/available/legacy.example.test/docker-compose.yml"
+  mkdir -p "${other%/*}"
+  printf 'services:\n  unused:\n    container_name: joomlaalpha\n' > "$other"
+  # This unrelated registration cannot claim a new, unused project directory.
+  run joomla__TRuST__setup
+  assert_success
+  assert_file_exists "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml"
+  refute_command 'legacy.example.test'
+  # An existing registration for the exact destination stays protected.
+  run joomlaSetupPreflight
+  assert_status 17
+}
+
 @test "setup: cancelling the optional fork leaves shared credentials and deployment untouched" {
   answers 5.3 alpha ALPHA alpha '<esc>'
   run joomla__TRuST__setup
@@ -98,14 +113,14 @@ headless_setup() {
   [ -z "${vdm_database_pass:-}" ]
 }
 
-@test "setup: existing shared environment key cannot silently change another site's credentials" {
+@test "setup: explicit credentials for a reused environment key belong to the new site" {
   make_joomla_container bravo BRAVO bravo
   headless_setup
   VDM_ENV_KEY=BRAVO
   vdm_database_pass='different-secret'
   run joomla__TRuST__setup
-  assert_status 17
-  refute_file_exists "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml"
+  assert_success
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/.env" 'VDM_BRAVO_DB_PASS="different-secret"'
   assert_file_contains "${VDM_REPO_PATH}/joomla/.env" 'VDM_BRAVO_DB_PASS="secret"'
 }
 
@@ -117,7 +132,7 @@ headless_setup() {
   run joomla__TRuST__setup
   assert_success
   local saved
-  migrationReadEnvValue "${VDM_REPO_PATH}/joomla/.env" VDM_ALPHA_DB_PASS saved
+  migrationReadEnvValue "${VDM_REPO_PATH}/joomla/available/alpha.example.test/.env" VDM_ALPHA_DB_PASS saved
   assert_equal "$saved" "$vdm_database_pass"
   assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/docker-compose.yml" 'image: custom/joomla:release'
   refute_file_exists BAD
@@ -312,7 +327,7 @@ headless_setup() {
   VDM_J_PASSWORD=secret-supplied-for-install
   run joomla__TRuST__setup
   assert_success
-  assert_file_contains "${VDM_REPO_PATH}/joomla/.env" 'VDM_BRAVO_JOOMLA_DB_PREFIX="Legacy7_"'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/alpha.example.test/.env" 'VDM_BRAVO_JOOMLA_DB_PREFIX="Legacy7_"'
 }
 
 @test "setup: an explicit bulk table prefix reaches every separate database" {
