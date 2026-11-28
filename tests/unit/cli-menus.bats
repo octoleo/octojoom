@@ -268,7 +268,7 @@ record_calls() {
 }
 
 @test "showJoomla: alignment runs only when the operator selects it" {
-  make_joomla_container_with_php jcb JCB jcb
+  VDM_WEB_HEALTH='["CMD", "curl", "-f", "http://localhost/"]' make_joomla_container_with_php jcb JCB jcb
   # Called by the application functions loaded through the test harness.
   # shellcheck disable=SC2317
   whiptail() {
@@ -282,12 +282,13 @@ record_calls() {
   assert_success
   assert_answers_used
   [ "$(grep -cxF 'Update existing configurations' "${SANDBOX}/menu-arguments")" -eq 2 ]
-  assert_file_exists "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/.env"
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/docker-compose.yml" '"--request-target"'
+  refute_file_exists "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/.env"
 }
 
 @test "showJoomla: opening the menu never reads other sites' settings" {
   make_joomla_container_with_php jcb JCB jcb
-  siteAlignmentPlan() { touch "${SANDBOX}/unrequested-scan"; return 1; }
+  siteAlignConfiguration() { touch "${SANDBOX}/unrequested-scan"; return 1; }
   answers back
   run showJoomla
   assert_success

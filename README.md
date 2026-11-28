@@ -242,7 +242,7 @@ retains its single cold archive of the project files and raw database data.
 | [1. Commands and completion](docs/COMMANDS.md) | Noninteractive commands, optional JSON requests/results, Bash completion, and menu-to-command coverage |
 | [2. Website information](docs/SITE-INFORMATION.md) | Select a site, inspect its configuration and running state, and manage it from one screen or command |
 | [3. Setup and defaults](docs/SETUP-DEFAULTS.md) | Guided single and bulk setup, optional customization, and explicit saved defaults |
-| [4. Configuration alignment](docs/CONFIGURATION-ALIGNMENT.md) | Inspect and align existing sites without changing their intended Compose behavior |
+| [4. Configuration alignment](docs/CONFIGURATION-ALIGNMENT.md) | Repair an existing site's Apache health check or explicitly save its current image as a site setting |
 | [5. PHP runtime](docs/PHP-RUNTIME.md) | Select compatible published PHP images and change settings for one site |
 | [6. Webserver and document root](docs/WEBSERVER-DOCUMENT-ROOT.md) | Switch Apache/Nginx and select or explicitly move a site's document root |
 | [7. Database engines](docs/DATABASE-ENGINES.md) | Select a supported database engine during setup or change an existing site's database with an explicit data choice |

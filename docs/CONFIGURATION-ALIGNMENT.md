@@ -1,44 +1,11 @@
 # Existing configuration alignment
 
-Use **Joomla Containers → Update existing configurations** for all discovered
-websites. That batch menu displays its plan before you apply it. The alignment
-action in **Website Information** applies updates to the selected website.
-Use the CLI's `--action inspect` to preview a single website's changes.
-
-```bash
-octojoom --type joomla --task align --all --action inspect --non-interactive
-octojoom --type joomla --task align --all --non-interactive
-octojoom --type joomla --task align --container demo.example.test --non-interactive
-```
-
-Image alignment saves the **existing** web image as
-`VDM_<ENVKEY>_IMAGE`, replaces only that service's image scalar with the setting,
-and creates a complete private site `.env` when needed. It copies every Compose
-reference and recognized settings for that site's environment key. It excludes
-unrelated sites and unreferenced host credentials. The shared ENV remains intact.
-Existing image source/tag, PHP settings, webserver/root choices, original Joomla
-settings, and recognized SMTP, hook and backup preferences are retained.
-
-When a private site `.env` already exists, image alignment updates its image
-assignment and preserves the other records and comments. When reading from the
-shared `joomla/.env`, Octojoom selects the variables this website uses. Ordinary
-host settings such as `TZ=Africa/Windhoek` and entries for sibling sites can
-stay in the shared file.
-
-Octojoom checks that the image and environment edits resolve to the same Compose
-configuration before applying any health check change. Image-only alignment
-keeps existing containers running.
-
-A probe-only repair uses the website's active environment in place. If moving
-the image setting into a private file would change the rendered Compose project
-(for example, its `COMPOSE_PROJECT_NAME`), the repair keeps the existing image
-and environment and applies the probe to the original project.
-
 ## Repair the Apache health check for one website
 
-After installing the updated Octojoom script, select **Website Information →
-Update this website configuration** for the affected hostname. From the CLI you
-can inspect and apply that same operation to a single website.
+In **Joomla Containers → Website Information**, select the affected hostname
+and choose **Update this website configuration**. This repairs the old Octojoom
+Apache health check for that website. The same operation is available from
+the command line.
 
 ```bash
 read -r -p 'Joomla website hostname: ' site
@@ -46,61 +13,51 @@ octojoom --type joomla --task align --container "$site" --action inspect --non-i
 octojoom --type joomla --task align --container "$site" --action apply --non-interactive
 ```
 
-Octojoom replaces its original Apache homepage probe when both the command and
-the configured interval, timeout and failure threshold match the generated
-defaults. The new probe works while Joomla displays its native offline login
-page. A running Apache container is recreated and checked for readiness. An
-existing stopped Apache container is recreated without starting it. If the
-container has never been created, the next start uses the updated definition.
-The database and other services keep their current state. Custom probes and
-custom timings are preserved. Running the same command again reports
-`unchanged` once the website is aligned.
+`inspect` previews the change. `apply` is the default action. It replaces the
+generated `curl -f http://localhost/` probe when its interval, timeout and
+retry count still match Octojoom's original defaults. The replacement sends
+`OPTIONS *` to Apache every 30 seconds. Joomla can then serve its native
+offline login page with HTTP 503 while the administrator remains reachable.
 
-If the site currently runs Nginx/PHP-FPM, switching back to Apache also checks
-the saved Apache probe. Octojoom upgrades the old generated default during
-restoration and restores a custom probe as saved.
+The updater edits only the matching Compose health check. It uses the site's
+existing image and active environment, including a shared `joomla/.env`. An
+already-correct or custom probe, including one with custom timings, needs no
+update. Switching from Nginx/PHP-FPM back to Apache also upgrades a saved
+legacy default when restoring the Apache configuration.
 
-Reports distinguish `pending`, `unchanged`, `updated`, and `action-needed`.
-Batch application continues after an unsupported site and exits unsuccessfully
-if any site could not be handled. A partial result is not reported as complete.
+| Selected Apache service | Effect of applying a matching update |
+| --- | --- |
+| Running | Compose recreates the web container. Docker resumes its scheduled probe. |
+| Stopped | Compose recreates the stopped container with the corrected probe and leaves it stopped. |
+| Never created | The next start uses the corrected Compose definition. |
 
-If Octojoom cannot read a required website setting, `action-needed` identifies
-the variable and its effective `.env` file. Quoting errors include the source
-line. A site-local `.env` takes precedence over the shared `joomla/.env`.
-Docker Compose reads the active environment when it applies the update and
-reports syntax errors that prevent it from loading the project.
+The database and other services keep their current state. Use `--container`
+for one site. An explicit `--all` requests a batch operation. Each site's
+result is `pending`, `updated`, `unchanged`, or `action-needed`.
 
-The targeted image edit supports the original two-space service/four-space
-property block layout, including custom unrelated services, mounts, labels and
-comments. An ambiguous/duplicate property, advanced interpolation, linked config
-path, or unrecognized identity is left unchanged with an explanation. Those
-sites remain available for information, normal lifecycle actions and expert
-editing. Alignment is not an enrollment requirement.
+## Save the current image as a site setting
 
-## Shared configuration writes
+Operators who want to manage an existing literal web image through
+`VDM_<ENVKEY>_IMAGE` can request that change explicitly.
 
-Runtime actions stage changed Compose, complete scoped ENV and companion files.
-They validate using the original project directory, so temporary filenames do
-not change project identity or relative mounts. Publication uses adjacent file
-renames and tracks each successful write. These separate writes are recoverable,
-not a multi-file atomic transaction.
+```bash
+read -r -p 'Joomla website hostname: ' site
+octojoom --type joomla --task align --container "$site" --action inspect-image --non-interactive
+octojoom --type joomla --task align --container "$site" --action save-image --non-interactive
+```
 
-A private `.octojoom-recovery.*` directory inside the selected site retains the
-previous files and a `paths` mapping after each update. A failed publication or
-runtime check restores those files and attempts to restore previously running
-affected services. The error explicitly reports incomplete recovery. Only
-previously running affected services are recreated; database volumes are never
-removed. Callers declare any added/retired HTTP service and their post-start
-validation. Stopped websites remain stopped.
+`save-image` stores the current image reference in the private site `.env` and
+points the Compose image setting to it. An existing private file keeps its
+other records and comments. For a site using the shared environment, Octojoom
+copies the settings required by that site into the private file. It compares
+the rendered Compose configurations before publishing. If the change would
+alter the project name or another effective setting, it reports
+`action-needed`. Saving the image setting keeps the running services in place.
 
-The scoped migration exporter and validator use the same recognized-field list,
-so an original SMTP setting or a saved per-site runtime choice does not disappear
-simply because Compose does not currently interpolate it. This does not add the
-future hook, mail, backup or developer-tool functionality; it preserves those
-recognized preferences when supplied.
+## Recovery
 
-Portable tests cover scoped credentials and literal values, targeted edits,
-custom-field preservation, idempotence, rejected configuration, semantic drift,
-batch failures, stopped state and failed-runtime recovery. Real image/routing
-acceptance remains a separate check; mocked validation is not evidence of live
-Joomla, database or HTTP behavior.
+Octojoom validates staged changes using the original Compose project directory.
+If publication or recreation fails, it restores the previous files and
+attempts to return the selected service to its previous state. If recovery
+is incomplete, the error identifies the private recovery directory containing
+the original files.
