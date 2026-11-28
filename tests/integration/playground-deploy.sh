@@ -21,6 +21,7 @@ export OCTOJOOM_HOME="$work/home"
 sites="$OCTOJOOM_HOME/Docker/joomla/available"
 shared_env="$OCTOJOOM_HOME/Docker/joomla/.env"
 package="$work/Donor store.zip"
+offline_package="$work/Offline donor store.zip"
 renamed_package="$work/Renamed donor store.zip"
 image=joomla:6.2.0-php8.4-apache
 database_image=mariadb:11.4
@@ -57,6 +58,9 @@ cleanup() {
     fi
   done
   if [ -f "$work/donor.yml" ]; then donor down -v --remove-orphans >/dev/null; fi
+  if [ -f "$work/no-listener.json" ]; then
+    docker compose -p "pgprobe$run_id" -f "$work/no-listener.json" down -v >/dev/null
+  fi
   docker image rm "$repair_image" >/dev/null 2>&1
   docker rm -f "$proxy" "$retired_container" >/dev/null 2>&1
   docker network rm "$network" "$ssh_network" >/dev/null 2>&1
@@ -179,6 +183,9 @@ export_package() {
   donor cp "web:$export_dir/site.zip" "$output" >/dev/null
 }
 export_package "$package"
+donor exec -T web php -d register_argc_argv=1 cli/joomla.php site:down
+export_package "$offline_package"
+donor exec -T web php -d register_argc_argv=1 cli/joomla.php site:up
 # Change the installed website after saving its launch identity. The same
 # unmodified exporter still receives the original, now stale, admin settings.
 donor exec -T --user 0 web php -r '
@@ -292,7 +299,7 @@ check_site() {
 first="p$run_id"; second="q$run_id"; failed="r$run_id"
 apache_options=(--engine mariadb --database-image "$database_image")
 fresh_started=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
-deploy new "$first" "$package" true "${apache_options[@]}" --input-json "$work/request.json"
+deploy new "$first" "$offline_package" true "${apache_options[@]}" --input-json "$work/request.json"
 jq -e '.success and .data.enabled == true' "$work/result" >/dev/null
 # One-shot PHP import helpers may run, but fresh setup starts the website once.
 docker events --since "$fresh_started" --until "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" \
@@ -301,9 +308,60 @@ jq -se --arg service "joomla$first" '
   [.[] | select(.Actor.Attributes["com.docker.compose.service"]==$service and
     ((.Actor.Attributes["com.docker.compose.oneoff"] // "false") | ascii_downcase)!="true")]
   | length == 1' "$work/fresh-starts.jsonl" >/dev/null
+# Check what Docker actually installed on an intentionally offline import.
+web="joomla$first"
+expected_probe='["CMD","curl","-fsS","--noproxy","*","--request","OPTIONS","--request-target","*","http://127.0.0.1"]'
+# Normal enable can return before Docker schedules the first 30-second check.
+for ((i=0; i<60; i++)); do
+  [ "$(docker inspect --format '{{.State.Health.Status}}' "$web")" = starting ] || break
+  sleep 2
+done
+docker inspect "$web" | jq -e --argjson probe "$expected_probe" '.[0] |
+  .State.Health.Status=="healthy" and .Config.Healthcheck.Test==$probe and
+  .Config.Healthcheck.Interval==30000000000 and .Config.Healthcheck.Timeout==5000000000 and
+  .Config.Healthcheck.Retries==5' >/dev/null
+[ "$(docker exec "$web" curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/)" = 503 ]
+docker exec "$web" php -d register_argc_argv=1 cli/joomla.php site:up
 check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+legacy_test='["CMD", "curl", "-f", "http://localhost/"]'
+joomlaWebHealthcheck "$legacy_test" > "$work/legacy-health.yml"
+site_compose="$sites/new.$domain/docker-compose.yml"
+enabled_compose="$OCTOJOOM_HOME/Docker/joomla/enabled/new.$domain/docker-compose.yml"
+joomlaSetServiceProperty "$site_compose" "$work/legacy-compose.yml" "$web" healthcheck "$work/legacy-health.yml"
+cat "$work/legacy-compose.yml" > "$site_compose"
+if [ -f "$enabled_compose" ] && ! [ "$enabled_compose" -ef "$site_compose" ]; then cp "$site_compose" "$enabled_compose"; fi
 destination new up -d --force-recreate --wait --wait-timeout 240 >/dev/null
 check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+
+# Apply the documented update while Joomla is offline. Only the web container changes.
+legacy_id=$(destination new ps -q "$web")
+alignment_db_id=$(destination new ps -q "mariadb$first")
+docker inspect "$legacy_id" | jq -e --argjson test "$legacy_test" '.[0].Config.Healthcheck.Test==$test' >/dev/null
+docker exec "$web" php -d register_argc_argv=1 cli/joomla.php site:down
+for ((i=0; i<10; i++)); do
+  legacy_exit=0
+  docker exec "$web" curl -fs -o /dev/null http://localhost/ || legacy_exit=$?
+  if ((legacy_exit == 22)); then break; fi
+  sleep 1
+done
+[ "$legacy_exit" = 22 ]
+align=(bash "$root/src/octojoom" --type joomla --task align --container "new.$domain" --action apply --non-interactive)
+"${align[@]}"
+[ "$(destination new ps -q "$web")" != "$legacy_id" ]
+[ "$(destination new ps -q "mariadb$first")" = "$alignment_db_id" ]
+docker inspect "$web" | jq -e --argjson probe "$expected_probe" '.[0] |
+  .Config.Healthcheck.Test==$probe and .State.Health.Status=="healthy"' >/dev/null
+offline_identity=$(docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}' "$web")
+offline_start=$SECONDS
+first_health_end=$(docker inspect "$web" | jq -er '.[0].State.Health.Log[-1].End')
+"${align[@]}"
+# Run the same image and effective probe without Apache listening. Docker must
+# mark this still-running container unhealthy using the production retry policy.
+destination new config --format json | jq --arg web "$web" '.services[$web] |
+  {services:{unavailable:{image,healthcheck,network_mode:"none",entrypoint:["sleep","infinity"]}}}' > "$work/no-listener.json"
+no_listener=(docker compose -p "pgprobe$run_id" -f "$work/no-listener.json")
+"${no_listener[@]}" up -d
+probe_container=$("${no_listener[@]}" ps -q unavailable)
 
 deploy stopped "$second" "$package" false --enable false --image-tag "${fpm_image#*:}" \
   --engine mysql --database-image "$mysql_image" --webserver nginx --docroot "$nginx_docroot"
@@ -353,7 +411,6 @@ if docker container inspect "joomla$failed" >/dev/null 2>&1 || docker container 
 fi
 [ -z "$(docker ps -aq --filter "label=com.docker.compose.service=mariadb$failed")" ]
 [ -z "$(docker volume ls -q --filter 'label=com.octoleo.octojoom.playground' --filter "name=$failed")" ]
-check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 echo 'Fresh Playground deployment passed for Apache/MariaDB and Nginx/PHP-FPM/MySQL, including SQL values and administrator accounts.'
 
 check_fresh_env=false
@@ -597,7 +654,34 @@ other_database() {
     'exec mariadb --user=root --password="$MARIADB_ROOT_PASSWORD" --batch --skip-column-names'
 }
 without_backup=(--pre-backup no --confirm-no-backup yes)
+# The native offline form and both authenticated sessions must work through Traefik
+# beyond the five-check failure window.
+remaining=$((180 - (SECONDS - offline_start)))
+if ((remaining > 0)); then sleep "$remaining"; fi
+docker inspect "$web" | jq -e --arg first "$first_health_end" '.[0].State | .Running and
+  .Health.Status=="healthy" and .Health.FailingStreak==0 and (.Health.Log | length)==5 and
+  all(.Health.Log[]; .ExitCode==0 and .End>$first)' >/dev/null
+docker inspect "$probe_container" | jq -e '.[0].State | .Running and .Health.Status=="unhealthy" and
+  .Health.FailingStreak>=5 and all(.Health.Log[]; .ExitCode==7)' >/dev/null
+[ "$(docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}' "$web")" = "$offline_identity" ]
+site_url="http://new.$domain:$proxy_port"
+frontend=(curl --silent --show-error --noproxy '*' --max-time 20 --resolve "new.$domain:$proxy_port:127.0.0.1")
+guest_code=$("${frontend[@]}" -c "$work/offline-cookies" -o "$work/offline.html" -w '%{http_code}' "$site_url/")
+[ "$guest_code" = 503 ]
+grep -Fq 'class="offline-card"' "$work/offline.html"
+token=$(sed -nE 's/.*name="([a-f0-9]{32})"[[:space:]]+value="1".*/\1/p' "$work/offline.html" | head -n 1)
+[ -n "$token" ]
+printf '%s' "$CONFIRMED_PASSWORD" | "${frontend[@]}" --fail --location -b "$work/offline-cookies" -c "$work/offline-cookies" \
+  --data-urlencode 'username=shopmanager' --data-urlencode 'password@-' --data-urlencode 'option=com_users' \
+  --data-urlencode 'task=user.login' --data-urlencode "$token=1" "$site_url/index.php" > /dev/null
+[ "$("${frontend[@]}" -b "$work/offline-cookies" -o "$work/auth-home.html" -w '%{http_code}' "$site_url/")" = 200 ]
+grep -Fq 'Imported Shop' "$work/auth-home.html"
 check_admin_login new shopmanager "$CONFIRMED_PASSWORD" "exported-online-$run_id"
+docker exec "$web" php -d register_argc_argv=1 cli/joomla.php site:up
+check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+[ "$("${frontend[@]}" -o /dev/null -w '%{http_code}' "$site_url/")" = 200 ]
+[ "$(docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}' "$web")" = "$offline_identity" ]
+printf 'Offline Joomla retained healthy probes for %ss, anonymous HTTP 503 and both logins. Guest HTTP 200 returned without a restart.\n' "$((SECONDS - offline_start))"
 replacement_state new "$first" seed
 destination new exec -T --user 0 "joomla$first" sh -c 'echo "$1" > "$2"' sh "previous-new-$run_id" "/var/www/html/$route_file"
 apache_port=$(publish_fixture_port new "joomla$first")
@@ -606,7 +690,7 @@ check_admin_login new shopmanager "$CONFIRMED_PASSWORD" "previous-new-$run_id"
 printf '\nprecision = 15\n' >> "$OCTOJOOM_HOME/Projects/$first/php.ini"
 # A custom probe belongs to the operator. Import must leave it unchanged.
 original_health=$(destination new config --format json | jq -cS --arg app "joomla$first" '.services[$app].healthcheck')
-jq -e '.test==["CMD","curl","-f","http://localhost/"]' <<< "$original_health" >/dev/null
+jq -e --argjson probe "$expected_probe" '.test==$probe' <<< "$original_health" >/dev/null
 printf '    healthcheck:\n      test: ["CMD", "curl", "--silent", "--fail", "http://localhost/"]\n      interval: 17s\n      timeout: 4s\n      retries: 7\n' > "$work/custom-health.property"
 joomlaSetServiceProperty "$sites/new.$domain/docker-compose.yml" "$work/custom-health.yml" \
   "joomla$first" healthcheck "$work/custom-health.property"

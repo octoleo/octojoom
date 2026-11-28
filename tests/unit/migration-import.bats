@@ -259,14 +259,14 @@ EOF
 }
 
 @test "migration application check rejects a same-origin redirect loop" {
-  docker() { return 0; }
+  docker() { printf '/'; }
   curl() { printf '302 https://new.destination.test/'; }
   run migrationVerifyApplication new new.destination.test true
   assert_failure
 }
 
 @test "migration application check follows only destination redirects to a successful response" {
-  docker() { return 0; }
+  docker() { printf '/'; }
   curl() {
     case "${*: -1}" in
       https://new.destination.test/) printf '302 https://new.destination.test/en/' ;;
@@ -276,6 +276,22 @@ EOF
   }
   run migrationVerifyApplication new new.destination.test true
   assert_success
+}
+
+@test "offline migration activation requires a successful administrator route" {
+  docker() { printf '/administrator/'; }
+  curl() {
+    [[ " $* " == *' --fail '* && "${*: -1}" = https://new.destination.test/administrator/ ]] || return 1
+    printf '%s ' "$response_code"
+    [ "$response_code" -lt 400 ] || return 22
+  }
+  sleep() { SECONDS=$((SECONDS + 120)); }
+  local response_code=200
+  run migrationVerifyApplication new new.destination.test true
+  assert_success
+  response_code=503
+  run migrationVerifyApplication new new.destination.test true
+  assert_failure
 }
 
 prepare_activation_fixture() {

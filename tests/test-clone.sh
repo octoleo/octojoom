@@ -49,7 +49,7 @@ extract_function() {
   awk -v name="$1" '$0 ~ "^function "name"\\(\\) \\{$" {p=1} p {print} p && /^}$/ {p=0; exit}' "${SCRIPT}"
 }
 
-for fn in getYMLine1 getYMLine2 getYMLine3 joomlaContainer useSudo runPrivileged getDialogHeight \
+for fn in getYMLine1 getYMLine2 getYMLine3 joomlaWebHealthcheck joomlaContainer useSudo runPrivileged getDialogHeight \
   getJoomlaEnvSuffixes getEscapedRegex getJoomlaComposeEnvKey getJoomlaComposeIdentity rewriteJoomlaComposeIdentity \
   getJoomlaConfigValue cloneJoomlaConfiguration cloneContainerEnvVariables \
   hasContainerEnvVariables cloneContainerEnvFile removeContainerEnvVariables \

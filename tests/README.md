@@ -186,9 +186,14 @@ stopped containers after replacement. Portable tests record calls to the
 Compose and Docker helpers to catch attempts to inspect a neighbor.
 
 The fixture retains SQL numeric, binary and character-set checks and tests
-administrator changes against the imported account. Existing health probes
-are preserved. There is no separate website startup or verification stack,
-probe migration, offline-Joomla matrix or storage-retirement test.
+administrator changes against the imported account. It deploys an offline
+Apache export, then applies the selected-site alignment to a running site
+with the legacy homepage probe. For at least three minutes in offline mode,
+Docker keeps the web container healthy. The fixture checks Joomla's guest 503,
+authorized frontend and administrator logins through Traefik, and a return to
+guest HTTP 200 without a restart. A running container with the same probe and
+no HTTP listener must become unhealthy. The replacement cases preserve a
+customized health check.
 macOS and Windows run the portable Playground suites with Docker stand-ins.
 
 The database and backup matrix installs Joomla separately for each engine.

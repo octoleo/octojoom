@@ -639,6 +639,47 @@ YAML
   assert_file_contains "$SANDBOX/validation-calls" 'max_execution_time 300'
 }
 
+@test "web runtime validation requires a successful application response in online and offline mode" {
+  local expected
+  joomlaPHPValidatePublished() { return 0; }
+  joomlaDatabaseVerifyConnection() { return 0; }
+  VDM_SITE_URL=https://example.test
+  VDM_SITE_SERVICE=web
+  VDM_SITE_DOCROOT=/var/www/html/site
+  joomlaSiteCompose() { printf '%s\n' "$expected"; }
+  for expected in / /administrator/; do
+    rm -f "$STUB_DIR/fail/curl"
+    run joomlaRuntimeValidatePublished example.test
+    assert_success
+    assert_command "curl --fail .* ${VDM_SITE_URL}${expected}$"
+    fail_command curl 22
+    run joomlaRuntimeValidatePublished example.test
+    assert_status 22
+  done
+}
+
+@test "runtime application path reads offline from the selected Joomla document root" {
+  command -v php >/dev/null || skip 'Docker web integration also exercises Joomla offline mode'
+  VDM_SITE_DOCROOT="$SANDBOX/site"
+  VDM_SITE_SERVICE=web
+  mkdir "$VDM_SITE_DOCROOT"
+  joomlaSiteCompose() {
+    while [ "$1" != php ]; do shift; done
+    "$@"
+  }
+  run joomlaRuntimeApplicationPath example.test
+  assert_success
+  assert_equal "$output" /
+  printf '%s\n' '<?php class JConfig { public $offline = "0"; }' > "$VDM_SITE_DOCROOT/configuration.php"
+  run joomlaRuntimeApplicationPath example.test
+  assert_success
+  assert_equal "$output" /
+  printf '%s\n' '<?php class JConfig { public $offline = "1"; }' > "$VDM_SITE_DOCROOT/configuration.php"
+  run joomlaRuntimeApplicationPath example.test
+  assert_success
+  assert_equal "$output" /administrator/
+}
+
 @test "PHP apply still rejects a mismatched value or a changed PHP version" {
   VDM_memory_limit=512M
   OCTOJOOM_EXPECTED_PHP=8.4.1
