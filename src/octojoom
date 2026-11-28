@@ -1032,19 +1032,11 @@ function joomlaSetupDefaults() {
   return 0
 }
 
-# Read optional setup defaults as literal data. Only keys chosen by the caller
-# are assigned. The preferences mode retains existing VDM_ application settings.
-# Track other quoted records so their contents cannot look like new assignments.
-function readSetupEnvValues() {
-  local file="$1" key raw value records strict=false
-  shift
-  if [ "${1:-}" = --strict-key ]; then strict=true; shift; fi
-  [ -n "$file" ] || return 0
-  if [ ! -f "$file" ] || [ ! -r "$file" ]; then
-    [ "$strict" != true ] || return 1
-    return 0
-  fi
-  records=$(awk -v strict="$strict" -v keys="$*" '
+# Select actual dotenv records, including after a multiline value. The default
+# is the last assignment for each key. Only the selected records leave awk.
+function readEnvRecords() {
+  local file="$1" mode="$2" keys="$3" optional="${4:-}"
+  awk -v mode="$mode" -v keys="${keys//$'\n'/ }" -v optional="$optional" '
     function closing(text, start,    i, c) {
       for (i = start; i <= length(text); i++) {
         c = substr(text, i, 1)
@@ -1052,18 +1044,26 @@ function readSetupEnvValues() {
         if (c == quote) { quote = ""; return }
       }
     }
-    BEGIN { n = split(keys, args, " "); for (i = 1; i <= n; i++) wanted[args[i]] = 1 }
+    function selected(name) {
+      return name ~ /^VDM_[A-Za-z0-9_]+$/ && (name in wanted || "--preferences" in wanted || (optional != "" && name ~ optional))
+    }
+    BEGIN { n = split(keys, args, /[[:space:]]+/); for (i = 1; i <= n; i++) if (args[i] != "") wanted[args[i]] = 1 }
     {
       line = $0
       sub(/\r$/, "", line)
       if (NR == 1) sub(/^\357\273\277/, "", line)
-      if (quote != "") { closing(line, 1); next }
+      if (quote != "") {
+        if (mode == "locations" && selected(name)) print NR
+        closing(line, 1)
+        if (quote == "" && selected(name)) errors[name] = "multiline"
+        next
+      }
       sub(/^[ \t]+/, "", line)
       if (line ~ /^#/) next
       sub(/^export[ \t]+/, "", line)
       if (!match(line, /^[^ \t=:]+[ \t]*[=:][ \t]*/)) {
         word = line; sub(/[ \t].*$/, "", word)
-        if (strict == "true" && word in wanted) invalid = 1
+        if (selected(word)) { if (mode == "unique") invalid = 1; errors[word] = "assignment"; at[word] = NR }
         next
       }
       raw = substr(line, RLENGTH + 1)
@@ -1071,18 +1071,51 @@ function readSetupEnvValues() {
       sub(/[ \t]*[=:].*$/, "", name)
       first = substr(raw, 1, 1)
       if (first == "\"" || first == "\047") { quote = first; closing(raw, 2) }
-      if (name !~ /^VDM_[A-Za-z0-9_]+$/ || (!(name in wanted) && !("--preferences" in wanted))) next
-      if (strict == "true" && (quote != "" || ((name in saved) && saved[name] != raw))) invalid = 1
-      if (quote == "") saved[name] = raw
-      else delete saved[name]
+      if (!selected(name)) next
+      if (mode == "unique" && (quote != "" || ((name in saved) && saved[name] != raw))) invalid = 1
+      if (mode == "locations") print NR
+      at[name] = NR
+      if (quote == "") { delete errors[name]; saved[name] = raw }
+      else { errors[name] = "quote"; delete saved[name] }
     }
-    END { if (invalid) exit 1; for (name in saved) print name "=" saved[name] }
-  ' "$file") || return 1
+    END {
+      if (invalid) exit 1
+      if (mode == "locations") exit (quote != "" && selected(name))
+      if (mode == "scoped") {
+        for (name in errors) {
+          if (errors[name] == "multiline") printf "Unsupported multiline value for %s at %s:%d. Use a single-line value, then retry.\n", name, FILENAME, at[name] > "/dev/stderr"
+          else if (errors[name] == "quote") printf "Invalid quoting for %s at %s:%d. Correct the quoted value, then retry.\n", name, FILENAME, at[name] > "/dev/stderr"
+          else printf "Invalid assignment for %s at %s:%d.\n", name, FILENAME, at[name] > "/dev/stderr"
+          exit 1
+        }
+        for (name in wanted) if (!(name in saved)) {
+          printf "Missing %s in %s. Restore this setting%cs existing value, then retry.\n", name, FILENAME, 39 > "/dev/stderr"
+          exit 1
+        }
+      }
+      for (name in saved) print at[name] ":" name "=" saved[name]
+    }
+  ' "$file"
+}
+
+# Read optional setup defaults as literal data. Only keys chosen by the caller
+# are assigned. The preferences mode retains existing VDM_ application settings.
+function readSetupEnvValues() {
+  local file="$1" key raw value records mode=setup
+  shift
+  if [ "${1:-}" = --strict-key ]; then mode=unique; shift; fi
+  [ -n "$file" ] || return 0
+  if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+    [ "$mode" != unique ] || return 1
+    return 0
+  fi
+  records=$(readEnvRecords "$file" "$mode" "$*") || return 1
   while IFS= read -r raw; do
     [ -n "$raw" ] || continue
+    raw="${raw#*:}"
     key="${raw%%=*}"
     if ! decodeEnvValue "${raw#*=}" value || [[ "$value" == *$'\r'* || "$value" == *$'\n'* ]]; then
-      [ "$strict" != true ] || return 1
+      [ "$mode" != unique ] || return 1
       continue
     fi
     case "$key" in
@@ -8122,56 +8155,47 @@ function joomlaSetupTLSChoice() {
 
 ######################################## EXISTING SITE CONFIGURATION
 
-# Copy the complete effective configuration needed by one site. Shared files are
-# never copied wholesale: unrelated sites and host-only secrets stay behind.
+# Read only this site's required Compose references and optional settings.
+# Values in a host or shared environment are data, never shell assignments.
+function siteReadScopedEnv() {
+  local file="$1" references="$2" optional="${3:-}" mode="${4:-scoped}" records record line name value
+  if [ -L "$file" ]; then
+    printf 'Environment file %s is a symbolic link. Use a regular environment file, then retry.\n' "$file" >&2; return 1
+  elif [ ! -f "$file" ] || [ ! -r "$file" ]; then
+    printf 'Cannot read environment file %s. Check its path and read permissions, then retry.\n' "$file" >&2; return 1
+  fi
+  records=$(readEnvRecords "$file" "$mode" "$references" "$optional") || return 1
+  while IFS= read -r record; do
+    [ -n "$record" ] || continue
+    line="${record%%:*}"
+    record="${record#*:}"
+    name="${record%%=*}"
+    if ! decodeEnvValue "${record#*=}" value; then
+      [ "$mode" = scoped ] || continue
+      printf 'Invalid quoting for %s at %s:%s. Correct the quoted value, then retry.\n' "$name" "$file" "$line" >&2; return 1
+    fi
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+      [ "$mode" = scoped ] || continue
+      printf 'Unsupported multiline value for %s at %s:%s. Use a single-line value, then retry.\n' "$name" "$file" "$line" >&2; return 1
+    fi
+    formatEnvAssignment "$name=\"$value\"" || return 1
+  done <<< "$records"
+}
+
+# Shared files are never copied wholesale: unrelated sites and host-only
+# secrets stay behind.
 function siteWriteScopedEnv() {
   local compose_file="$1" effective_env="$2" env_key="$3" destination="$4"
-  local references name value line suffixes temporary
+  local references suffixes temporary mode=scoped
   [[ "$env_key" =~ ^[A-Za-z]+$ ]] || return 1
-  [ -f "$effective_env" ] && [ ! -L "$effective_env" ] || return 1
   [ "$effective_env" != "$destination" ] && [ ! "$effective_env" -ef "$destination" ] || return 1
-  if [ "${VDM_PLAYGROUND_REPAIR:-false}" != true ]; then (loadEnvFile "$effective_env") || return 1; fi
   references=$(migrationComposeReferences "$compose_file") || return 1
   suffixes=$(getJoomlaEnvSuffixes)
-  while IFS= read -r line || [ -n "$line" ]; do
-    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(VDM_[A-Za-z0-9_]+)[[:space:]]*= ]]; then
-      name="${BASH_REMATCH[2]}"
-      if [[ "$name" =~ ^VDM_${env_key}_(${suffixes})$ ]] && ! printf '%s\n' "$references" | grep -qxF "$name"; then
-        references+=$'\n'"$name"
-      fi
-    fi
-  done < "$effective_env"
   temporary=$(mktemp "${destination}.tmp.XXXXXX") || return 1
-  if [ "${VDM_PLAYGROUND_REPAIR:-false}" = true ]; then
-    # Limit a replacement backup to the selected site's keys, including when
-    # the shared file also contains operator-defined Compose variables.
-    if ! (
-      local -a keys=()
-      while IFS= read -r name; do
-        [ -n "$name" ] || continue
-        local "$name"
-        unset "$name"
-        keys+=("$name")
-      done <<< "$references"
-      readSetupEnvValues "$effective_env" "${keys[@]}" || exit 1
-      for name in "${keys[@]}"; do
-        [ "${!name+x}" = x ] || continue
-        formatEnvAssignment "$name=\"${!name}\"" || exit 1
-      done
-    ) > "$temporary" || ! migrationValidateScopedEnv "$compose_file" "$temporary"; then
-      rm -f -- "$temporary"
-      return 1
-    fi
-  else
-    while IFS= read -r name; do
-      [ -n "$name" ] || continue
-      if ! migrationReadEnvValue "$effective_env" "$name" value || ! formatEnvAssignment "$name=\"$value\"" >> "$temporary"; then
-        rm -f -- "$temporary"
-        return 1
-      fi
-    done <<< "$references"
-  fi
-  if ! chmod 600 "$temporary" || ! mv -f -- "$temporary" "$destination"; then
+  [ "${VDM_PLAYGROUND_REPAIR:-false}" != true ] || mode=setup
+  if ! siteReadScopedEnv "$effective_env" "$references" "^VDM_${env_key}_(${suffixes})$" "$mode" > "$temporary" ||
+    { [ "$mode" = setup ] && ! migrationValidateScopedEnv "$compose_file" "$temporary"; } ||
+    ! chmod 600 "$temporary" || ! mv -f -- "$temporary" "$destination"; then
     rm -f -- "$temporary"
     return 1
   fi
@@ -8240,7 +8264,7 @@ function sitePublishConfigurationAction() {
   (
     local site="$1" staged_compose="$2" staged_env="$3"
     shift 3
-    local directory="${VDM_REPO_PATH}/joomla/available/$site" compose_file effective_env
+    local directory="${VDM_REPO_PATH}/joomla/available/$site" compose_file effective_env published_env
     local recovery='' lock='' running='' service target source index changed=0 failed=false runtime_changed=false
     local callback="${OCTOJOOM_SITE_VALIDATE_FUNCTION:-}" rollback_failed=false own_lock=false keep_recovery=false
     local enabled="${VDM_REPO_PATH}/joomla/enabled/$site" mirror='' count existing=''
@@ -8251,8 +8275,14 @@ function sitePublishConfigurationAction() {
     compose_file="$directory/docker-compose.yml"
     effective_env=$(getContainerEnvFile joomla "$site" available)
     [ "${#targets[@]}" -eq "${#sources[@]}" ] || exit 1
-    targets+=("$directory/.env" "$compose_file")
-    sources+=("$staged_env" "$staged_compose")
+    published_env="$effective_env"
+    if [ "$staged_env" != "$effective_env" ]; then
+      published_env="$directory/.env"
+      targets+=("$published_env")
+      sources+=("$staged_env")
+    fi
+    targets+=("$compose_file")
+    sources+=("$staged_compose")
     # Git Bash can enable a site by copying its directory instead of linking it.
     # Publish and restore that copy together with the available configuration.
     if [ -d "$enabled" ] && [ ! -L "$enabled" ]; then
@@ -8368,14 +8398,14 @@ function sitePublishConfigurationAction() {
       # Prepare the updated bind mount or health check on an existing stopped
       # container without starting it or any of its dependencies.
       runtime_changed=true
-      migrationRunCompose "$directory/.env" "$compose_file" --project-directory "$directory" up --no-start --no-deps --force-recreate "${inactive[@]}" >&2 || failed=true
+      migrationRunCompose "$published_env" "$compose_file" --project-directory "$directory" up --no-start --no-deps --force-recreate "${inactive[@]}" >&2 || failed=true
     fi
     if ! "$failed" && [ "${#active[@]}" -gt 0 ]; then
       [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 65 'Recreating the affected services and waiting for Docker readiness.'
       runtime_changed=true
       # Companion contents can change without changing the Compose model. A
       # renamed bind file also leaves an existing container on the old inode.
-      migrationRunCompose "$directory/.env" "$compose_file" --project-directory "$directory" up -d --no-deps --force-recreate --wait --wait-timeout 90 "${active[@]}" >&2 || failed=true
+      migrationRunCompose "$published_env" "$compose_file" --project-directory "$directory" up -d --no-deps --force-recreate --wait --wait-timeout 90 "${active[@]}" >&2 || failed=true
       if ! "$failed" && [ -n "$callback" ]; then
         [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 85 'Checking that the website accepted the updated configuration.'
         if ! isFunc "$callback" || ! "$callback" "$site"; then failed=true; fi
@@ -8429,7 +8459,7 @@ function sitePublishConfigurationAction() {
 # Inspect the two changes supported for a generated Joomla service. Unfamiliar
 # healthcheck layouts remain eligible for ordinary image-only alignment.
 function siteAlignmentPlan() {
-  local site="$1" directory compose_file effective_env raw image env_key service references name value problem
+  local site="$1" directory compose_file effective_env raw env_key service references problem
   local state=unchanged message health normalized
   isValidDomain "$site" || return 1
   directory="${VDM_REPO_PATH}/joomla/available/$site"
@@ -8443,19 +8473,13 @@ function siteAlignmentPlan() {
   if [ ! -f "$effective_env" ] || ! references=$(migrationComposeReferences "$compose_file"); then
     printf 'action-needed\tThe effective environment is missing or interpolation needs a manual edit.\n'; return 0
   fi
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    if ! migrationReadEnvValue "$effective_env" "$name" value problem; then
-      printf 'action-needed\t%s\n' "$problem"; return 0
-    fi
-  done <<< "$references"
+  if ! problem=$(siteReadScopedEnv "$effective_env" "$references" 2>&1 >/dev/null); then
+    printf 'action-needed\t%s\n' "$problem"; return 0
+  fi
   if ! raw=$(siteReadServiceScalar "$compose_file" "$service" image); then
     printf 'action-needed\tThe web image is not a unique block-style service scalar.\n'; return 0
   fi
   if [ "$raw" = "\${VDM_${env_key}_IMAGE}" ]; then
-    migrationReadEnvValue "$effective_env" "VDM_${env_key}_IMAGE" image || {
-      printf 'action-needed\tThe saved web image setting is missing.\n'; return 0;
-    }
     message='Current image already has a saved site setting.'
   elif [[ "$raw" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$ ]]; then
     state=pending
@@ -8475,6 +8499,7 @@ function siteAlignConfiguration() {
   (
     local site="$1" action="${2:-apply}" plan state directory compose_file effective_env env_key service image
     local staged_compose='' staged_env='' before='' after='' reported=false status temporary
+    local candidate_env locations image_change=false
     local OCTOJOOM_SITE_REFRESH_STOPPED=false
     local -a affected=()
     trap '
@@ -8502,27 +8527,35 @@ function siteAlignConfiguration() {
     env_key="$VDM_SRC_ENV_KEY" service="joomla$VDM_SRC_KEY"
     image=$(siteReadServiceScalar "$compose_file" "$service" image) || exit 1
     staged_compose=$(mktemp "$directory/.align-compose.XXXXXX") || exit 1
-    staged_env=$(mktemp "$directory/.align-env.XXXXXX") || { rm -f "$staged_compose"; exit 1; }
     before=$(mktemp "$directory/.align-before.XXXXXX") || exit 1
     after=$(mktemp "$directory/.align-after.XXXXXX") || exit 1
-    if [ "$effective_env" = "$directory/.env" ] && [ "$image" = "\${VDM_${env_key}_IMAGE}" ]; then
-      cp "$effective_env" "$staged_env" || exit 1
-    else
-      siteWriteScopedEnv "$compose_file" "$effective_env" "$env_key" "$staged_env" || exit 1
-    fi
+    candidate_env="$effective_env"
     if [ "$image" = "\${VDM_${env_key}_IMAGE}" ]; then
       cp "$compose_file" "$staged_compose" || exit 1
     else
-      writeEnvVariable "$staged_env" "VDM_${env_key}_IMAGE=\"$image\"" true &&
-        siteReplaceServiceScalar "$compose_file" "$staged_compose" "$service" image "\${VDM_${env_key}_IMAGE}" || exit 1
-    fi
-    siteValidateCompose "$staged_compose" "$staged_env" "$directory" || exit 1
-    migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" config > "$before" &&
-      migrationRunCompose "$staged_env" "$staged_compose" --project-directory "$directory" config > "$after" || exit 1
-    if ! cmp -s "$before" "$after"; then
-      printf '%s\taction-needed\tEffective Compose configuration changed unexpectedly; original retained.\n' "$site"
-      reported=true
-      exit 1
+      staged_env=$(mktemp "$directory/.align-env.XXXXXX") || exit 1
+      if [ "$effective_env" = "$directory/.env" ]; then
+        # Keep the operator's local records, including multiline values. Only
+        # the actual image assignment is replaced when the image is adopted.
+        locations=$(readEnvRecords "$effective_env" locations "VDM_${env_key}_IMAGE") || exit 1
+        awk 'NR==FNR {drop[$1]=1; next} !(FNR in drop)' \
+          <(printf '%s\n' "$locations") "$effective_env" > "$staged_env" || exit 1
+        formatEnvAssignment "VDM_${env_key}_IMAGE=\"$image\"" >> "$staged_env" || exit 1
+      else
+        siteWriteScopedEnv "$compose_file" "$effective_env" "$env_key" "$staged_env" &&
+          writeEnvVariable "$staged_env" "VDM_${env_key}_IMAGE=\"$image\"" true || exit 1
+      fi
+      siteReplaceServiceScalar "$compose_file" "$staged_compose" "$service" image "\${VDM_${env_key}_IMAGE}" || exit 1
+      migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" config > "$before" &&
+        migrationRunCompose "$staged_env" "$staged_compose" --project-directory "$directory" config > "$after" || exit 1
+      if cmp -s "$before" "$after"; then
+        image_change=true
+        candidate_env="$staged_env"
+      else
+        # Moving out of a shared ENV can change native Compose settings such
+        # as COMPOSE_PROJECT_NAME. Keep that project for a probe-only repair.
+        cp "$compose_file" "$staged_compose" || exit 1
+      fi
     fi
     # The image/ENV change must resolve identically. Apply the one intentional
     # runtime difference only after that comparison, to the selected service.
@@ -8535,8 +8568,15 @@ function siteAlignConfiguration() {
         OCTOJOOM_SITE_REFRESH_STOPPED=true
       fi
     fi
-    sitePublishConfiguration "$site" "$staged_compose" "$staged_env" "${affected[@]}" || exit 1
-    if [ "${#affected[@]}" -gt 0 ]; then
+    if ! "$image_change" && [ "${#affected[@]}" -eq 0 ]; then
+      printf '%s\taction-needed\tEffective Compose configuration changed unexpectedly; original retained.\n' "$site"
+      reported=true
+      exit 1
+    fi
+    sitePublishConfiguration "$site" "$staged_compose" "$candidate_env" "${affected[@]}" || exit 1
+    if ! "$image_change" && [ "$image" != "\${VDM_${env_key}_IMAGE}" ]; then
+      printf '%s\tupdated\tApplied the Apache health check. Kept the current image and environment to preserve the Compose project.\n' "$site"
+    elif [ "${#affected[@]}" -gt 0 ]; then
       printf '%s\tupdated\tApplied the Apache health check; website service state preserved.\n' "$site"
     else
       printf '%s\tupdated\tSaved current image and complete site environment; services unchanged.\n' "$site"
@@ -20817,7 +20857,7 @@ function removeShellIntegration() {
 # workflows can use valid saved settings even when the file has custom entries.
 function loadStartupEnv() {
   case "${VDM_CONTAINER_TYPE:-}/${VDM_TASK:-}/${OCTOJOOM_CLI_ACTION:-}" in
-    //|joomla/setup/|joomla/playground/) readSetupEnvValues "$1" --preferences ;;
+    //|joomla/setup/|joomla/playground/|joomla/align/) readSetupEnvValues "$1" --preferences ;;
     *) loadEnvFile "$1" ;;
   esac
 }

@@ -38,16 +38,61 @@ setup() {
   [ ! -s "$STUB_DIR/commands.log" ]
 }
 
-@test "alignment: malformed assignment reports its actual line without revealing its contents" {
-  printf '%s\n' 'BROKEN-private-secret' >> "$ALIGN_ENV"
-  local line_number
-  line_number=$(awk 'END { print NR }' "$ALIGN_ENV")
-  run siteAlignConfiguration alpha.example.test inspect
-  assert_failure
-  assert_output_contains "Invalid assignment at $ALIGN_ENV:$line_number."
-  assert_output_contains 'Use VDM_NAME=value or a comment, then retry.'
-  [[ "$output" != *private-secret* && "$output" != *'Missing VDM_'* ]]
-  [ ! -s "$STUB_DIR/commands.log" ]
+@test "alignment: CLI inspection and the selected website action accept operator settings in the shared env" {
+  local site=alpha.example.test expected_health
+  expected_health=$(joomlaServiceProperty "$ALIGN_YML" joomlaalpha healthcheck)
+  VDM_WEB_HEALTH='["CMD", "curl", "-f", "http://localhost/"]' gen_joomla_compose alpha ALPHA alpha example.test > "$ALIGN_YML"
+  printf 'VDM_ALPHA_BACKUP_RETENTION=7\nVDM_BETA_DB_PASS=sibling-secret\nVDM_HOST_PASSWORD=host-secret\n' >> "$ALIGN_ENV"
+  awk '{print} END {for (i=NR; i<17; i++) print "# Host settings"; print "TZ=Africa/Windhoek"}' "$ALIGN_ENV" > "$SANDBOX/shared"
+  cp "$SANDBOX/shared" "$ALIGN_ENV"
+  cp "$ALIGN_YML" "$SANDBOX/before.yml"
+
+  run_octojoom --type joomla --task align --container "$site" --action inspect --non-interactive
+  assert_success
+  assert_output_contains $'alpha.example.test\tpending\t'
+  assert_output_contains 'Update the default Apache health check'
+  cmp "$ALIGN_YML" "$SANDBOX/before.yml"
+  cmp "$ALIGN_ENV" "$SANDBOX/shared"
+  refute_file_exists "$ALIGN_DIR/.env"
+
+  run runJoomlaSiteAction "$site" align
+  assert_success
+  assert_output_contains $'alpha.example.test\tupdated\t'
+  assert_equal "$(joomlaServiceProperty "$ALIGN_YML" joomlaalpha healthcheck)" "$expected_health"
+  assert_equal "$(siteReadServiceScalar "$ALIGN_YML" joomlaalpha image)" '${VDM_ALPHA_IMAGE}'
+  local value
+  migrationReadEnvValue "$ALIGN_DIR/.env" VDM_ALPHA_IMAGE value
+  assert_equal "$value" joomla:5.3
+  migrationReadEnvValue "$ALIGN_DIR/.env" VDM_ALPHA_DB_PASS value
+  assert_equal "$value" secret
+  migrationReadEnvValue "$ALIGN_DIR/.env" VDM_ALPHA_BACKUP_RETENTION value
+  assert_equal "$value" 7
+  refute_file_contains "$ALIGN_DIR/.env" 'TZ='
+  refute_file_contains "$ALIGN_DIR/.env" 'VDM_BETA_'
+  refute_file_contains "$ALIGN_DIR/.env" 'VDM_HOST_PASSWORD'
+  cmp "$ALIGN_ENV" "$SANDBOX/shared"
+}
+
+@test "alignment: adding a literal image to a private env preserves its operator settings and comments" {
+  cp "$ALIGN_ENV" "$ALIGN_DIR/.env"
+  cat >> "$ALIGN_DIR/.env" <<'ENV'
+
+# Keep the site's host-specific settings together.
+TZ=Africa/Windhoek
+VDM_LOCAL_NOTE='two words'
+SITE_NOTE='Example setting:
+VDM_ALPHA_IMAGE=example:only
+'
+ENV
+  cp "$ALIGN_DIR/.env" "$SANDBOX/before.env"
+  printf 'VDM_ALPHA_IMAGE="joomla:old"\n' >> "$ALIGN_DIR/.env"
+  run_octojoom --type joomla --task align --container alpha.example.test --action apply --non-interactive
+  assert_success
+  assert_output_contains $'alpha.example.test\tupdated\t'
+  assert_equal "$(siteReadServiceScalar "$ALIGN_YML" joomlaalpha image)" '${VDM_ALPHA_IMAGE}'
+  assert_file_contains "$ALIGN_DIR/.env" 'VDM_ALPHA_IMAGE="joomla:5.3"'
+  sed '/^VDM_ALPHA_IMAGE="joomla:5\.3"$/d' "$ALIGN_DIR/.env" > "$SANDBOX/after.env"
+  cmp "$SANDBOX/before.env" "$SANDBOX/after.env"
 }
 
 @test "alignment: invalid quotes identify the setting and line without revealing its value" {
@@ -221,6 +266,27 @@ EXTRA
   [[ "$output" != *unexpected-secret* && "$output" != *previous-secret* ]]
   cmp "$ALIGN_YML" "$SANDBOX/original"
   [ ! -e "$ALIGN_DIR/.env" ]
+}
+
+@test "alignment: a shared Compose project name survives a probe-only repair and recreation" {
+  VDM_WEB_HEALTH='["CMD", "curl", "-f", "http://localhost/"]' gen_joomla_compose alpha ALPHA alpha example.test > "$ALIGN_YML"
+  printf 'COMPOSE_PROJECT_NAME=spark\n' >> "$ALIGN_ENV"
+  cp "$ALIGN_ENV" "$SANDBOX/shared-before"
+  migrationRunCompose() {
+    printf '%s\n' "$*" >> "$STUB_DIR/requests"
+    case " $* " in
+      *' config ') if grep -q '^COMPOSE_PROJECT_NAME=spark$' "$1"; then echo spark; else echo default; fi ;;
+      *' ps --status running --services '*) echo joomlaalpha ;;
+    esac
+  }
+  run siteAlignConfiguration alpha.example.test apply
+  assert_success
+  assert_output_contains 'Kept the current image and environment'
+  assert_file_contains "$ALIGN_YML" '"OPTIONS"'
+  assert_equal "$(siteReadServiceScalar "$ALIGN_YML" joomlaalpha image)" joomla:5.3
+  refute_file_exists "$ALIGN_DIR/.env"
+  cmp "$ALIGN_ENV" "$SANDBOX/shared-before"
+  grep -F "$ALIGN_ENV $ALIGN_YML " "$STUB_DIR/requests" | grep -q ' up -d --no-deps --force-recreate .* joomlaalpha$'
 }
 
 @test "alignment: batch continues past unsupported site and reports partial failure" {
