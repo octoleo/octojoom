@@ -187,13 +187,13 @@ Compose and Docker helpers to catch attempts to inspect a neighbor.
 
 The fixture retains SQL numeric, binary and character-set checks and tests
 administrator changes against the imported account. It deploys an offline
-Apache export, then applies the selected-site alignment to a running site
-with the legacy homepage probe. For at least three minutes in offline mode,
-Docker keeps the web container healthy. The fixture checks Joomla's guest 503,
-authorized frontend and administrator logins through Traefik, and a return to
-guest HTTP 200 without a restart. A running container with the same probe and
-no HTTP listener must become unhealthy. The replacement cases preserve a
-customized health check.
+Apache export and inspects the running web container to confirm it has no
+Docker health check. It updates a stopped container with the old `OPTIONS *`
+probe and a running container whose old homepage probe outlived the Compose
+change. A repeat update keeps the web container's identity. The fixture
+checks Joomla's guest 503, authorized frontend and administrator logins through
+Traefik, and a return to guest HTTP 200 without a restart. The replacement
+cases preserve an operator-defined health check.
 macOS and Windows run the portable Playground suites with Docker stand-ins.
 
 The database and backup matrix installs Joomla separately for each engine.
@@ -274,6 +274,16 @@ when forwarding client headers through a proxy.
 
 Docker's official installation instructions do not cover SUSE. Install its
 Docker packages and Compose manually before using Octojoom there.
+
+On pushes and pull requests to `master` and `staging`, Ubuntu runs the full
+shell suite. macOS and Windows run the host tools, website update, webserver,
+local HTTPS, and Playground ZIP suites. Windows also runs the native PHP and
+JSON path regressions. Each focused job has a 12-minute limit. The existing
+Docker integration tests run on Ubuntu.
+
+Use **Actions → Tests → Run workflow** for the complete shell suite on all three
+hosts on a selected branch. The same full matrix runs each Sunday at 03:17 UTC
+on the default branch once this workflow is present there.
 
 Passing workflows only block merge when branch protection requires them.
 Require `ShellCheck`, `Tests (ubuntu-latest)`, `Tests (macos-latest)`,

@@ -1,7 +1,4 @@
-# Octojoom checks: every push to master or staging, and every pull request
-# towards them, must pass all jobs before it is merged.
-#
-# The same file also runs on Gitea Actions (it reads .github/workflows).
+# Gitea Actions also reads this workflow from .github/workflows.
 # The macOS and Windows jobs need runners with the macos-latest and
 # windows-latest labels there.
 
@@ -17,12 +14,14 @@ on:
       - master
       - staging
   workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 0'
 
 permissions:
   contents: read
 
 concurrency:
-  group: tests-${{ github.ref }}
+  group: tests-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -54,8 +53,10 @@ jobs:
   test:
     name: Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Git Bash needs extra time for the complete Bats and standalone clone suites.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 30 }}
+    timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 60 || matrix.os == 'ubuntu-latest' && 30 || 12 }}
+    env:
+      FULL_SUITE: ${{ matrix.os == 'ubuntu-latest' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+      OCTOJOOM_NO_REAL_DOCKER: ${{ matrix.os != 'ubuntu-latest' && '1' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -83,30 +84,26 @@ jobs:
           echo "OSTYPE=${OSTYPE}"
           sed --version 2>/dev/null | head -n 1 || echo "sed: BSD"
 
-      # Catch filesystem compatibility failures before the long Windows suite.
-      - name: Verify HTTPS directory setup (Windows)
-        if: runner.os == 'Windows'
-        env:
-          OCTOJOOM_NO_REAL_DOCKER: '1'
-        run: bash tests/run.sh tests/unit/traefik-local-https.bats
-
-      - name: Verify native PHP paths (Windows)
-        if: runner.os == 'Windows'
-        env:
-          OCTOJOOM_NO_REAL_DOCKER: '1'
-        run: >-
-          bash tests/run.sh --filter 'PHP startup creates global defaults|native staged validation'
-          tests/unit/php-defaults.bats tests/unit/php-runtime.bats
-
-      - name: Verify Playground ZIP paths with native Python (Windows)
-        if: runner.os == 'Windows'
-        run: bash tests/run.sh tests/unit/playground-inspect.bats
-
-      - name: Run the test suite
-        env:
-          # docker compose config only runs for real on Linux, where docker is installed
-          OCTOJOOM_NO_REAL_DOCKER: ${{ runner.os != 'Linux' && '1' || '' }}
+      - name: Run the complete shell suite
+        if: env.FULL_SUITE == 'true'
         run: bash tests/run.sh
+
+      - name: Check host tools, filesystem handling, and selected-site updates
+        if: env.FULL_SUITE != 'true'
+        run: |
+          bash tests/run.sh \
+            tests/unit/platform.bats \
+            tests/unit/site-alignment.bats \
+            tests/unit/webserver-docroot.bats \
+            tests/unit/traefik-local-https.bats \
+            tests/unit/playground-inspect.bats
+
+      - name: Verify native PHP and JSON paths on Windows
+        if: runner.os == 'Windows' && env.FULL_SUITE != 'true'
+        run: >-
+          bash tests/run.sh
+          --filter 'PHP startup creates global defaults|native staged validation|Windows native backslashes|site JSON reader preserves native arguments'
+          tests/unit/php-defaults.bats tests/unit/php-runtime.bats tests/unit/site-information.bats
 
   docker-integration:
     name: Docker clone integration
