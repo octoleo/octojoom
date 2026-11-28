@@ -148,6 +148,64 @@ EXTRA
   [ ! -e "$ALIGN_DIR/.env" ]
 }
 
+@test "alignment: recreate only the selected running Apache service with the corrected probe" {
+  local site=alpha.example.test
+  siteAlignConfiguration "$site" apply
+  printf '# Site-specific setting\nVDM_LOCAL_NOTE=keep\n' >> "$ALIGN_DIR/.env"
+  cp "$ALIGN_DIR/.env" "$SANDBOX/private.env"
+  cp "$ALIGN_YML" "$SANDBOX/current.yml"
+  VDM_WEB_HEALTH='["CMD", "curl", "-f", "http://localhost/"]' gen_joomla_compose alpha ALPHA alpha example.test > "$SANDBOX/legacy.yml"
+  joomlaServiceProperty "$SANDBOX/legacy.yml" joomlaalpha healthcheck > "$SANDBOX/legacy-probe"
+  joomlaSetServiceProperty "$SANDBOX/current.yml" "$ALIGN_YML" joomlaalpha healthcheck "$SANDBOX/legacy-probe"
+  mkdir -p "$VDM_REPO_PATH/joomla/available/other.example.test"
+  printf 'unsupported layout\n' > "$VDM_REPO_PATH/joomla/available/other.example.test/docker-compose.yml"
+  migrationRunCompose() {
+    printf '%s\n' "$*" >> "$STUB_DIR/requests"
+    case " $* " in *' ps --status running --services '*) printf 'joomlaalpha\nmariadbalpha\n' ;; esac
+  }
+  VDM_CONTAINER="$site" VDM_ALL=false VDM_ACTION=inspect
+  run joomla__TRuST__align
+  assert_success
+  assert_output_contains 'Update the default Apache health check'
+  [ ! -s "$STUB_DIR/requests" ]
+  VDM_ACTION=apply
+  run joomla__TRuST__align
+  assert_success
+  cmp "$ALIGN_YML" "$SANDBOX/current.yml"
+  cmp "$ALIGN_DIR/.env" "$SANDBOX/private.env"
+  [ "$(grep -c ' up ' "$STUB_DIR/requests")" -eq 1 ]
+  grep -q ' up -d --no-deps --force-recreate --wait --wait-timeout 90 joomlaalpha$' "$STUB_DIR/requests"
+  : > "$STUB_DIR/requests"
+  run joomla__TRuST__align
+  assert_success
+  assert_output_contains $'unchanged\t'
+  [ ! -s "$STUB_DIR/requests" ]
+}
+
+@test "alignment: prepare a legacy probe on a stopped Apache container while preserving a custom probe" {
+  local site=alpha.example.test legacy='["CMD", "curl", "-f", "http://localhost/"]'
+  VDM_WEB_HEALTH="$legacy" gen_joomla_compose alpha ALPHA alpha example.test > "$ALIGN_YML"
+  joomlaServiceProperty "$ALIGN_YML" joomlaalpha healthcheck > "$SANDBOX/legacy-probe"
+  migrationRunCompose() {
+    printf '%s\n' "$*" >> "$STUB_DIR/requests"
+    case " $* " in *' ps --all --services '*) printf 'joomlaalpha\n' ;; esac
+  }
+  run siteAlignConfiguration "$site" apply
+  assert_success
+  [ "$(grep -c ' up ' "$STUB_DIR/requests")" -eq 1 ]
+  grep -q ' up --no-start --no-deps --force-recreate joomlaalpha$' "$STUB_DIR/requests"
+  refute_file_contains "$ALIGN_YML" "$legacy"
+  sed 's/interval: 30s/interval: 45s/' "$SANDBOX/legacy-probe" > "$SANDBOX/custom-probe"
+  joomlaSetServiceProperty "$ALIGN_YML" "$SANDBOX/custom.yml" joomlaalpha healthcheck "$SANDBOX/custom-probe"
+  cp "$SANDBOX/custom.yml" "$ALIGN_YML"
+  : > "$STUB_DIR/requests"
+  run siteAlignConfiguration "$site" apply
+  assert_success
+  assert_output_contains $'unchanged\t'
+  cmp "$ALIGN_YML" "$SANDBOX/custom.yml"
+  [ ! -s "$STUB_DIR/requests" ]
+}
+
 @test "alignment: unexpected effective semantic changes are refused without disclosing resolved secrets" {
   migrationRunCompose() {
     if [[ " $* " == *' --quiet '* ]]; then return 0; fi

@@ -2014,6 +2014,31 @@ function joomla__TRuST__setup() {
   )
 }
 
+# Apache handles OPTIONS * before looking up a document or dispatching Joomla.
+# Docker enforces the timeout even if the listener accepts but never replies.
+function joomlaWebHealthcheck() {
+  local apache='["CMD", "curl", "-fsS", "--noproxy", "*", "--request", "OPTIONS", "--request-target", "*", "http://127.0.0.1"]'
+  printf '    healthcheck:\n      test: %s\n      interval: 30s\n      timeout: 5s\n      retries: 5\n' "${1:-$apache}"
+}
+
+# Upgrade only the complete previously generated default. Keep custom commands,
+# timing, comments and spacing in the selected property or saved sidecar.
+function joomlaNormalizeApacheHealthcheck() {
+  local legacy='["CMD", "curl", "-f", "http://localhost/"]' replacement
+  replacement=$(joomlaWebHealthcheck | sed -n '/^      test: /p')
+  awk -v legacy="$(joomlaWebHealthcheck "$legacy")" -v replacement="$replacement" '
+    {lines[NR]=$0}
+    NF && $1 !~ /^#/ {
+      block=block (block=="" ? "" : "\n") $0
+      if($1=="test:") test_line=NR
+    }
+    END {
+      if(block==legacy) lines[test_line]=replacement
+      for(i=1; i<=NR; i++) print lines[i]
+    }
+  ' "$1"
+}
+
 # return the Joomla Container setup yml
 function joomlaContainer() {
 
@@ -2052,8 +2077,7 @@ function joomlaContainer() {
       database_health='["CMD-SHELL", "mariadb-admin ping --silent"]'
       ;;
   esac
-  web_health='["CMD", "curl", "-f", "http://localhost/"]'
-  web_health="${VDM_WEB_HEALTH:-$web_health}"
+  web_health=$(joomlaWebHealthcheck "${VDM_WEB_HEALTH:-}")
   web_labels=$(getYMLine3 '- "traefik.enable=true"')
   web_labels+=$(getYMLine3 "- \"traefik.http.routers.joomla${VDM_KEY}.rule=Host(\`${VDM_SUBDOMAIN}.${VDM_DOMAIN}\`)\"")
   web_labels+="${VDM_JOOMLA_SECURE_LABELS}"
@@ -2112,11 +2136,7 @@ services:
 #        reservations:
 #          memory: 512M
 
-    healthcheck:
-      test: ${web_health}
-      interval: 30s
-      timeout: 5s
-      retries: 5
+${web_health}
 
     labels:${web_labels}${VDM_WEB_SERVICE:-}
 EOF
@@ -2511,15 +2531,9 @@ FPM_HEALTH
       joomlaSetServiceProperty "$current" "$next" "$service" "$property" "$work/property" && mv "$next" "$current" || return 1
     done
     if [ -f "$work/restore-healthcheck.yml" ]; then
-      cp "$work/restore-healthcheck.yml" "$work/property" || return 1
+      joomlaNormalizeApacheHealthcheck "$work/restore-healthcheck.yml" > "$work/property" || return 1
     else
-      cat > "$work/property" <<'APACHE_HEALTH'
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-APACHE_HEALTH
+      joomlaWebHealthcheck > "$work/property" || return 1
     fi
     joomlaSetServiceProperty "$current" "$next" "$service" healthcheck "$work/property" && mv "$next" "$current" || return 1
     : > "$web"
@@ -2603,9 +2617,10 @@ function joomlaValidateStagedWebConfiguration() {
 # Test syntax plus application paths inside the affected HTTP container. Real
 # external route/database verification is shared with the PHP action when present.
 function joomlaVerifyWebConfiguration() {
-  local site="$1" service root flavor
+  local site="$1" service root flavor path
   readJoomlaSiteFacts "$site" || return 1
   service="$VDM_SITE_SERVICE" root="$VDM_SITE_DOCROOT" flavor="$VDM_SITE_WEBSERVER"
+  path=$(joomlaRuntimeApplicationPath "$site") || return 1
   if [ "$flavor" = nginx ]; then
     joomlaSiteCompose "$site" exec -T "nginx${VDM_SITE_KEY}" nginx -t >/dev/null || return 1
     # Observe response status AND Joomla API JSON; a generic Nginx 404 is not
@@ -2614,7 +2629,7 @@ function joomlaVerifyWebConfiguration() {
     joomlaSiteCompose "$site" exec -T "$service" php -r '
       $base=$argv[1];
       $fail=static function($path,$code,$reason) {fwrite(STDERR,"Web verification failed for ".$path." (HTTP ".$code."): ".$reason."\n"); exit(1);};
-      foreach (["/", "/administrator/", "/api/index.php/v1/content/articles", "/configuration.php", "/octojoom-missing-script.php"] as $path) {
+      foreach (array_unique([$argv[2], "/administrator/", "/api/index.php/v1/content/articles", "/configuration.php", "/octojoom-missing-script.php"]) as $path) {
         // Joomla API content negotiation requires a supported Accept header.
         $accept=strpos($path,"/api/")===0 ? "application/vnd.api+json" : "*/*";
         $context=stream_context_create(["http"=>["ignore_errors"=>true,"timeout"=>15,"follow_location"=>0,"header"=>"Accept: ".$accept."\r\n"]]);
@@ -2629,16 +2644,16 @@ function joomlaVerifyWebConfiguration() {
           if(!in_array($code,[200,401,403,404],true)) $fail($path,$code,"unexpected API response");
         } elseif($code<200 || $code>=400) $fail($path,$code,"expected an application page");
       }
-    ' "http://nginx${VDM_SITE_KEY}" || return 1
+    ' "http://nginx${VDM_SITE_KEY}" "$path" || return 1
   else
     joomlaSiteCompose "$site" exec -T "$service" apache2ctl -t >/dev/null || return 1
-    joomlaSiteCompose "$site" exec -T "$service" curl --fail --silent --output /dev/null http://127.0.0.1/ || return 1
+    joomlaSiteCompose "$site" exec -T "$service" curl --fail --silent --output /dev/null "http://127.0.0.1$path" || return 1
   fi
   # shellcheck disable=SC2016 # Literal PHP, not shell variables.
   joomlaSiteCompose "$site" exec -T "$service" php -r \
     'exit(is_file($argv[1]."/index.php") && is_file($argv[1]."/configuration.php") ? 0 : 1);' "$root" || return 1
   if isFunc joomlaRuntimeValidatePublished; then
-    joomlaRuntimeValidatePublished "$site" || return 1
+    joomlaRuntimeValidatePublished "$site" "$path" || return 1
   fi
 }
 
@@ -8288,7 +8303,7 @@ function sitePublishConfigurationAction() {
         [[ "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || exit 1
         if printf '%s\n' "$running" | grep -qxF "$service"; then active+=("$service"); fi
       done
-      if [ -n "${OCTOJOOM_SITE_PHP_FILE:-}" ] && [ "${#active[@]}" -eq 0 ]; then
+      if { [ -n "${OCTOJOOM_SITE_PHP_FILE:-}" ] || [ "${OCTOJOOM_SITE_REFRESH_STOPPED:-false}" = true ]; } && [ "${#active[@]}" -eq 0 ]; then
         existing=$(migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" ps --all --services) || exit 1
         for service in "$@"; do
           if printf '%s\n' "$existing" | grep -qxF "$service"; then inactive+=("$service"); fi
@@ -8349,8 +8364,8 @@ function sitePublishConfigurationAction() {
       done
     fi
     if ! "$failed" && [ "${#inactive[@]}" -gt 0 ]; then
-      # A stopped container can still hold the old bind-file inode. Prepare its
-      # replacement now without starting it or any of its dependencies.
+      # Prepare the updated bind mount or health check on an existing stopped
+      # container without starting it or any of its dependencies.
       runtime_changed=true
       migrationRunCompose "$directory/.env" "$compose_file" --project-directory "$directory" up --no-start --no-deps --force-recreate "${inactive[@]}" >&2 || failed=true
     fi
@@ -8410,11 +8425,11 @@ function sitePublishConfigurationAction() {
   )
 }
 
-# Alignment's one concrete transformation exposes the *current* web image as a
-# scoped editable setting. It deliberately does not enable optional services,
-# upgrade an image, regenerate YAML, or change Traefik before such a change exists.
+# Inspect the two changes supported for a generated Joomla service. Unfamiliar
+# healthcheck layouts remain eligible for ordinary image-only alignment.
 function siteAlignmentPlan() {
   local site="$1" directory compose_file effective_env raw image env_key service references name value problem
+  local state=unchanged message health normalized
   isValidDomain "$site" || return 1
   directory="${VDM_REPO_PATH}/joomla/available/$site"
   compose_file="$directory/docker-compose.yml"
@@ -8437,22 +8452,30 @@ function siteAlignmentPlan() {
     printf 'action-needed\tThe web image is not a unique block-style service scalar.\n'; return 0
   fi
   if [ "$raw" = "\${VDM_${env_key}_IMAGE}" ]; then
-    if migrationReadEnvValue "$effective_env" "VDM_${env_key}_IMAGE" image; then
-      printf 'unchanged\tCurrent image already has a saved site setting.\n'
-    else
-      printf 'action-needed\tThe saved web image setting is missing.\n'
-    fi
+    migrationReadEnvValue "$effective_env" "VDM_${env_key}_IMAGE" image || {
+      printf 'action-needed\tThe saved web image setting is missing.\n'; return 0;
+    }
+    message='Current image already has a saved site setting.'
   elif [[ "$raw" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$ ]]; then
-    printf 'pending\tSave the current web image and scoped environment; no service recreation.\n'
+    state=pending
+    message='Save the current web image and scoped environment.'
   else
-    printf 'action-needed\tThe existing image interpolation is customized; keep its current setting.\n'
+    printf 'action-needed\tThe existing image interpolation is customized; keep its current setting.\n'; return 0
   fi
+  if health=$(joomlaServiceProperty "$compose_file" "$service" healthcheck) && [ -n "$health" ] &&
+    normalized=$(joomlaNormalizeApacheHealthcheck - <<< "$health") && [ "$health" != "$normalized" ]; then
+    state=pending
+    message+=' Update the default Apache health check and recreate the existing web container in its current running or stopped state.'
+  fi
+  printf '%s\t%s\n' "$state" "$message"
 }
 
 function siteAlignConfiguration() {
   (
     local site="$1" action="${2:-apply}" plan state directory compose_file effective_env env_key service image
     local staged_compose='' staged_env='' before='' after='' reported=false status temporary
+    local OCTOJOOM_SITE_REFRESH_STOPPED=false
+    local -a affected=()
     trap '
       status=$?
       for temporary in "$staged_compose" "$staged_env" "$before" "$after"; do
@@ -8481,9 +8504,17 @@ function siteAlignConfiguration() {
     staged_env=$(mktemp "$directory/.align-env.XXXXXX") || { rm -f "$staged_compose"; exit 1; }
     before=$(mktemp "$directory/.align-before.XXXXXX") || exit 1
     after=$(mktemp "$directory/.align-after.XXXXXX") || exit 1
-    siteWriteScopedEnv "$compose_file" "$effective_env" "$env_key" "$staged_env" &&
+    if [ "$effective_env" = "$directory/.env" ] && [ "$image" = "\${VDM_${env_key}_IMAGE}" ]; then
+      cp "$effective_env" "$staged_env" || exit 1
+    else
+      siteWriteScopedEnv "$compose_file" "$effective_env" "$env_key" "$staged_env" || exit 1
+    fi
+    if [ "$image" = "\${VDM_${env_key}_IMAGE}" ]; then
+      cp "$compose_file" "$staged_compose" || exit 1
+    else
       writeEnvVariable "$staged_env" "VDM_${env_key}_IMAGE=\"$image\"" true &&
-      siteReplaceServiceScalar "$compose_file" "$staged_compose" "$service" image "\${VDM_${env_key}_IMAGE}" || exit 1
+        siteReplaceServiceScalar "$compose_file" "$staged_compose" "$service" image "\${VDM_${env_key}_IMAGE}" || exit 1
+    fi
     siteValidateCompose "$staged_compose" "$staged_env" "$directory" || exit 1
     migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" config > "$before" &&
       migrationRunCompose "$staged_env" "$staged_compose" --project-directory "$directory" config > "$after" || exit 1
@@ -8492,10 +8523,23 @@ function siteAlignConfiguration() {
       reported=true
       exit 1
     fi
-    # No service arguments: effective configuration is identical, including when
-    # the daemon cannot be inspected. No stop/start/pull is needed for this edit.
-    sitePublishConfiguration "$site" "$staged_compose" "$staged_env" || exit 1
-    printf '%s\tupdated\tSaved current image and complete site environment; services unchanged.\n' "$site"
+    # The image/ENV change must resolve identically. Apply the one intentional
+    # runtime difference only after that comparison, to the selected service.
+    if joomlaServiceProperty "$staged_compose" "$service" healthcheck > "$before"; then
+      joomlaNormalizeApacheHealthcheck "$before" > "$after" || exit 1
+      if ! cmp -s "$before" "$after"; then
+        joomlaSetServiceProperty "$staged_compose" "$before" "$service" healthcheck "$after" &&
+          mv -- "$before" "$staged_compose" || exit 1
+        affected+=("$service")
+        OCTOJOOM_SITE_REFRESH_STOPPED=true
+      fi
+    fi
+    sitePublishConfiguration "$site" "$staged_compose" "$staged_env" "${affected[@]}" || exit 1
+    if [ "${#affected[@]}" -gt 0 ]; then
+      printf '%s\tupdated\tApplied the Apache health check; website service state preserved.\n' "$site"
+    else
+      printf '%s\tupdated\tSaved current image and complete site environment; services unchanged.\n' "$site"
+    fi
   )
 }
 
@@ -16780,13 +16824,28 @@ function joomlaPHPValidatePublished() {
   done
 }
 
+# Offline mode deliberately closes the guest frontend. The administrator
+# application still exercises Joomla when validating a runtime change.
+# shellcheck disable=SC2016 # Literal PHP runs in the selected service.
+function joomlaRuntimeApplicationPath() {
+  local path
+  path=$(joomlaSiteCompose "$1" exec --interactive=false -T "$VDM_SITE_SERVICE" php -r '
+    $file=$argv[1]."/configuration.php";
+    if (is_file($file)) { require $file; $config=new JConfig; }
+    echo empty($config->offline) ? "/" : "/administrator/";
+  ' -- "$VDM_SITE_DOCROOT") || return 1
+  [[ "$path" = / || "$path" = /administrator/ ]] || return 1
+  printf '%s\n' "$path"
+}
+
 # Runtime image/webserver switches retain their broader application check.
 function joomlaRuntimeValidatePublished() {
-  local site="$1"
+  local site="$1" path="${2:-}"
   joomlaPHPValidatePublished "$site" || return 1
   joomlaDatabaseVerifyConnection "$site" || return 1
   [[ "$VDM_SITE_URL" == http://* || "$VDM_SITE_URL" == https://* ]] || { printf 'No HTTP route was identified for application verification.\n' >&2; return 1; }
-  curl --fail --silent --show-error --location --max-redirs 5 --connect-timeout 5 --max-time 30 --output /dev/null "$VDM_SITE_URL"
+  [ -n "$path" ] || path=$(joomlaRuntimeApplicationPath "$site") || return 1
+  curl --fail --silent --show-error --location --max-redirs 5 --connect-timeout 5 --max-time 30 --output /dev/null "${VDM_SITE_URL%/}$path"
 }
 
 # shellcheck disable=SC2016
@@ -19538,9 +19597,10 @@ function migrationWaitHealthy() {
 # Test the installed application's real database credentials inside its own
 # container, then its destination route. The host never receives the password.
 function migrationVerifyApplication() {
-  local key="$1" host="$2" secure="$3" scheme=http port=80 started=$SECONDS response code redirect current visited hop retry
-  docker exec "joomla${key}" php -r '
+  local key="$1" host="$2" secure="$3" scheme=http port=80 started=$SECONDS response code redirect current visited hop retry path
+  path=$(docker exec "joomla${key}" php -r '
     require "configuration.php"; $c=new JConfig; $host=explode(":",$c->host,2);
+    echo empty($c->offline) ? "/" : "/administrator/";
     try {
       if (in_array($c->dbtype,["pgsql","postgresql","pdo_pgsql"],true)) {
         $db=new PDO("pgsql:host=".$host[0].";port=".(int)($host[1]??5432).";dbname=".$c->db,$c->user,$c->password);
@@ -19556,12 +19616,13 @@ function migrationVerifyApplication() {
       }
     } catch (Throwable $error) { exit(1); }
     exit(1);
-  ' >/dev/null 2>&1 || return 1
+  ' 2>/dev/null) || return 1
+  [[ "$path" = / || "$path" = /administrator/ ]] || return 1
   if [ "$secure" = true ]; then scheme=https; port=443; fi
   # --resolve checks the destination proxy and certificate even before clients
   # switch DNS. ACME issuance itself still requires valid public DNS/challenges.
   while [ "$((SECONDS-started))" -lt 120 ]; do
-    current="${scheme}://${host}/"; visited=$'\n'; retry=false
+    current="${scheme}://${host}${path}"; visited=$'\n'; retry=false
     for ((hop=0; hop<6; hop++)); do
       [[ "$visited" != *$'\n'"$current"$'\n'* ]] || return 1
       visited+="$current"$'\n'
