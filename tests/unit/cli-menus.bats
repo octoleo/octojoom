@@ -269,6 +269,10 @@ record_calls() {
 
 @test "showJoomla: alignment runs only when the operator selects it" {
   VDM_WEB_HEALTH='["CMD", "curl", "-f", "http://localhost/"]' make_joomla_container_with_php jcb JCB jcb
+  local fixture="$STUB_DIR/docker/config/jcb.vdm.dev.json"
+  joomlaSiteJSON '.services.joomlajcb.healthcheck.test=["CMD","curl","-f","http://localhost/"]' \
+    < "$fixture" > "$fixture.new"
+  mv "$fixture.new" "$fixture"
   # Called by the application functions loaded through the test harness.
   # shellcheck disable=SC2317
   whiptail() {
@@ -282,7 +286,7 @@ record_calls() {
   assert_success
   assert_answers_used
   [ "$(grep -cxF 'Update existing configurations' "${SANDBOX}/menu-arguments")" -eq 2 ]
-  assert_file_contains "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/docker-compose.yml" '"--request-target"'
+  assert_file_contains "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/docker-compose.yml" 'disable: true'
   refute_file_exists "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/.env"
 }
 

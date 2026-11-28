@@ -14,15 +14,14 @@ the source of truth; there is no enrollment or additional project registry.
 
 ## Joomla Site Offline and Docker health
 
-Apache receives an HTTP `OPTIONS *` request on its loopback listener every 30
-seconds. Apache answers this request before resolving a document root or running
-Joomla. A guest can therefore receive Joomla's offline login page with HTTP 503
-while Apache remains healthy and Traefik continues routing administrator logins.
-Docker marks Apache unhealthy after five consecutive failures, with a five-second
-timeout per probe. The database has its own health check. Apache images using
-the default probe need curl 7.55.0 or later for `--request-target`.
+New Apache sites disable Docker's web health check by default. When Joomla
+serves its offline login page with HTTP 503, that response no longer marks
+the web container unhealthy. Traefik can still route to `/administrator/`. The database
+keeps its own check. Nginx/FPM sites use the FPM listener and Nginx endpoint
+checks. Switching back to Apache restores an operator-defined check and
+disables a saved Octojoom default.
 
-New Apache sites use this probe automatically. For an existing site, use
+To retire the generated Apache probe on an existing site, use
 [the selected website's configuration update](CONFIGURATION-ALIGNMENT.md#repair-the-apache-health-check-for-one-website).
 
 ## Commands
