@@ -8514,8 +8514,8 @@ function siteAlignConfiguration() {
     if [ "$action" = apply ] || [ "$action" = save-image ]; then
       ! migrationPathHasSymlink "$VDM_SITE_COMPOSE" || { printf '%s\taction-needed\tThe configuration path contains a symbolic link.\n' "$site"; exit 1; }
       OCTOJOOM_SITE_HELD_LOCK="$VDM_SITE_DIR/.octojoom-change.lock"
-      mkdir -m 700 -- "$OCTOJOOM_SITE_HELD_LOCK" 2>/dev/null || {
-        printf '%s\taction-needed\tAnother configuration change is using this website.\n' "$site"; exit 1;
+      createPrivateDirectory -- "$OCTOJOOM_SITE_HELD_LOCK" || {
+        printf '%s\taction-needed\tCould not lock this website configuration for updating.\n' "$site"; exit 1;
       }
       staged="$OCTOJOOM_SITE_HELD_LOCK/docker-compose.yml"
       trap 'rm -rf -- "$OCTOJOOM_SITE_HELD_LOCK"' EXIT
