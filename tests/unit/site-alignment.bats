@@ -13,7 +13,12 @@ setup() {
   ALIGN_ENV="$VDM_REPO_PATH/joomla/.env"
 }
 
+write_legacy_compose() {
+  VDM_WEB_HEALTH='["CMD", "curl", "-f", "http://localhost/"]' gen_joomla_compose alpha ALPHA alpha example.test > "${1:-$ALIGN_YML}"
+}
+
 @test "alignment: inspect has no writes or Docker calls, including with Docker unavailable" {
+  write_legacy_compose
   cp "$ALIGN_YML" "$SANDBOX/original"
   fail_command docker-info 1
   run siteAlignConfiguration alpha.example.test inspect
@@ -24,14 +29,13 @@ setup() {
   [ ! -s "$STUB_DIR/commands.log" ]
 }
 
-@test "alignment: missing setting reports its name and effective file without changing the site" {
+@test "image alignment: a missing site setting prevents creating an incomplete private environment" {
   sed '/VDM_ALPHA_DB_ROOT=/d' "$ALIGN_ENV" > "$SANDBOX/incomplete.env"
   cp "$SANDBOX/incomplete.env" "$ALIGN_ENV"
   cp "$ALIGN_YML" "$SANDBOX/original"
-  run siteAlignConfiguration alpha.example.test apply
+  run siteAlignConfiguration alpha.example.test save-image
   assert_failure
-  assert_output_contains "Missing VDM_ALPHA_DB_ROOT in $ALIGN_ENV."
-  assert_output_contains "Restore this setting's existing value, then retry."
+  assert_output_contains $'alpha.example.test\taction-needed\t'
   cmp "$ALIGN_YML" "$SANDBOX/original"
   cmp "$ALIGN_ENV" "$SANDBOX/incomplete.env"
   refute_file_exists "$ALIGN_DIR/.env"
@@ -39,9 +43,9 @@ setup() {
 }
 
 @test "alignment: CLI inspection and the selected website action accept operator settings in the shared env" {
-  local site=alpha.example.test expected_health
-  expected_health=$(joomlaServiceProperty "$ALIGN_YML" joomlaalpha healthcheck)
-  VDM_WEB_HEALTH='["CMD", "curl", "-f", "http://localhost/"]' gen_joomla_compose alpha ALPHA alpha example.test > "$ALIGN_YML"
+  local site=alpha.example.test
+  cp "$ALIGN_YML" "$SANDBOX/expected.yml"
+  write_legacy_compose
   printf 'VDM_ALPHA_BACKUP_RETENTION=7\nVDM_BETA_DB_PASS=sibling-secret\nVDM_HOST_PASSWORD=host-secret\n' >> "$ALIGN_ENV"
   awk '{print} END {for (i=NR; i<17; i++) print "# Host settings"; print "TZ=Africa/Windhoek"}' "$ALIGN_ENV" > "$SANDBOX/shared"
   cp "$SANDBOX/shared" "$ALIGN_ENV"
@@ -58,22 +62,12 @@ setup() {
   run runJoomlaSiteAction "$site" align
   assert_success
   assert_output_contains $'alpha.example.test\tupdated\t'
-  assert_equal "$(joomlaServiceProperty "$ALIGN_YML" joomlaalpha healthcheck)" "$expected_health"
-  assert_equal "$(siteReadServiceScalar "$ALIGN_YML" joomlaalpha image)" '${VDM_ALPHA_IMAGE}'
-  local value
-  migrationReadEnvValue "$ALIGN_DIR/.env" VDM_ALPHA_IMAGE value
-  assert_equal "$value" joomla:5.3
-  migrationReadEnvValue "$ALIGN_DIR/.env" VDM_ALPHA_DB_PASS value
-  assert_equal "$value" secret
-  migrationReadEnvValue "$ALIGN_DIR/.env" VDM_ALPHA_BACKUP_RETENTION value
-  assert_equal "$value" 7
-  refute_file_contains "$ALIGN_DIR/.env" 'TZ='
-  refute_file_contains "$ALIGN_DIR/.env" 'VDM_BETA_'
-  refute_file_contains "$ALIGN_DIR/.env" 'VDM_HOST_PASSWORD'
+  cmp "$ALIGN_YML" "$SANDBOX/expected.yml"
+  refute_file_exists "$ALIGN_DIR/.env"
   cmp "$ALIGN_ENV" "$SANDBOX/shared"
 }
 
-@test "alignment: adding a literal image to a private env preserves its operator settings and comments" {
+@test "image alignment: adding a literal image to a private env preserves its operator settings and comments" {
   cp "$ALIGN_ENV" "$ALIGN_DIR/.env"
   cat >> "$ALIGN_DIR/.env" <<'ENV'
 
@@ -86,7 +80,7 @@ VDM_ALPHA_IMAGE=example:only
 ENV
   cp "$ALIGN_DIR/.env" "$SANDBOX/before.env"
   printf 'VDM_ALPHA_IMAGE="joomla:old"\n' >> "$ALIGN_DIR/.env"
-  run_octojoom --type joomla --task align --container alpha.example.test --action apply --non-interactive
+  run_octojoom --type joomla --task align --container alpha.example.test --action save-image --non-interactive
   assert_success
   assert_output_contains $'alpha.example.test\tupdated\t'
   assert_equal "$(siteReadServiceScalar "$ALIGN_YML" joomlaalpha image)" '${VDM_ALPHA_IMAGE}'
@@ -95,34 +89,33 @@ ENV
   cmp "$SANDBOX/before.env" "$SANDBOX/after.env"
 }
 
-@test "alignment: invalid quotes identify the setting and line without revealing its value" {
+@test "image alignment: invalid quotes block saving the image without revealing the site password" {
   printf '%s\n' 'VDM_ALPHA_DB_PASS="private-secret' >> "$ALIGN_ENV"
-  local line_number
-  line_number=$(awk 'END { print NR }' "$ALIGN_ENV")
-  run siteAlignConfiguration alpha.example.test inspect
+  run siteAlignConfiguration alpha.example.test inspect-image
+  assert_success
+  assert_output_contains $'alpha.example.test\tpending\t'
+  run siteAlignConfiguration alpha.example.test save-image
   assert_failure
-  assert_output_contains "Invalid quoting for VDM_ALPHA_DB_PASS at $ALIGN_ENV:$line_number."
   [[ "$output" != *private-secret* ]]
-  [ ! -s "$STUB_DIR/commands.log" ]
+  refute_file_exists "$ALIGN_DIR/.env"
 }
 
-@test "alignment: multiline value reports the unsupported format instead of a missing setting" {
+@test "image alignment: unsupported multiline credentials cannot be published or disclosed" {
   printf '%s\n' 'VDM_ALPHA_DB_PASS="private-secret\nsecond-line"' >> "$ALIGN_ENV"
-  run siteAlignConfiguration alpha.example.test inspect
+  run siteAlignConfiguration alpha.example.test save-image
   assert_failure
-  assert_output_contains 'Unsupported multiline value for VDM_ALPHA_DB_PASS'
-  assert_output_contains 'Use a single-line value, then retry.'
   [[ "$output" != *private-secret* && "$output" != *second-line* ]]
+  refute_file_exists "$ALIGN_DIR/.env"
 }
 
-@test "alignment: linked environment reports the path and reason instead of a missing setting" {
+@test "image alignment: a linked source environment cannot be migrated" {
   mv "$ALIGN_ENV" "$SANDBOX/shared.env"
   ln -s "$SANDBOX/shared.env" "$ALIGN_ENV"
   [ -L "$ALIGN_ENV" ] || skip 'Symbolic links are unavailable'
-  run siteAlignConfiguration alpha.example.test inspect
+  run siteAlignConfiguration alpha.example.test save-image
   assert_failure
-  assert_output_contains "Environment file $ALIGN_ENV is a symbolic link."
-  assert_output_contains 'Use a regular environment file, then retry.'
+  [ -L "$ALIGN_ENV" ]
+  refute_file_exists "$ALIGN_DIR/.env"
 }
 
 @test "scoped environment: referenced credentials and dormant site choices survive, sibling secrets do not" {
@@ -167,18 +160,24 @@ ENV
   cmp "$SANDBOX/first.env" "$SANDBOX/reapplied.env"
 }
 
-@test "alignment: preserves custom fields and shared defaults, is idempotent and never starts disabled sites" {
+@test "image alignment: preserves custom fields and shared defaults, is idempotent and never starts disabled sites" {
+  write_legacy_compose
+  joomlaServiceProperty "$ALIGN_YML" joomlaalpha healthcheck > "$SANDBOX/previous-probe"
+  printf 'VDM_BETA_DB_PASS=othersecret\nTZ=Africa/Windhoek\n' >> "$ALIGN_ENV"
   cat >> "$ALIGN_YML" <<'EXTRA'
 x-user-notes:
   custom: keep this comment and extension
 EXTRA
   cp "$ALIGN_ENV" "$SANDBOX/shared"
-  run siteAlignConfiguration alpha.example.test apply
+  run siteAlignConfiguration alpha.example.test save-image
   assert_success
   [[ "$output" == *$'updated\t'* ]]
   assert_equal "$(siteReadServiceScalar "$ALIGN_YML" joomlaalpha image)" '${VDM_ALPHA_IMAGE}'
   migrationReadEnvValue "$ALIGN_DIR/.env" VDM_ALPHA_IMAGE image
   [[ "$image" == joomla:* ]]
+  refute_file_contains "$ALIGN_DIR/.env" 'VDM_BETA_DB_PASS'
+  refute_file_contains "$ALIGN_DIR/.env" 'TZ='
+  assert_equal "$(joomlaServiceProperty "$ALIGN_YML" joomlaalpha healthcheck)" "$(cat "$SANDBOX/previous-probe")"
   grep -q 'custom: keep this comment and extension' "$ALIGN_YML"
   cmp "$ALIGN_ENV" "$SANDBOX/shared"
   [ ! -e "$VDM_REPO_PATH/joomla/enabled/alpha.example.test" ]
@@ -187,7 +186,7 @@ EXTRA
   cp "$ALIGN_YML" "$SANDBOX/aligned"
   cp "$ALIGN_DIR/.env" "$SANDBOX/aligned.env"
   : > "$STUB_DIR/commands.log"
-  run siteAlignConfiguration alpha.example.test apply
+  run siteAlignConfiguration alpha.example.test save-image
   assert_success
   [[ "$output" == *$'unchanged\t'* ]]
   cmp "$ALIGN_YML" "$SANDBOX/aligned"
@@ -196,6 +195,7 @@ EXTRA
 }
 
 @test "alignment: refused candidate validation leaves Compose and effective environment unchanged" {
+  write_legacy_compose
   cp "$ALIGN_YML" "$SANDBOX/original"
   fail_command docker-compose-config 1
   run siteAlignConfiguration alpha.example.test apply
@@ -206,13 +206,11 @@ EXTRA
 
 @test "alignment: recreate only the selected running Apache service with the corrected probe" {
   local site=alpha.example.test
-  siteAlignConfiguration "$site" apply
-  printf '# Site-specific setting\nVDM_LOCAL_NOTE=keep\n' >> "$ALIGN_DIR/.env"
+  cp "$ALIGN_ENV" "$ALIGN_DIR/.env"
+  printf "SITE_NOTE='one\ntwo'\n# Site-specific setting\n" >> "$ALIGN_DIR/.env"
   cp "$ALIGN_DIR/.env" "$SANDBOX/private.env"
   cp "$ALIGN_YML" "$SANDBOX/current.yml"
-  VDM_WEB_HEALTH='["CMD", "curl", "-f", "http://localhost/"]' gen_joomla_compose alpha ALPHA alpha example.test > "$SANDBOX/legacy.yml"
-  joomlaServiceProperty "$SANDBOX/legacy.yml" joomlaalpha healthcheck > "$SANDBOX/legacy-probe"
-  joomlaSetServiceProperty "$SANDBOX/current.yml" "$ALIGN_YML" joomlaalpha healthcheck "$SANDBOX/legacy-probe"
+  write_legacy_compose
   mkdir -p "$VDM_REPO_PATH/joomla/available/other.example.test"
   printf 'unsupported layout\n' > "$VDM_REPO_PATH/joomla/available/other.example.test/docker-compose.yml"
   migrationRunCompose() {
@@ -230,7 +228,7 @@ EXTRA
   cmp "$ALIGN_YML" "$SANDBOX/current.yml"
   cmp "$ALIGN_DIR/.env" "$SANDBOX/private.env"
   [ "$(grep -c ' up ' "$STUB_DIR/requests")" -eq 1 ]
-  grep -q ' up -d --no-deps --force-recreate --wait --wait-timeout 90 joomlaalpha$' "$STUB_DIR/requests"
+  grep -q ' up -d --no-deps --force-recreate joomlaalpha$' "$STUB_DIR/requests"
   : > "$STUB_DIR/requests"
   run joomla__TRuST__align
   assert_success
@@ -240,7 +238,7 @@ EXTRA
 
 @test "alignment: prepare a legacy probe on a stopped Apache container while preserving a custom probe" {
   local site=alpha.example.test legacy='["CMD", "curl", "-f", "http://localhost/"]'
-  VDM_WEB_HEALTH="$legacy" gen_joomla_compose alpha ALPHA alpha example.test > "$ALIGN_YML"
+  write_legacy_compose
   joomlaServiceProperty "$ALIGN_YML" joomlaalpha healthcheck > "$SANDBOX/legacy-probe"
   migrationRunCompose() {
     printf '%s\n' "$*" >> "$STUB_DIR/requests"
@@ -262,7 +260,7 @@ EXTRA
   [ ! -s "$STUB_DIR/requests" ]
 }
 
-@test "alignment: unexpected effective semantic changes are refused without disclosing resolved secrets" {
+@test "image alignment: unexpected effective semantic changes are refused without disclosing resolved secrets" {
   migrationRunCompose() {
     if [[ " $* " == *' --quiet '* ]]; then return 0; fi
     if [[ "$2" == *'.align-compose.'* ]]; then
@@ -272,15 +270,24 @@ EXTRA
     fi
   }
   cp "$ALIGN_YML" "$SANDBOX/original"
-  run siteAlignConfiguration alpha.example.test apply
+  run siteAlignConfiguration alpha.example.test save-image
   assert_failure
   [[ "$output" != *unexpected-secret* && "$output" != *previous-secret* ]]
   cmp "$ALIGN_YML" "$SANDBOX/original"
   [ ! -e "$ALIGN_DIR/.env" ]
 }
 
-@test "alignment: a shared Compose project name survives a probe-only repair and recreation" {
-  VDM_WEB_HEALTH='["CMD", "curl", "-f", "http://localhost/"]' gen_joomla_compose alpha ALPHA alpha example.test > "$ALIGN_YML"
+@test "alignment: custom image interpolation, other variables and the shared project name survive a probe repair" {
+  local image='${WEB_IMAGE:-joomla:5.3}'
+  cp "$ALIGN_YML" "$SANDBOX/updated.yml"
+  write_legacy_compose "$SANDBOX/legacy.yml"
+  local fixture
+  for fixture in legacy updated; do
+    sed 's#^    image: joomla:5.3$#    image: ${WEB_IMAGE:-joomla:5.3}#; s#^    restart: unless-stopped$#    restart: ${RESTART_POLICY:-unless-stopped}#' \
+      "$SANDBOX/$fixture.yml" > "$SANDBOX/$fixture-custom.yml"
+  done
+  cp "$SANDBOX/legacy-custom.yml" "$ALIGN_YML"
+  assert_equal "$(siteReadServiceScalar "$ALIGN_YML" joomlaalpha image)" "$image"
   printf 'COMPOSE_PROJECT_NAME=spark\n' >> "$ALIGN_ENV"
   cp "$ALIGN_ENV" "$SANDBOX/shared-before"
   migrationRunCompose() {
@@ -292,23 +299,28 @@ EXTRA
   }
   run siteAlignConfiguration alpha.example.test apply
   assert_success
-  assert_output_contains 'Kept the current image and environment'
-  assert_file_contains "$ALIGN_YML" '"OPTIONS"'
-  assert_equal "$(siteReadServiceScalar "$ALIGN_YML" joomlaalpha image)" joomla:5.3
+  assert_output_contains 'Applied the Apache health check'
+  cmp "$SANDBOX/updated-custom.yml" "$ALIGN_YML"
   refute_file_exists "$ALIGN_DIR/.env"
   cmp "$ALIGN_ENV" "$SANDBOX/shared-before"
-  grep -F "$ALIGN_ENV $ALIGN_YML " "$STUB_DIR/requests" | grep -q ' up -d --no-deps --force-recreate .* joomlaalpha$'
+  grep -F "$ALIGN_ENV $ALIGN_YML " "$STUB_DIR/requests" | grep -q ' up -d --no-deps --force-recreate joomlaalpha$'
+  run siteAlignConfiguration alpha.example.test inspect-image
+  assert_failure
+  assert_output_contains $'alpha.example.test\taction-needed\t'
 }
 
-@test "alignment: batch continues past unsupported site and reports partial failure" {
+@test "alignment: batch repairs the generated legacy probe and skips an unrelated hand-written service" {
+  cp "$ALIGN_YML" "$SANDBOX/expected.yml"
+  write_legacy_compose
   mkdir -p "$VDM_REPO_PATH/joomla/available/custom.example.test"
   printf 'services: {}\n' > "$VDM_REPO_PATH/joomla/available/custom.example.test/docker-compose.yml"
   VDM_ALL=true VDM_CONTAINER='' VDM_ACTION=apply
   run joomla__TRuST__align
-  assert_failure
+  assert_success
   [[ "$output" == *$'alpha.example.test\tupdated\t'* ]]
-  [[ "$output" == *$'custom.example.test\taction-needed\t'* ]]
-  [ -f "$ALIGN_DIR/.env" ]
+  cmp "$SANDBOX/expected.yml" "$ALIGN_YML"
+  assert_equal "$(cat "$VDM_REPO_PATH/joomla/available/custom.example.test/docker-compose.yml")" 'services: {}'
+  refute_file_exists "$ALIGN_DIR/.env"
 }
 
 @test "scalar edit: only the selected service image changes and duplicate properties are refused" {
@@ -586,9 +598,9 @@ YAML
   assert_equal "$cloned" 512M
 }
 
-@test "alignment: retains the saved phpMyAdmin choice from website setup" {
+@test "image alignment: retains the saved phpMyAdmin choice from website setup" {
   formatEnvAssignment 'VDM_ALPHA_PHPMYADMIN=false' >> "$ALIGN_ENV"
-  run siteAlignConfiguration alpha.example.test apply
+  run siteAlignConfiguration alpha.example.test save-image
   assert_success
   migrationReadEnvValue "$ALIGN_DIR/.env" VDM_ALPHA_PHPMYADMIN choice
   assert_equal "$choice" false

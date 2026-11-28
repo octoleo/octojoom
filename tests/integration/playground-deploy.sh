@@ -53,7 +53,10 @@ cleanup() {
   set +e
   for sub in new stopped failed; do
     site="$sites/$sub.$domain"
-    if [ -f "$site/docker-compose.yml" ] && destination_env "$sub" >/dev/null; then
+    if [ "$sub" = new ] && [ "${alignment_in_progress:-false}" = true ]; then
+      docker compose -p "$alignment_project" --project-directory "$site" --env-file "$work/pre-alignment-site.env" \
+        -f "$work/pre-alignment-compose.yml" down -v --remove-orphans >/dev/null
+    elif [ -f "$site/docker-compose.yml" ] && destination_env "$sub" >/dev/null; then
       destination "$sub" down -v --remove-orphans >/dev/null
     fi
   done
@@ -312,10 +315,15 @@ jq -se --arg service "joomla$first" '
 web="joomla$first"
 expected_probe='["CMD","curl","-fsS","--noproxy","*","--request","OPTIONS","--request-target","*","http://127.0.0.1"]'
 # Normal enable can return before Docker schedules the first 30-second check.
-for ((i=0; i<60; i++)); do
-  [ "$(docker inspect --format '{{.State.Health.Status}}' "$web")" = starting ] || break
-  sleep 2
-done
+wait_for_web_probe() {
+  local i
+  for ((i=0; i<60; i++)); do
+    [ "$(docker inspect --format '{{.State.Health.Status}}' "$web")" = starting ] || return 0
+    sleep 2
+  done
+  return 1
+}
+wait_for_web_probe
 docker inspect "$web" | jq -e --argjson probe "$expected_probe" '.[0] |
   .State.Health.Status=="healthy" and .Config.Healthcheck.Test==$probe and
   .Config.Healthcheck.Interval==30000000000 and .Config.Healthcheck.Timeout==5000000000 and
@@ -324,18 +332,66 @@ docker inspect "$web" | jq -e --argjson probe "$expected_probe" '.[0] |
 docker exec "$web" php -d register_argc_argv=1 cli/joomla.php site:up
 check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 legacy_test='["CMD", "curl", "-f", "http://localhost/"]'
-joomlaWebHealthcheck "$legacy_test" > "$work/legacy-health.yml"
 site_compose="$sites/new.$domain/docker-compose.yml"
 enabled_compose="$OCTOJOOM_HOME/Docker/joomla/enabled/new.$domain/docker-compose.yml"
-joomlaSetServiceProperty "$site_compose" "$work/legacy-compose.yml" "$web" healthcheck "$work/legacy-health.yml"
-cat "$work/legacy-compose.yml" > "$site_compose"
-if [ -f "$enabled_compose" ] && ! [ "$enabled_compose" -ef "$site_compose" ]; then cp "$site_compose" "$enabled_compose"; fi
-destination new up -d --force-recreate --wait --wait-timeout 240 >/dev/null
+site_env="$sites/new.$domain/.env"
+alignment_project=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$web")
+alignment_db_id=$(destination new ps -q "mariadb$first")
+cp -p "$site_env" "$work/pre-alignment-site.env"
+cp -p "$site_compose" "$work/pre-alignment-compose.yml"
+if [ -f "$shared_env" ]; then cp -p "$shared_env" "$work/pre-alignment-shared.env"; fi
+alignment_in_progress=true
+cp -p "$site_env" "$shared_env"
+printf '\nCOMPOSE_PROJECT_NAME=%s\nFIXTURE_IMAGE=%s\nFIXTURE_REGION=Africa/Windhoek\n' "$alignment_project" "$image" >> "$shared_env"
+rm "$site_env"
+cp -p "$shared_env" "$work/alignment-shared.env"
+
+publish_fixture_compose() {
+  cat "$1" > "$site_compose"
+  if [ -f "$enabled_compose" ] && ! [ "$enabled_compose" -ef "$site_compose" ]; then cp "$site_compose" "$enabled_compose"; fi
+}
+# Keep the running project's real identity in the shared env. Losing that env
+# would resolve a different project even when the same directory is used.
+printf 'name: other%s\n' "$run_id" > "$work/named-compose.yml"
+cat "$site_compose" >> "$work/named-compose.yml"
+joomlaServiceProperty "$site_compose" "$web" labels > "$work/site-labels"
+printf '      - "octojoom.fixture.region=${FIXTURE_REGION:?missing region}"\n' >> "$work/site-labels"
+joomlaSetServiceProperty "$work/named-compose.yml" "$work/literal-image.yml" "$web" labels "$work/site-labels"
+[ "$(siteReadServiceScalar "$work/literal-image.yml" "$web" image)" = "$image" ]
+align=(bash "$root/src/octojoom" --type joomla --task align --container "new.$domain" --action apply --non-interactive)
+assert_probe_only_change() {
+  cmp "$1" "$site_compose"
+  cmp "$1" "$enabled_compose"
+  cmp "$work/alignment-shared.env" "$shared_env"
+  [ ! -e "$site_env" ]
+  [ "$(destination new ps -q "mariadb$first")" = "$alignment_db_id" ]
+}
+publish_legacy_probe() {
+  awk -v legacy="$legacy_test" '/^      test: .*"--request-target"/ { $0="      test: " legacy; changed++ }
+    { print } END { if (changed!=1) exit 1 }' "$1" > "$work/legacy-compose.yml"
+  publish_fixture_compose "$work/legacy-compose.yml"
+}
+
+# A generated literal image and a stopped web container must stay that way.
+publish_legacy_probe "$work/literal-image.yml"
+destination new stop "$web"
+destination new up --no-start --no-deps --force-recreate "$web"
+docker inspect "$web" | jq -e --argjson test "$legacy_test" '.[0] |
+  (.State.Running|not) and .Config.Healthcheck.Test==$test' >/dev/null
+"${align[@]}"
+assert_probe_only_change "$work/literal-image.yml"
+docker inspect "$web" | jq -e --argjson probe "$expected_probe" '.[0] |
+  (.State.Running|not) and .Config.Healthcheck.Test==$probe' >/dev/null
+
+# Repeat on the running site with an operator-owned image expression.
+siteReplaceServiceScalar "$work/literal-image.yml" "$work/operator-image.yml" "$web" image '${FIXTURE_IMAGE:?missing image}'
+publish_legacy_probe "$work/operator-image.yml"
+destination new up -d --no-deps --wait --wait-timeout 240 "$web" >/dev/null
 check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 
 # Apply the documented update while Joomla is offline. Only the web container changes.
 legacy_id=$(destination new ps -q "$web")
-alignment_db_id=$(destination new ps -q "mariadb$first")
+alignment_image=$(docker inspect --format '{{.Image}} {{.Config.Image}}' "$legacy_id")
 docker inspect "$legacy_id" | jq -e --argjson test "$legacy_test" '.[0].Config.Healthcheck.Test==$test' >/dev/null
 docker exec "$web" php -d register_argc_argv=1 cli/joomla.php site:down
 for ((i=0; i<10; i++)); do
@@ -345,37 +401,32 @@ for ((i=0; i<10; i++)); do
   sleep 1
 done
 [ "$legacy_exit" = 22 ]
-# Reproduce a generated site still using the host's shared Compose environment.
-# Preserve its contents for the independent setup/replacement scenarios below.
-if [ -f "$shared_env" ]; then cp -p "$shared_env" "$work/pre-alignment-shared.env"; fi
-site_env="$sites/new.$domain/.env"
-[[ "$(siteReadServiceScalar "$site_compose" "$web" image)" != *'$'* ]]
-if [ -f "$site_env" ]; then mv "$site_env" "$shared_env"; fi
-printf '\nTZ=Africa/Windhoek\n' >> "$shared_env"
-cp -p "$shared_env" "$work/alignment-shared.env"
 alignment_model() {
   destination new config --format json | jq -cS --arg web "$web" 'del(.services[$web].healthcheck.test)'
 }
 alignment_model > "$work/before-alignment.json"
-align=(bash "$root/src/octojoom" --type joomla --task align --container "new.$domain" --action apply --non-interactive)
 "${align[@]}"
-[ "$(siteReadServiceScalar "$site_compose" "$web" image)" = "\${VDM_${first^^}_IMAGE}" ]
-cmp "$work/alignment-shared.env" "$shared_env"
+assert_probe_only_change "$work/operator-image.yml"
 alignment_model > "$work/after-alignment.json"
 cmp "$work/before-alignment.json" "$work/after-alignment.json"
 [ "$(destination new ps -q "$web")" != "$legacy_id" ]
-[ "$(destination new ps -q "mariadb$first")" = "$alignment_db_id" ]
-docker inspect "$web" | jq -e --argjson probe "$expected_probe" '.[0] |
-  .Config.Healthcheck.Test==$probe and .State.Health.Status=="healthy"' >/dev/null
+[ "$(docker inspect --format '{{.Image}} {{.Config.Image}}' "$web")" = "$alignment_image" ]
+wait_for_web_probe
+docker inspect "$web" | jq -e --argjson probe "$expected_probe" --arg project "$alignment_project" '.[0] |
+  .Config.Healthcheck.Test==$probe and .State.Health.Status=="healthy" and
+  .Config.Labels["octojoom.fixture.region"]=="Africa/Windhoek" and
+  .Config.Labels["com.docker.compose.project"]==$project' >/dev/null
 offline_identity=$(docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}' "$web")
 offline_start=$SECONDS
 first_health_end=$(docker inspect "$web" | jq -er '.[0].State.Health.Log[-1].End')
-cp -p "$site_env" "$work/aligned-site.env"
-if grep -q '^TZ=' "$site_env"; then echo 'Shared operator setting leaked into private site configuration.' >&2; exit 1; fi
 "${align[@]}"
-cmp "$work/aligned-site.env" "$site_env"
-cmp "$work/alignment-shared.env" "$shared_env"
+assert_probe_only_change "$work/operator-image.yml"
+[ "$(docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}' "$web")" = "$offline_identity" ]
+# Return the fixture files to the layout used by the independent import tests.
+publish_fixture_compose "$work/pre-alignment-compose.yml"
+cp -p "$work/pre-alignment-site.env" "$site_env"
 if [ -f "$work/pre-alignment-shared.env" ]; then mv "$work/pre-alignment-shared.env" "$shared_env"; else rm "$shared_env"; fi
+alignment_in_progress=false
 # Run the same image and effective probe without Apache listening. Docker must
 # mark this still-running container unhealthy using the production retry policy.
 destination new config --format json | jq --arg web "$web" '.services[$web] |

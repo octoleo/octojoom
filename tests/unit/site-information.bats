@@ -148,9 +148,43 @@ HOOK
   assert_equal "$output" first.vdm.dev
 }
 
+@test "listing site names and dispatching a configuration update need no runtime facts" {
+  make_joomla_container alpha ALPHA first
+  make_joomla_container beta BETA second
+  readJoomlaSiteFacts() { touch "$SANDBOX/unexpected-facts"; return 1; }
+  siteAlignConfiguration() { printf '%s %s\n' "$1" "$2"; }
+  VDM_SHORT=true
+  run joomla__TRuST__list
+  assert_success
+  assert_equal "$output" $'first.vdm.dev\nsecond.vdm.dev'
+  run runJoomlaSiteAction first.vdm.dev align
+  assert_success
+  assert_equal "$output" 'first.vdm.dev apply'
+  refute_file_exists "$SANDBOX/unexpected-facts"
+}
+
+@test "only full site reports inspect configuration alignment" {
+  make_joomla_container alpha ALPHA first
+  siteAlignConfiguration() {
+    printf '%s %s\n' "$1" "$2" >> "$SANDBOX/inspections"
+    printf '%s\taction-needed\tReview configuration.\n' "$1"
+    return 1
+  }
+  readJoomlaSiteFacts first.vdm.dev
+  showJoomlaSiteFacts summary >/dev/null
+  refute_file_exists "$SANDBOX/inspections"
+  run showJoomlaSiteFacts
+  assert_success
+  assert_output_contains $'Configuration alignment: action-needed\tReview configuration.'
+  assert_equal "$(cat "$SANDBOX/inspections")" 'first.vdm.dev inspect'
+  run joomlaSiteFactsJSON
+  assert_success
+  assert_equal "$(joomlaSiteJSON -r '.alignment' <<< "$output")" $'action-needed\tReview configuration.'
+}
+
 @test "site nested document root reads scoped data without changing future defaults" {
   make_joomla_container alpha ALPHA first
-  printf "VDM_ALPHA_DOCROOT='site'\nVDM_ALPHA_WEBSERVER='nginx'\n" >>"${VDM_REPO_PATH}/joomla/.env"
+  printf "VDM_ALPHA_DOCROOT='site'\nVDM_ALPHA_WEBSERVER='nginx'\nTZ=Africa/Windhoek\n" >>"${VDM_REPO_PATH}/joomla/.env"
   VDM_CONTAINER=first.vdm.dev
   run joomla__TRuST__path
   assert_success

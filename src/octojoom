@@ -1055,7 +1055,6 @@ function readEnvRecords() {
       if (quote != "") {
         if (mode == "locations" && selected(name)) print NR
         closing(line, 1)
-        if (quote == "" && selected(name)) errors[name] = "multiline"
         next
       }
       sub(/^[ \t]+/, "", line)
@@ -1063,7 +1062,7 @@ function readEnvRecords() {
       sub(/^export[ \t]+/, "", line)
       if (!match(line, /^[^ \t=:]+[ \t]*[=:][ \t]*/)) {
         word = line; sub(/[ \t].*$/, "", word)
-        if (selected(word)) { if (mode == "unique") invalid = 1; errors[word] = "assignment"; at[word] = NR }
+        if (mode == "unique" && word in wanted) invalid = 1
         next
       }
       raw = substr(line, RLENGTH + 1)
@@ -1075,20 +1074,13 @@ function readEnvRecords() {
       if (!(name in position)) {position[name]=++count; order[count]=name}
       if (mode == "unique" && (quote != "" || ((name in saved) && saved[name] != raw))) invalid = 1
       if (mode == "locations") print NR
-      at[name] = NR
-      if (quote == "") { delete errors[name]; saved[name] = raw }
-      else { errors[name] = "quote"; delete saved[name] }
+      if (quote == "" || mode == "scoped") saved[name] = raw
+      else delete saved[name]
     }
     END {
       if (invalid) exit 1
       if (mode == "locations") exit (quote != "" && selected(name))
       if (mode == "scoped") {
-        for (name in errors) {
-          if (errors[name] == "multiline") printf "Unsupported multiline value for %s at %s:%d. Use a single-line value, then retry.\n", name, FILENAME, at[name] > "/dev/stderr"
-          else if (errors[name] == "quote") printf "Invalid quoting for %s at %s:%d. Correct the quoted value, then retry.\n", name, FILENAME, at[name] > "/dev/stderr"
-          else printf "Invalid assignment for %s at %s:%d.\n", name, FILENAME, at[name] > "/dev/stderr"
-          exit 1
-        }
         for (name in wanted) if (!(name in saved)) {
           printf "Missing %s in %s. Restore this setting%cs existing value, then retry.\n", name, FILENAME, 39 > "/dev/stderr"
           exit 1
@@ -1098,7 +1090,7 @@ function readEnvRecords() {
       # its previous version without recreating services for a reordered file.
       for (i=1; i<=count; i++) {
         name=order[i]
-        if (name in saved) print at[name] ":" name "=" saved[name]
+        if (name in saved) print name "=" saved[name]
       }
     }
   ' "$file"
@@ -1107,21 +1099,32 @@ function readEnvRecords() {
 # Read optional setup defaults as literal data. Only keys chosen by the caller
 # are assigned. The preferences mode retains existing VDM_ application settings.
 function readSetupEnvValues() {
-  local file="$1" key raw value records mode=setup
+  local file="$1" key raw value records mode=setup scope=''
   shift
   if [ "${1:-}" = --strict-key ]; then mode=unique; shift; fi
+  if [ "${1:-}" = --scope ]; then
+    scope="$2"; shift 2
+    [ "${VDM_PLAYGROUND_REPAIR:-false}" = true ] || mode=scoped
+  fi
   [ -n "$file" ] || return 0
   if [ ! -f "$file" ] || [ ! -r "$file" ]; then
     [ "$mode" != unique ] || return 1
     return 0
   fi
-  records=$(readEnvRecords "$file" "$mode" "$*") || return 1
+  records=$(readEnvRecords "$file" "$mode" "$*" "$scope") || return 1
   while IFS= read -r raw; do
     [ -n "$raw" ] || continue
-    raw="${raw#*:}"
     key="${raw%%=*}"
     if ! decodeEnvValue "${raw#*=}" value || [[ "$value" == *$'\r'* || "$value" == *$'\n'* ]]; then
+      if [ "$mode" = scoped ]; then
+        printf 'Cannot copy %s from %s. A single-line value is required.\n' "$key" "$file" >&2
+        return 1
+      fi
       [ "$mode" != unique ] || return 1
+      continue
+    fi
+    if [ -n "$scope" ]; then
+      formatEnvAssignment "$key=\"$value\"" || return 1
       continue
     fi
     case "$key" in
@@ -2060,23 +2063,45 @@ function joomlaWebHealthcheck() {
   printf '    healthcheck:\n      test: %s\n      interval: 30s\n      timeout: 5s\n      retries: 5\n' "${1:-$apache}"
 }
 
-# Upgrade only the complete previously generated default. Keep custom commands,
-# timing, comments and spacing in the selected property or saved sidecar.
+# A saved property and a live Compose file use the same exact legacy default.
+# Inspecting returns its service. Applying replaces only the original test line.
 function joomlaNormalizeApacheHealthcheck() {
-  local legacy='["CMD", "curl", "-f", "http://localhost/"]' replacement
+  local file="$1" mode="${2:-property}" legacy='["CMD", "curl", "-f", "http://localhost/"]' replacement
   replacement=$(joomlaWebHealthcheck | sed -n '/^      test: /p')
   # BSD awk rejects literal newlines in -v arguments.
-  OCTOJOOM_LEGACY_HEALTH="$(joomlaWebHealthcheck "$legacy")" awk -v replacement="$replacement" '
-    {lines[NR]=$0}
-    NF && $1 !~ /^#/ {
-      block=block (block=="" ? "" : "\n") $0
-      if($1=="test:") test_line=NR
+  OCTOJOOM_LEGACY_HEALTH="$(joomlaWebHealthcheck "$legacy")" awk -v mode="$mode" -v replacement="$replacement" '
+    function finish() {
+      if (block==ENVIRON["OCTOJOOM_LEGACY_HEALTH"]) {matches++; target=service; change=test_line}
+      block=""
+    }
+    {
+      if (mode!="inspect") lines[NR]=$0
+      if ($0 ~ /^[[:space:]]*(#|$)/) next
+      if ($0 !~ /^      /) finish()
+      if ($0 ~ /^[^[:space:]]/) {
+        services=($0 ~ /^services:[[:space:]]*(#.*)?$/); service=""
+      } else if (services && $0 ~ /^  [^[:space:]]/) {
+        service=""
+        if ($0 ~ /^  joomla[A-Za-z]+:[[:space:]]*([&#].*)?$/) {
+          service=$0; sub(/^  /,"",service); sub(/:.*/,"",service)
+        }
+      }
+      if ((mode=="property" || service!="") && $0=="    healthcheck:") block=$0
+      else if (block!="") {
+        block=block "\n" $0
+        if ($1=="test:") test_line=NR
+      }
     }
     END {
-      if(block==ENVIRON["OCTOJOOM_LEGACY_HEALTH"]) lines[test_line]=replacement
-      for(i=1; i<=NR; i++) print lines[i]
+      finish()
+      if (matches>1) exit 1
+      if (mode=="inspect") {if (matches) print target}
+      else {
+        if (matches) lines[change]=replacement
+        for (i=1; i<=NR; i++) print lines[i]
+      }
     }
-  ' "$1"
+  ' "$file"
 }
 
 # return the Joomla Container setup yml
@@ -8161,46 +8186,19 @@ function joomlaSetupTLSChoice() {
 
 ######################################## EXISTING SITE CONFIGURATION
 
-# Read only this site's required Compose references and optional settings.
-# Values in a host or shared environment are data, never shell assignments.
-function siteReadScopedEnv() {
-  local file="$1" references="$2" optional="${3:-}" mode="${4:-scoped}" records record line name value
-  if [ -L "$file" ]; then
-    printf 'Environment file %s is a symbolic link. Use a regular environment file, then retry.\n' "$file" >&2; return 1
-  elif [ ! -f "$file" ] || [ ! -r "$file" ]; then
-    printf 'Cannot read environment file %s. Check its path and read permissions, then retry.\n' "$file" >&2; return 1
-  fi
-  records=$(readEnvRecords "$file" "$mode" "$references" "$optional") || return 1
-  while IFS= read -r record; do
-    [ -n "$record" ] || continue
-    line="${record%%:*}"
-    record="${record#*:}"
-    name="${record%%=*}"
-    if ! decodeEnvValue "${record#*=}" value; then
-      [ "$mode" = scoped ] || continue
-      printf 'Invalid quoting for %s at %s:%s. Correct the quoted value, then retry.\n' "$name" "$file" "$line" >&2; return 1
-    fi
-    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
-      [ "$mode" = scoped ] || continue
-      printf 'Unsupported multiline value for %s at %s:%s. Use a single-line value, then retry.\n' "$name" "$file" "$line" >&2; return 1
-    fi
-    formatEnvAssignment "$name=\"$value\"" || return 1
-  done <<< "$records"
-}
-
 # Shared files are never copied wholesale: unrelated sites and host-only
 # secrets stay behind.
 function siteWriteScopedEnv() {
   local compose_file="$1" effective_env="$2" env_key="$3" destination="$4"
-  local references suffixes temporary mode=scoped
+  local references suffixes temporary
   [[ "$env_key" =~ ^[A-Za-z]+$ ]] || return 1
+  [ -f "$effective_env" ] && [ -r "$effective_env" ] && [ ! -L "$effective_env" ] || return 1
   [ "$effective_env" != "$destination" ] && [ ! "$effective_env" -ef "$destination" ] || return 1
   references=$(migrationComposeReferences "$compose_file") || return 1
   suffixes=$(getJoomlaEnvSuffixes)
   temporary=$(mktemp "${destination}.tmp.XXXXXX") || return 1
-  [ "${VDM_PLAYGROUND_REPAIR:-false}" != true ] || mode=setup
-  if ! siteReadScopedEnv "$effective_env" "$references" "^VDM_${env_key}_(${suffixes})$" "$mode" > "$temporary" ||
-    { [ "$mode" = setup ] && ! migrationValidateScopedEnv "$compose_file" "$temporary"; } ||
+  if ! readSetupEnvValues "$effective_env" --scope "^VDM_${env_key}_(${suffixes})$" "$references" > "$temporary" ||
+    { [ "${VDM_PLAYGROUND_REPAIR:-false}" = true ] && ! migrationValidateScopedEnv "$compose_file" "$temporary"; } ||
     ! chmod 600 "$temporary" || ! mv -f -- "$temporary" "$destination"; then
     rm -f -- "$temporary"
     return 1
@@ -8249,9 +8247,7 @@ function siteReplaceServiceScalar() {
 # Keep the original Compose project directory while validating adjacent staged
 # files. This preserves relative mounts and the normal inferred project name.
 function siteValidateCompose() {
-  local compose_file="$1" env_file="$2" project_directory="$3"
-  [ -f "$compose_file" ] && [ -f "$env_file" ] && [ -d "$project_directory" ] || return 1
-  migrationRunCompose "$env_file" "$compose_file" --project-directory "$project_directory" config --quiet
+  migrationRunCompose "$2" "$1" --project-directory "$3" config --quiet
 }
 
 # Publish Compose, ENV and optional companion files as a recoverable sequence.
@@ -8281,8 +8277,15 @@ function sitePublishConfigurationAction() {
     compose_file="$directory/docker-compose.yml"
     effective_env=$(getContainerEnvFile joomla "$site" available)
     [ "${#targets[@]}" -eq "${#sources[@]}" ] || exit 1
-    published_env="$effective_env"
-    if [ "$staged_env" != "$effective_env" ]; then
+    local -a readiness=(--wait --wait-timeout 90) queried_services=()
+    if [ -z "$staged_env" ]; then
+      # Compose-only repairs leave the active ENV in place. Docker continues
+      # its scheduled health checks as soon as the updated service starts.
+      published_env="$effective_env"
+      staged_env="$effective_env"
+      readiness=()
+      queried_services=("$@")
+    else
       published_env="$directory/.env"
       targets+=("$published_env")
       sources+=("$staged_env")
@@ -8333,15 +8336,15 @@ function sitePublishConfigurationAction() {
     siteValidateCompose "$staged_compose" "$staged_env" "$directory" || exit 1
     [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 15 'Checking which website services are running.'
     if [ "$#" -gt 0 ] || [ "${#stop_services[@]}" -gt 0 ]; then
-      running=$(migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" ps --status running --services) || {
+      running=$(migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" ps --status running --services "${queried_services[@]}") || {
         printf 'Cannot determine running services for %s; configuration unchanged.\n' "$site" >&2; exit 1;
       }
       for service in "$@"; do
         [[ "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || exit 1
         if printf '%s\n' "$running" | grep -qxF "$service"; then active+=("$service"); fi
       done
-      if { [ -n "${OCTOJOOM_SITE_PHP_FILE:-}" ] || [ "${OCTOJOOM_SITE_REFRESH_STOPPED:-false}" = true ]; } && [ "${#active[@]}" -eq 0 ]; then
-        existing=$(migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" ps --all --services) || exit 1
+      if { [ -n "${OCTOJOOM_SITE_PHP_FILE:-}" ] || [ "${#queried_services[@]}" -gt 0 ]; } && [ "${#active[@]}" -eq 0 ]; then
+        existing=$(migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" ps --all --services "${queried_services[@]}") || exit 1
         for service in "$@"; do
           if printf '%s\n' "$existing" | grep -qxF "$service"; then inactive+=("$service"); fi
         done
@@ -8407,11 +8410,11 @@ function sitePublishConfigurationAction() {
       migrationRunCompose "$published_env" "$compose_file" --project-directory "$directory" up --no-start --no-deps --force-recreate "${inactive[@]}" >&2 || failed=true
     fi
     if ! "$failed" && [ "${#active[@]}" -gt 0 ]; then
-      [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 65 'Recreating the affected services and waiting for Docker readiness.'
+      [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 65 'Recreating the affected website services.'
       runtime_changed=true
       # Companion contents can change without changing the Compose model. A
       # renamed bind file also leaves an existing container on the old inode.
-      migrationRunCompose "$published_env" "$compose_file" --project-directory "$directory" up -d --no-deps --force-recreate --wait --wait-timeout 90 "${active[@]}" >&2 || failed=true
+      migrationRunCompose "$published_env" "$compose_file" --project-directory "$directory" up -d --no-deps --force-recreate "${readiness[@]}" "${active[@]}" >&2 || failed=true
       if ! "$failed" && [ -n "$callback" ]; then
         [ "${OCTOJOOM_CONFIG_PROGRESS_STAGES:-false}" != true ] || actionProgressStep 85 'Checking that the website accepted the updated configuration.'
         if ! isFunc "$callback" || ! "$callback" "$site"; then failed=true; fi
@@ -8438,7 +8441,7 @@ function sitePublishConfigurationAction() {
           if printf '%s\n' "$running" | grep -qxF "$service"; then restore+=("$service"); fi
         done
         if [ "${#restore[@]}" -gt 0 ]; then
-          migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" up -d --no-deps --force-recreate --wait --wait-timeout 90 "${restore[@]}" >&2 || rollback_failed=true
+          migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" up -d --no-deps --force-recreate "${readiness[@]}" "${restore[@]}" >&2 || rollback_failed=true
         fi
         if [ "${#inactive[@]}" -gt 0 ]; then
           migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" up --no-start --no-deps --force-recreate "${inactive[@]}" >&2 || rollback_failed=true
@@ -8462,137 +8465,84 @@ function sitePublishConfigurationAction() {
   )
 }
 
-# Inspect the two changes supported for a generated Joomla service. Unfamiliar
-# healthcheck layouts remain eligible for ordinary image-only alignment.
-function siteAlignmentPlan() {
-  local site="$1" directory compose_file effective_env raw env_key service references problem
-  local state=unchanged message health normalized
-  isValidDomain "$site" || return 1
-  directory="${VDM_REPO_PATH}/joomla/available/$site"
-  compose_file="$directory/docker-compose.yml"
-  [ -f "$compose_file" ] && ! migrationPathHasSymlink "$compose_file" || return 1
-  if ! getJoomlaComposeIdentity "$compose_file"; then
-    printf 'action-needed\tThe web service/environment identity is not in the supported generated layout.\n'; return 0
-  fi
-  env_key="$VDM_SRC_ENV_KEY" service="joomla$VDM_SRC_KEY"
-  effective_env=$(getContainerEnvFile joomla "$site" available)
-  if [ ! -f "$effective_env" ] || ! references=$(migrationComposeReferences "$compose_file"); then
-    printf 'action-needed\tThe effective environment is missing or interpolation needs a manual edit.\n'; return 0
-  fi
-  if ! problem=$(siteReadScopedEnv "$effective_env" "$references" 2>&1 >/dev/null); then
-    printf 'action-needed\t%s\n' "$problem"; return 0
-  fi
-  if ! raw=$(siteReadServiceScalar "$compose_file" "$service" image); then
-    printf 'action-needed\tThe web image is not a unique block-style service scalar.\n'; return 0
-  fi
-  if [ "$raw" = "\${VDM_${env_key}_IMAGE}" ]; then
-    message='Current image already has a saved site setting.'
-  elif [[ "$raw" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$ ]]; then
-    state=pending
-    message='Save the current web image and scoped environment.'
-  else
-    printf 'action-needed\tThe existing image interpolation is customized; keep its current setting.\n'; return 0
-  fi
-  if health=$(joomlaServiceProperty "$compose_file" "$service" healthcheck) && [ -n "$health" ] &&
-    normalized=$(joomlaNormalizeApacheHealthcheck - <<< "$health") && [ "$health" != "$normalized" ]; then
-    state=pending
-    message+=' Update the default Apache health check and recreate the existing web container in its current running or stopped state.'
-  fi
-  printf '%s\t%s\n' "$state" "$message"
+# Adopt a literal web image as an editable setting only when explicitly asked.
+# An equivalent Compose model needs no container recreation.
+function siteAlignImage() {
+  (
+    local site="$1" action="$2" directory="$VDM_SITE_DIR" compose="$VDM_SITE_COMPOSE" env service setting image locations
+    local work="$OCTOJOOM_SITE_HELD_LOCK" failure='Could not save the current image setting.'
+    trap '[ "$?" -eq 0 ] || printf "%s\taction-needed\t%s\n" "$site" "$failure"' EXIT
+    if ! getJoomlaComposeIdentity "$compose"; then
+      failure='The website has no supported generated image setting.'; exit 1
+    fi
+    service="joomla$VDM_SRC_KEY" setting="VDM_${VDM_SRC_ENV_KEY}_IMAGE"
+    image=$(siteReadServiceScalar "$compose" "$service" image) || exit 1
+    if [ "$image" = "\${${setting}}" ]; then
+      printf '%s\tunchanged\tCompose already uses the site image setting.\n' "$site"; exit 0
+    elif [[ ! "$image" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$ ]]; then
+      failure='The existing image interpolation is customized.'; exit 1
+    elif [ "$action" = inspect-image ]; then
+      printf '%s\tpending\tSave the current web image as a site setting.\n' "$site"; exit 0
+    fi
+    env=$(getContainerEnvFile joomla "$site" available)
+    [ "$action" = save-image ] && [ -f "$env" ] && [ ! -L "$env" ] || exit 1
+    if [ "$env" = "$directory/.env" ]; then
+      locations=$(readEnvRecords "$env" locations "$setting") || exit 1
+      awk 'NR==FNR {drop[$1]=1; next} !(FNR in drop)' <(printf '%s\n' "$locations") "$env" > "$work/.env" || exit 1
+      formatEnvAssignment "$setting=\"$image\"" >> "$work/.env" || exit 1
+    else
+      siteWriteScopedEnv "$compose" "$env" "$VDM_SRC_ENV_KEY" "$work/.env" &&
+        writeEnvVariable "$work/.env" "$setting=\"$image\"" true || exit 1
+    fi
+    siteReplaceServiceScalar "$compose" "$work/.align-compose.yml" "$service" image "\${${setting}}" || exit 1
+    migrationRunCompose "$env" "$compose" --project-directory "$directory" config > "$work/before" &&
+      migrationRunCompose "$work/.env" "$work/.align-compose.yml" --project-directory "$directory" config > "$work/after" || exit 1
+    if ! cmp -s "$work/before" "$work/after"; then
+      failure='Effective Compose configuration changed unexpectedly; original retained.'; exit 1
+    fi
+    sitePublishConfiguration "$site" "$work/.align-compose.yml" "$work/.env" || exit 1
+    printf '%s\tupdated\tSaved current image and complete site environment; services unchanged.\n' "$site"
+  )
 }
 
+# A website update only replaces the old Apache probe in its existing project.
 function siteAlignConfiguration() {
   (
-    local site="$1" action="${2:-apply}" plan state directory compose_file effective_env env_key service image
-    local staged_compose='' staged_env='' before='' after='' reported=false status temporary
-    local candidate_env locations image_change=false
-    local OCTOJOOM_SITE_REFRESH_STOPPED=false
-    local -a affected=()
-    trap '
-      status=$?
-      for temporary in "$staged_compose" "$staged_env" "$before" "$after"; do
-        [ -z "$temporary" ] || rm -f -- "$temporary"
-      done
-      if [ "$status" -ne 0 ] && ! "$reported"; then
-        printf "%s\taction-needed\tAlignment failed; original configuration or reported recovery files retained.\n" "$site"
-      fi
-      exit "$status"
-    ' EXIT
-    plan=$(siteAlignmentPlan "$site") || exit 1
-    state="${plan%%$'\t'*}"
-    if [ "$action" = inspect ] || [ "$state" != pending ]; then
-      printf '%s\t%s\n' "$site" "$plan"
-      reported=true
-      [ "$state" != action-needed ]
-      exit $?
+    local site="$1" action="${2:-apply}" service staged
+    local OCTOJOOM_SITE_HELD_LOCK=''
+    resolveJoomlaSite "$site" || exit 1
+    if [ "$action" = apply ] || [ "$action" = save-image ]; then
+      ! migrationPathHasSymlink "$VDM_SITE_COMPOSE" || { printf '%s\taction-needed\tThe configuration path contains a symbolic link.\n' "$site"; exit 1; }
+      OCTOJOOM_SITE_HELD_LOCK="$VDM_SITE_DIR/.octojoom-change.lock"
+      mkdir -m 700 -- "$OCTOJOOM_SITE_HELD_LOCK" 2>/dev/null || {
+        printf '%s\taction-needed\tAnother configuration change is using this website.\n' "$site"; exit 1;
+      }
+      staged="$OCTOJOOM_SITE_HELD_LOCK/docker-compose.yml"
+      trap 'rm -rf -- "$OCTOJOOM_SITE_HELD_LOCK"' EXIT
     fi
-    directory="${VDM_REPO_PATH}/joomla/available/$site"
-    compose_file="$directory/docker-compose.yml"
-    effective_env=$(getContainerEnvFile joomla "$site" available)
-    getJoomlaComposeIdentity "$compose_file" || exit 1
-    env_key="$VDM_SRC_ENV_KEY" service="joomla$VDM_SRC_KEY"
-    image=$(siteReadServiceScalar "$compose_file" "$service" image) || exit 1
-    staged_compose=$(mktemp "$directory/.align-compose.XXXXXX") || exit 1
-    before=$(mktemp "$directory/.align-before.XXXXXX") || exit 1
-    after=$(mktemp "$directory/.align-after.XXXXXX") || exit 1
-    candidate_env="$effective_env"
-    if [ "$image" = "\${VDM_${env_key}_IMAGE}" ]; then
-      cp "$compose_file" "$staged_compose" || exit 1
+    case "$action" in
+      inspect-image|save-image) siteAlignImage "$site" "$action"; exit $? ;;
+    esac
+    service=$(joomlaNormalizeApacheHealthcheck "$VDM_SITE_COMPOSE" inspect) || {
+      printf '%s\taction-needed\tCannot identify a single legacy Apache health check.\n' "$site"; exit 1;
+    }
+    if [ -z "$service" ]; then
+      printf '%s\tunchanged\tNo legacy Apache health check to update.\n' "$site"
+    elif [ "$action" = inspect ]; then
+      printf '%s\tpending\tUpdate the default Apache health check on %s.\n' "$site" "$service"
+    elif joomlaNormalizeApacheHealthcheck "$VDM_SITE_COMPOSE" compose > "$staged" &&
+      sitePublishConfiguration "$site" "$staged" '' "$service"; then
+      printf '%s\tupdated\tApplied the Apache health check to %s.\n' "$site" "$service"
     else
-      staged_env=$(mktemp "$directory/.align-env.XXXXXX") || exit 1
-      if [ "$effective_env" = "$directory/.env" ]; then
-        # Keep the operator's local records, including multiline values. Only
-        # the actual image assignment is replaced when the image is adopted.
-        locations=$(readEnvRecords "$effective_env" locations "VDM_${env_key}_IMAGE") || exit 1
-        awk 'NR==FNR {drop[$1]=1; next} !(FNR in drop)' \
-          <(printf '%s\n' "$locations") "$effective_env" > "$staged_env" || exit 1
-        formatEnvAssignment "VDM_${env_key}_IMAGE=\"$image\"" >> "$staged_env" || exit 1
-      else
-        siteWriteScopedEnv "$compose_file" "$effective_env" "$env_key" "$staged_env" &&
-          writeEnvVariable "$staged_env" "VDM_${env_key}_IMAGE=\"$image\"" true || exit 1
-      fi
-      siteReplaceServiceScalar "$compose_file" "$staged_compose" "$service" image "\${VDM_${env_key}_IMAGE}" || exit 1
-      migrationRunCompose "$effective_env" "$compose_file" --project-directory "$directory" config > "$before" &&
-        migrationRunCompose "$staged_env" "$staged_compose" --project-directory "$directory" config > "$after" || exit 1
-      if cmp -s "$before" "$after"; then
-        image_change=true
-        candidate_env="$staged_env"
-      else
-        # Moving out of a shared ENV can change native Compose settings such
-        # as COMPOSE_PROJECT_NAME. Keep that project for a probe-only repair.
-        cp "$compose_file" "$staged_compose" || exit 1
-      fi
-    fi
-    # The image/ENV change must resolve identically. Apply the one intentional
-    # runtime difference only after that comparison, to the selected service.
-    if joomlaServiceProperty "$staged_compose" "$service" healthcheck > "$before"; then
-      joomlaNormalizeApacheHealthcheck "$before" > "$after" || exit 1
-      if ! cmp -s "$before" "$after"; then
-        joomlaSetServiceProperty "$staged_compose" "$before" "$service" healthcheck "$after" &&
-          mv -- "$before" "$staged_compose" || exit 1
-        affected+=("$service")
-        OCTOJOOM_SITE_REFRESH_STOPPED=true
-      fi
-    fi
-    if ! "$image_change" && [ "${#affected[@]}" -eq 0 ]; then
-      printf '%s\taction-needed\tEffective Compose configuration changed unexpectedly; original retained.\n' "$site"
-      reported=true
+      printf '%s\taction-needed\tCould not apply the Apache health check.\n' "$site"
       exit 1
-    fi
-    sitePublishConfiguration "$site" "$staged_compose" "$candidate_env" "${affected[@]}" || exit 1
-    if ! "$image_change" && [ "$image" != "\${VDM_${env_key}_IMAGE}" ]; then
-      printf '%s\tupdated\tApplied the Apache health check. Kept the current image and environment to preserve the Compose project.\n' "$site"
-    elif [ "${#affected[@]}" -gt 0 ]; then
-      printf '%s\tupdated\tApplied the Apache health check; website service state preserved.\n' "$site"
-    else
-      printf '%s\tupdated\tSaved current image and complete site environment; services unchanged.\n' "$site"
     fi
   )
 }
 
 function joomla__TRuST__align() {
   local action="${VDM_ACTION:-apply}" site result=0 found=false
-  case "$action" in inspect|apply) ;; *) printf 'Alignment action must be inspect or apply.\n' >&2; return 17 ;; esac
+  case "$action" in inspect|apply|inspect-image|save-image) ;; *) printf 'Choose inspect, apply, inspect-image or save-image.\n' >&2; return 17 ;; esac
   if [ "${VDM_ALL:-false}" = true ] && [ -n "${VDM_CONTAINER:-}" ]; then
     printf 'Choose --all or --container for alignment.\n' >&2; return 17
   fi
@@ -8614,7 +8564,7 @@ function joomla__TRuST__align() {
 function showConfigurationAlignment() {
   local VDM_ALL=true VDM_CONTAINER='' VDM_ACTION=inspect report
   report=$(joomla__TRuST__align)
-  if getInputYesNo "$report\n\nApply the supported configuration changes? Current images, data and service state are preserved." 'Update existing configurations' 22 112; then
+  if getInputYesNo "$report\n\nApply the listed Apache health check updates?" 'Update existing configurations' 22 112; then
     VDM_ACTION=apply
     report=$(joomla__TRuST__align 2>&1)
     showNotice "$report" 22
@@ -10930,12 +10880,7 @@ function joomlaSiteCompose() {
     local site="${1:-}"
     shift
     resolveJoomlaSite "$site" || exit 1
-    joomlaUnexportComposeEnvironment "$VDM_SITE_COMPOSE" || exit 1
-    # The available directory stays the project directory, even for enabled sites.
-    # Do not hide native failure statuses behind a dialog or a second invocation.
-    local -a arguments=(compose)
-    [ -z "$VDM_SITE_ENV" ] || arguments+=(--env-file "$VDM_SITE_ENV")
-    runComposeProgress "$VDM_SITE_COMPOSE" "${arguments[@]}" --file "$VDM_SITE_COMPOSE" "$@"
+    migrationRunCompose "$VDM_SITE_ENV" "$VDM_SITE_COMPOSE" "$@"
   )
 }
 
@@ -10973,11 +10918,13 @@ function joomlaSourceService() {
 # Expand the simple literal VDM assignments used by master without shell eval.
 # Arbitrary Compose expressions are deliberately left to Compose's own parser.
 function joomlaExpandComposeValue() {
-  local value="$1" env_file="$2" match name resolved
+  local value="$1" env_file="$2" match name
   while [[ "$value" =~ (\$\{(VDM_[A-Za-z0-9_]+)\}) ]]; do
-    match="${BASH_REMATCH[1]}" name="${BASH_REMATCH[2]}" resolved=''
-    migrationReadEnvValue "$env_file" "$name" resolved || return 1
-    value="${value//"$match"/"$resolved"}"
+    match="${BASH_REMATCH[1]}" name="${BASH_REMATCH[2]}"
+    local "$name"
+    unset "$name"
+    readSetupEnvValues "$env_file" "$name" && [ "${!name+x}" = x ] || return 1
+    value="${value//"$match"/"${!name}"}"
   done
   [[ "$value" != *'$'* ]] || return 1
   printf '%s\n' "$value"
@@ -11125,7 +11072,7 @@ function readJoomlaSiteFacts() {
   local site="${1:-}" service block image config='' proxy='' candidate mount relative='.' value ids row
   local state health configured=0 expected=0 running=0 stopped_count=0 unavailable=0 unhealthy=0 healthy=0
   resolveJoomlaSite "$site" || return 1
-  # Public context also consumed by PHP, webserver and alignment actions.
+  # Public context also consumed by PHP and webserver actions.
   # shellcheck disable=SC2034
   VDM_SITE_KEY='' VDM_SITE_ENV_KEY='' VDM_SITE_SERVICE='' VDM_SITE_IMAGE=''
   VDM_SITE_SERVICES='' VDM_SITE_MOUNT_TYPE='' VDM_SITE_MOUNT_SOURCE='' VDM_SITE_MOUNT_TARGET=''
@@ -11135,10 +11082,6 @@ function readJoomlaSiteFacts() {
   VDM_SITE_URL='' VDM_SITE_ADMIN_URL='' VDM_SITE_VIEWER_URL='' VDM_SITE_MAIL_URL=''
   VDM_SITE_JOOMLA_VERSION=unknown VDM_SITE_PHP_VERSION=unavailable VDM_SITE_RUNTIME_IMAGE=''
   VDM_SITE_IMAGE_DIGEST='' VDM_SITE_SERVICE_STATES='' VDM_SITE_SERVICE_IMAGES='' VDM_SITE_ROUTABLE=unchecked
-  VDM_SITE_ALIGNMENT=unavailable
-  if [ "${VDM_PLAYGROUND_REPAIR:-false}" != true ] && isFunc siteAlignmentPlan; then
-    VDM_SITE_ALIGNMENT=$(siteAlignmentPlan "$site") || VDM_SITE_ALIGNMENT=unavailable
-  fi
   VDM_SITE_ENABLED=$(getJoomlaSiteEnabledState "$site")
   # The identity helper has narrow semantics; failure does not hide the site.
   if getJoomlaComposeIdentity "$VDM_SITE_COMPOSE"; then
@@ -11211,8 +11154,10 @@ function readJoomlaSiteFacts() {
       return 1
     }
   elif [ -n "$VDM_SITE_ENV_KEY" ]; then
-    migrationReadEnvValue "$VDM_SITE_ENV" "VDM_${VDM_SITE_ENV_KEY}_DOCROOT" relative || relative='.'
-    migrationReadEnvValue "$VDM_SITE_ENV" "VDM_${VDM_SITE_ENV_KEY}_WEBSERVER" value && VDM_SITE_WEBSERVER="$value"
+    local root_key="VDM_${VDM_SITE_ENV_KEY}_DOCROOT" web_key="VDM_${VDM_SITE_ENV_KEY}_WEBSERVER"
+    local "$root_key=" "$web_key="
+    readSetupEnvValues "$VDM_SITE_ENV" "$root_key" "$web_key" || return 1
+    relative="${!root_key:-.}" VDM_SITE_WEBSERVER="${!web_key:-unknown}"
   fi
   case "$relative" in
     ''|.) relative='' ;;
@@ -11314,11 +11259,23 @@ function readJoomlaSiteFacts() {
   return 0
 }
 
+# Alignment belongs to the full report. Opening an action or listing names
+# should not inspect which Compose settings need updating.
+function joomlaSiteAlignmentSummary() {
+  local plan
+  plan=$(siteAlignConfiguration "$VDM_SITE_NAME" inspect) || :
+  case "$plan" in
+    "$VDM_SITE_NAME"$'\t'*) printf '%s\n' "${plan#*$'\t'}" ;;
+    *) printf 'unavailable\n' ;;
+  esac
+}
+
 function showJoomlaSiteFacts() {
   printf 'Website: %s\nEnabled: %s\nServices: %s\nHealth: %s\nRoute check: %s\n' "$VDM_SITE_NAME" "$VDM_SITE_ENABLED" "$VDM_SITE_RUNNING" "$VDM_SITE_HEALTH" "$VDM_SITE_ROUTABLE"
+  [ "${1:-}" != summary ] || return 0
   printf 'Website URL: %s\nAdministrator: %s\nJoomla installed: %s\nPHP measured: %s\nWebserver configured: %s\n' "${VDM_SITE_URL:-unavailable}" "${VDM_SITE_ADMIN_URL:-unavailable}" "$VDM_SITE_JOOMLA_VERSION" "$VDM_SITE_PHP_VERSION" "$VDM_SITE_WEBSERVER"
   printf 'Image configured: %s\nImage running: %s\nImage ID: %s\n' "${VDM_SITE_IMAGE:-unknown}" "${VDM_SITE_RUNTIME_IMAGE:-unavailable}" "${VDM_SITE_IMAGE_DIGEST:-unavailable}"
-  printf 'Configuration alignment: %s\n' "$VDM_SITE_ALIGNMENT"
+  printf 'Configuration alignment: %s\n' "$(joomlaSiteAlignmentSummary)"
   printf 'Document root: %s\nStorage: %s %s\nHost directory: %s\nCompose: %s\nEnvironment: %s\n' "${VDM_SITE_DOCROOT:-unknown}" "${VDM_SITE_MOUNT_TYPE:-unknown}" "$VDM_SITE_MOUNT_SOURCE" "${VDM_SITE_HOST_PATH:-not a known bind mount}" "$VDM_SITE_COMPOSE" "${VDM_SITE_ENV:-none}"
   [ -z "$VDM_SITE_VIEWER_URL" ] || printf 'Database viewer: %s\n' "$VDM_SITE_VIEWER_URL"
   [ -z "$VDM_SITE_MAIL_URL" ] || printf 'Mail viewer: %s\n' "$VDM_SITE_MAIL_URL"
@@ -11338,7 +11295,7 @@ function joomlaSiteFactsJSON() {
     --arg root "$VDM_SITE_DOCROOT" --arg host_path "$VDM_SITE_HOST_PATH" --arg mount_type "$VDM_SITE_MOUNT_TYPE" \
     --arg mount_source "$VDM_SITE_MOUNT_SOURCE" --arg volume_name "$VDM_SITE_VOLUME_NAME" --arg compose "$VDM_SITE_COMPOSE" --arg env "$VDM_SITE_ENV" \
     --arg service "$VDM_SITE_SERVICE" --arg services "$VDM_SITE_SERVICES" --arg states "$VDM_SITE_SERVICE_STATES" --arg service_images "$VDM_SITE_SERVICE_IMAGES" \
-    --arg viewer "$VDM_SITE_VIEWER_URL" --arg mail "$VDM_SITE_MAIL_URL" --arg alignment "$VDM_SITE_ALIGNMENT" \
+    --arg viewer "$VDM_SITE_VIEWER_URL" --arg mail "$VDM_SITE_MAIL_URL" --arg alignment "$(joomlaSiteAlignmentSummary)" \
     '{site:$site,enabled:$enabled,running:$running,health:$health,routable:"unchecked",url:$url,administrator:$administrator,
       image:$image,runtime_image:$runtime_image,image_id:$image_id,joomla_version:$joomla,php_version:$php,webserver:$webserver,
       document_root:$root,host_path:$host_path,mount:{type:$mount_type,source:$mount_source,volume_name:$volume_name},compose:$compose,environment:$env,
@@ -11356,6 +11313,10 @@ function joomla__TRuST__info() {
 function joomla__TRuST__list() {
   (
     local site first=true
+    if [ "${VDM_SHORT:-false}" = true ] && [ -z "${VDM_VERSION_PREFIX:-}" ] && [ "${OCTOJOOM_OUTPUT:-text}" != json ]; then
+      listJoomlaSites
+      exit 0
+    fi
     [ "${OCTOJOOM_OUTPUT:-text}" != json ] || printf '['
     while IFS= read -r site; do
       readJoomlaSiteFacts "$site" || continue
@@ -12019,12 +11980,11 @@ function runJoomlaSiteAction() {
   (
     local site="$1" action="$2" status=0
     local VDM_CONTAINER="$site" VDM_CONTAINER_TYPE=joomla VDM_ACTION=''
-    readJoomlaSiteFacts "$site" || exit 1
     # Disabled sites still have files, configuration, backups and tools. Guard
     # only service lifecycle actions, including selections from a stale menu.
     case "$action" in
       start|stop|restart|redeploy|disable)
-        if [ "$VDM_SITE_ENABLED" != enabled ]; then
+        if [ "$(getJoomlaSiteEnabledState "$site")" != enabled ]; then
           printf 'Website %s is not enabled; enable it first before using %s.\n' "$site" "$action" >&2
           exit 1
         fi
@@ -12045,6 +12005,7 @@ function runJoomlaSiteAction() {
       ssl) showJoomlaTLS "$site" ;;
       edit) joomla__TRuST__edit ;;
       env)
+        resolveJoomlaSite "$site" || exit 1
         [ -n "$VDM_SITE_ENV" ] || { showError 'This website has no environment file.'; exit 1; }
         if [ "$VDM_SITE_ENV" = "${VDM_REPO_PATH}/joomla/.env" ]; then
           showNotice "This is the shared Joomla environment file, used by other websites too:\n${VDM_SITE_ENV}"
@@ -12054,6 +12015,7 @@ function runJoomlaSiteAction() {
         "${EDITOR:-nano}" "$VDM_SITE_ENV"
         ;;
       logs)
+        readJoomlaSiteFacts "$site" || exit 1
         local choice service options=(back '<-- Return to website details' all 'All services')
         while IFS= read -r service; do [ -z "$service" ] || options+=("$service" "$service"); done <<< "$VDM_SITE_SERVICES"
         choice=$(whiptail --menu 'Read the latest 100 log lines. Close the viewer to return.' 20 112 10 --title "Logs | ${site}" --backtitle "$BACK_TITLE" "${options[@]}" 3>&2 2>&1 1>&3) || exit 0
@@ -12155,7 +12117,7 @@ function showJoomlaWebsiteInformation() {
     while [ -f "${VDM_REPO_PATH}/joomla/available/${site}/docker-compose.yml" ]; do
       # Facts and flags stay inside this menu invocation; site ENV is never loaded.
       readJoomlaSiteFacts "$site" || break
-      details=$(showJoomlaSiteFacts)
+      details=$(showJoomlaSiteFacts summary)
       actions=(back '<-- Return to website list')
       if [ "$VDM_SITE_ENABLED" = enabled ]; then
         actions+=(start 'Start website services' stop 'Stop website services'
@@ -12187,7 +12149,7 @@ function showJoomlaWebsiteInformation() {
       [ "$choice" != back ] || break
       if [ "$choice" = information ]; then
         status=0
-        showJoomlaWebsiteReport "$site" "$details" || status=$?
+        showJoomlaWebsiteReport "$site" "$(showJoomlaSiteFacts)" || status=$?
         case "$status" in
           0|255) ;; # Back and Escape both return to this website's actions.
           *) showError "Could not display the full website information (status ${status})." ;;
@@ -19370,7 +19332,7 @@ function migrationRunCompose() {
   (
     local env_file="$1" compose_file="$2"
     shift 2
-    migrationUnexportComposeReferences "$compose_file" || exit 1
+    joomlaUnexportComposeEnvironment "$compose_file" || exit 1
     local -a arguments=(compose)
     # Compose resolves an empty --env-file to the working directory and fails
     # with "is a directory". No explicit ENV means omit the option entirely.
