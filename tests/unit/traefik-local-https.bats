@@ -331,7 +331,7 @@ proxy_fixture_model() {
   assert_equal "$(file_mode "$conf/octojoom")" 700
   [ "$(grep -c '^chown ' "$SANDBOX/privileged-directory.log")" -eq 1 ]
   grep '^chown ' "$SANDBOX/privileged-directory.log" | grep -qF -- "$conf/octojoom"
-  refute_file_contains "$SANDBOX/privileged-directory.log" '-R'
+  refute_file_contains "$SANDBOX/privileged-directory.log" ' -R '
 }
 
 @test "certificate directory access failure prevents Traefik publication and restart" {
