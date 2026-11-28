@@ -337,9 +337,9 @@ container names, and hostnames are refused; this workflow creates a new
 destination deployment and does not replace an existing one.
 
 You may leave the prepared project disabled. If the destination proxy is
-ready, Octojoom offers activation and checks container health, Joomla's actual
-database connection, and the destination HTTP/HTTPS route. HTTPS checks verify
-the hostname's certificate. Missing proxy prerequisites leave a prepared,
+ready, Octojoom offers activation and verifies database health, the running
+Joomla container, Joomla's database connection and the destination HTTP/HTTPS
+route. HTTPS checks verify the hostname's certificate. Missing proxy prerequisites leave a prepared,
 disabled project; a failed activation retains its files and attempts to stop
 the imported containers, reporting if that stop also fails.
 
@@ -561,9 +561,10 @@ We welcome contributions of all levels — from documentation to new distro supp
    The tests need Bash 4 or newer (on macOS: `brew install bash`) and git, which
    fetches the pinned bats-core once. They run in a throw-away folder with
    stand-ins for whiptail, docker and sudo, so they never touch your containers
-   or your Octojoom config. Every push and pull request to `master` or `staging`
-   runs the same checks on Linux, macOS and Windows (`.github/workflows/tests.yml`).
-   Ubuntu also runs the real Docker clone and migration regressions. See [the test guide](tests/README.md)
+   or your Octojoom config. Pushes and pull requests to `master` or `staging`
+   run the full shell suite and Docker integration tests on Ubuntu, with focused
+   native checks on macOS and Windows. The weekly and manual Tests workflows run
+   the full shell suite on all three hosts. See [the test guide](tests/README.md)
    for coverage, local commands, infrastructure requirements, and validation limits.
 5. **Submit** a pull request with a clear explanation
 
