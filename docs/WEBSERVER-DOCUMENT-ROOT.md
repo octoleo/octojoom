@@ -14,12 +14,12 @@ the source of truth; there is no enrollment or additional project registry.
 
 ## Joomla Site Offline and Docker health
 
-New Apache sites disable Docker's web health check by default. When Joomla
-serves its offline login page with HTTP 503, that response no longer marks
-the web container unhealthy. Traefik can still route to `/administrator/`. The database
-keeps its own check. Nginx/FPM sites use the FPM listener and Nginx endpoint
-checks. Switching back to Apache restores an operator-defined check and
-disables a saved Octojoom default.
+New Apache sites omit the web `healthcheck` from Compose by default. With the
+standard Joomla image, the guest offline page can return HTTP 503 while
+Traefik continues routing requests to `/administrator/`. A custom image can
+supply its own check. The database keeps its health check. Nginx/FPM uses its
+listener and endpoint checks. Switching back to Apache restores an
+operator-defined check and drops a saved Octojoom default.
 
 To retire the generated Apache probe on an existing site, use
 [the selected website's configuration update](CONFIGURATION-ALIGNMENT.md#repair-the-apache-health-check-for-one-website).

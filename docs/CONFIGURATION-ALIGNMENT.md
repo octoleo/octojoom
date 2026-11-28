@@ -16,17 +16,20 @@ octojoom --type joomla --task align --container "$site" --action apply --non-int
 `inspect` previews the update. `apply` is the default action. Octojoom
 recognizes both of its former curl commands, the homepage request and the
 Apache `OPTIONS *` request. Probe timing and YAML field order can vary.
-An operator-defined probe with a different command is preserved.
+The update removes the generated health check from Compose. An operator's
+own check, including a different check inherited from a custom image, is
+preserved. If the image itself supplies an old Octojoom check, the update
+explicitly disables it for this web service.
 
 The update uses the selected site's Compose project, web service and active
 environment, including a shared `joomla/.env`. The environment file stays in
-place. If the saved configuration already disables the probe but the existing
+place. If the saved configuration already omits the probe but the existing
 web container still runs an old generated probe, the update applies the
 saved configuration to that container.
 
 | Selected Apache service | Effect of applying a required update |
 | --- | --- |
-| Running | Compose recreates the web container with the generated probe disabled. |
+| Running | Compose recreates just the web container to retire the old probe. |
 | Stopped | Compose recreates the web container in its stopped state. |
 | Never created | Octojoom updates the saved definition for the next start. |
 

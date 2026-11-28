@@ -56,17 +56,31 @@ setup() {
   assert_file_contains "$work/php.yml" '/var/www/html'
 }
 
-@test "new Apache sites disable automatic health checks and honor an explicit command" {
+@test "new Apache sites omit automatic health checks and honor an explicit command" {
   run joomlaServiceProperty "$compose" joomlaalpha healthcheck
   assert_success
-  assert_equal "$output" "$(joomlaWebHealthcheck)"
-  assert_output_contains 'disable: true'
+  assert_equal "$output" ''
 
   local custom='["CMD", "curl", "-f", "http://localhost/custom-health"]'
   VDM_WEB_HEALTH="$custom" gen_joomla_compose alpha ALPHA alpha vdm.dev > "$work/custom.yml"
   run joomlaServiceProperty "$work/custom.yml" joomlaalpha healthcheck
   assert_success
   assert_output_contains "test: $custom"
+}
+
+@test "removing a stock probe preserves commented service headers, line endings and neighboring settings" {
+  local source="$work/source.yml" target="$work/edited.yml"
+  printf '%s\r\n' 'services:  # Managed sites' '  joomla.spark:  # Web' '    image: joomla' \
+    '    healthcheck:' '      test: [CMD, curl, -f, "http://localhost/"]' '' \
+    '    # Restart policy for this site' '    restart: always' '  other:   ' '    image: alpine' > "$source"
+  joomlaWebHealthcheck > "$work/property"
+  joomlaSetServiceProperty "$source" "$target" joomla.spark healthcheck "$work/property"
+  sed '/^    healthcheck:/d; /^      test:/d' "$source" > "$work/expected.yml"
+  cmp "$work/expected.yml" "$target"
+
+  if [ -n "$REAL_DOCKER" ]; then
+    "$REAL_DOCKER" compose -p test -f "$target" config --format json | joomlaSiteJSON -e '.services["joomla.spark"] | has("healthcheck") | not'
+  fi
 }
 
 @test "returning to Apache discards saved stock probes and restores an operator's probe verbatim" {
@@ -87,9 +101,18 @@ setup() {
     if [[ "$probe" == *private-health* ]]; then
       assert_equal "$(joomlaServiceProperty "$work/apache.yml" joomlaalpha healthcheck)" "$(cat "$saved")"
     else
-      assert_equal "$(joomlaServiceProperty "$work/apache.yml" joomlaalpha healthcheck)" "$(joomlaWebHealthcheck)"
+      assert_equal "$(joomlaServiceProperty "$work/apache.yml" joomlaalpha healthcheck)" ''
     fi
   done
+}
+
+@test "returning to Apache preserves the operator's explicit disable setting" {
+  joomlaRewriteWebserverCompose "$compose" "$work/fpm.yml" joomlaalpha nginxalpha nginx joomla:fpm nginx:stable-alpine "$work"
+  printf '    healthcheck:\n      disable: true  # Disabled by operator\n' > "$work/restore-healthcheck.yml"
+  mkdir -p "$STUB_DIR/docker/config"
+  printf '{"services":{"web":{"healthcheck":{"disable":true}}}}\n' > "$STUB_DIR/docker/config/web-change.json"
+  joomlaRewriteWebserverCompose "$work/fpm.yml" "$work/apache.yml" joomlaalpha nginxalpha apache joomla:apache nginx:stable-alpine "$work"
+  assert_equal "$(joomlaServiceProperty "$work/apache.yml" joomlaalpha healthcheck)" "$(cat "$work/restore-healthcheck.yml")"
 }
 
 @test "web switching keeps non-routing labels on the original PHP service" {

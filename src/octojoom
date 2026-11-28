@@ -2056,14 +2056,10 @@ function joomla__TRuST__setup() {
   )
 }
 
-# Apache sites may intentionally serve Joomla's offline page with HTTP 503.
-# Suppress even an image-provided probe unless this service specifies its own.
+# Apache has no Octojoom health check. FPM and operator-defined checks are explicit.
 function joomlaWebHealthcheck() {
-  if [ -z "${1:-}" ]; then
-    printf '    healthcheck:\n      disable: true\n'
-  else
-    printf '    healthcheck:\n      test: %s\n      interval: 30s\n      timeout: 5s\n      retries: 5\n' "$1"
-  fi
+  [ -n "${1:-}" ] || return 0
+  printf '    healthcheck:\n      test: %s\n      interval: 30s\n      timeout: 5s\n      retries: 5\n' "$1"
 }
 
 # Accept the compact JSON test array reported by Compose or Docker.
@@ -2170,9 +2166,8 @@ services:
 #          memory: 2G
 #        reservations:
 #          memory: 512M
-
-${web_health}
-
+${web_health:+
+${web_health}}
     labels:${web_labels}${VDM_WEB_SERVICE:-}
 EOF
   if [ "${VDM_PHPMYADMIN:-true}" = true ] && [ "${VDM_DB_ENGINE:-mariadb}" != postgres ]; then
@@ -2223,13 +2218,18 @@ function joomlaServiceBlock() {
   local file="$1" service="$2"
   [[ "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || return 1
   awk -v service="$service" '
-    /^services:[[:space:]]*$/ {services=1; next}
+    /^services:([[:space:]]+#.*)?[[:space:]]*$/ {services=1; next}
     /^[^[:space:]#][^:]*:/ {services=0; active=0}
     services && /^  [^[:space:]#][^:]*:/ {
-      active=($0 == "  " service ":")
-      if(active) found++
+      header=$0; sub(/[[:space:]]+#.*/, "", header); sub(/[[:space:]]+$/, "", header)
+      active=(header == "  " service ":")
+      if(active) {found++; print}
+      next
     }
-    active {print; if($0 ~ /\t|[[:space:]][&*][A-Za-z]|^[[:space:]]*<<:/) unsafe=1}
+    active {
+      print
+      if($0 !~ /^[[:space:]]*#/ && $0 ~ /\t|[[:space:]][&*][A-Za-z]|^[[:space:]]*<<:/) unsafe=1
+    }
     END {if(found!=1 || unsafe) exit 1}
   ' "$file"
 }
@@ -2241,9 +2241,10 @@ function joomlaServiceProperty() {
   printf '%s\n' "$block" | awk -v property="$property" '
     /^    [A-Za-z_][A-Za-z0-9_-]*:/ {
       name=$0; sub(/^    /,"",name); sub(/:.*/,"",name)
-      active=(name==property); if(active) found++
+      active=(name==property); trailing=""; if(active) found++
     }
-    active {print}
+    active && /^[[:space:]]*(#|$)/ {trailing=trailing $0 ORS; next}
+    active {printf "%s", trailing; trailing=""; print}
     END {if(found>1) exit 1}
   '
 }
@@ -2257,21 +2258,26 @@ function joomlaSetServiceProperty() {
   [ -n "$block" ] || return 1
   awk -v service="$service" -v property="$property" -v replacement="$replacement" '
     function emit( line) {
-      while((getline line < replacement)>0) print line
+      while((getline line < replacement)>0) {sub(/\r$/, "", line); print line eol}
       close(replacement); emitted=1
     }
-    function finish() {if(active && !emitted) emit(); active=0; skip=0}
-    /^services:[[:space:]]*$/ {services=1}
+    function finish() {if(active && !emitted) emit(); printf "%s", trailing; trailing=""; active=0; skip=0}
+    /^services:([[:space:]]+#.*)?[[:space:]]*$/ {services=1}
     /^[^[:space:]#][^:]*:/ && !/^services:/ {finish(); services=0}
     services && /^  [^[:space:]#][^:]*:/ {
-      finish(); active=($0=="  " service ":"); if(active) found++
+      finish()
+      header=$0; sub(/[[:space:]]+#.*/, "", header); sub(/[[:space:]]+$/, "", header)
+      active=(header=="  " service ":"); if(active) {found++; eol=($0 ~ /\r$/ ? "\r" : "")}
     }
     active && /^    [A-Za-z_][A-Za-z0-9_-]*:/ {
       name=$0; sub(/^    /,"",name); sub(/:.*/,"",name)
+      printf "%s", trailing; trailing=""
       skip=(name==property)
-      if(skip) {count++; if(!emitted) emit()}
+      if(skip) {count++; if(!emitted) emit(); next}
     }
-    !skip {print}
+    skip && /^[[:space:]]*(#|$)/ {trailing=trailing $0 ORS; next}
+    skip {trailing=""; next}
+    {print}
     END {finish(); if(found!=1 || count>1) exit 1}
   ' "$source" > "$destination"
 }
@@ -2565,17 +2571,17 @@ FPM_HEALTH
       joomlaServiceProperty "$current" "$nginx" "$property" > "$work/property" || return 1
       joomlaSetServiceProperty "$current" "$next" "$service" "$property" "$work/property" && mv "$next" "$current" || return 1
     done
-    local saved="$work/restore-healthcheck.yml" saved_test='[]'
+    local saved="$work/restore-healthcheck.yml" saved_test
     if [ -s "$saved" ]; then
       # Read the saved property in isolation without interpolating operator settings.
       { printf 'services:\n  web:\n    image: joomla\n'; cat "$saved"; } > "$work/saved-probe.yml" || return 1
       saved_test=$(set -o pipefail
         COMPOSE_DISABLE_ENV_FILE=1 docker compose -p octojoom -f "$work/saved-probe.yml" config --no-interpolate --format json |
-          joomlaSiteJSON -ce '.services.web | select(type == "object") | .healthcheck.test // []') || return 1
+          joomlaSiteJSON -ce '.services.web | select(type == "object") | .healthcheck |
+            if .disable then ["NONE"] else .test // [] end') || return 1
     fi
-    if [ "$saved_test" = '[]' ] || joomlaStockApacheProbe "$saved_test"; then
-      joomlaWebHealthcheck > "$work/property" || return 1
-    else
+    : > "$work/property" || return 1
+    if [ -s "$saved" ] && ! joomlaStockApacheProbe "$saved_test"; then
       cp "$saved" "$work/property" || return 1
     fi
     joomlaSetServiceProperty "$current" "$next" "$service" healthcheck "$work/property" && mv "$next" "$current" || return 1
@@ -8497,7 +8503,8 @@ function siteContainerHealthTest() {
 # A website update retires Octojoom's probes from this site's Apache service.
 function siteAlignConfiguration() {
   (
-    local site="$1" action="${2:-apply}" service staged model declared live result
+    local site="$1" action="${2:-apply}" service staged model declared live result image image_test=''
+    local replacement
     local OCTOJOOM_SITE_HELD_LOCK=''
     resolveJoomlaSite "$site" || exit 1
     if [ "$action" = apply ] || [ "$action" = save-image ]; then
@@ -8546,13 +8553,24 @@ function siteAlignConfiguration() {
     if [ "$action" = inspect ]; then
       printf '%s\tpending\tDisable the active web health check on %s.\n' "$site" "$service"; exit 0
     fi
-    if [ "$declared" = '["NONE"]' ]; then
-      cp -p -- "$VDM_SITE_COMPOSE" "$staged" || exit 1
-    else
-      { joomlaWebHealthcheck; printf '\n'; } > "$OCTOJOOM_SITE_HELD_LOCK/healthcheck.yml" || exit 1
-      if ! joomlaSetServiceProperty "$VDM_SITE_COMPOSE" "$staged" "$service" healthcheck "$OCTOJOOM_SITE_HELD_LOCK/healthcheck.yml"; then
-        printf '%s\taction-needed\tCould not edit the health check for %s.\n' "$site" "$service"; exit 1
+    replacement="$OCTOJOOM_SITE_HELD_LOCK/healthcheck.yml"
+    : > "$replacement" || exit 1
+    if [ "$declared" != '["NONE"]' ] && [ "$live" != absent ]; then
+      # Omitting the property restores the image default. Only an image that
+      # ships the retired command needs an explicit override.
+      if ! image=$(migrationRunCompose "$VDM_SITE_ENV" "$VDM_SITE_COMPOSE" --project-directory "$VDM_SITE_DIR" images --quiet "$service") ||
+        [ -z "$image" ] || ! image_test=$(docker image inspect --format '{{with index .Config "Healthcheck"}}{{json .Test}}{{else}}null{{end}}' "${image%$'\r'}"); then
+        printf '%s\taction-needed\tCannot read the image health check for %s.\n' "$site" "$service"; exit 1
       fi
+      image_test="${image_test%$'\r'}"
+      if joomlaStockApacheProbe "$image_test"; then
+        printf '    healthcheck:\n      disable: true\n' > "$replacement" || exit 1
+      fi
+    fi
+    if [ "$declared" = '["NONE"]' ] || { [ "$declared" = null ] && [ ! -s "$replacement" ]; }; then
+      cp -p -- "$VDM_SITE_COMPOSE" "$staged" || exit 1
+    elif ! joomlaSetServiceProperty "$VDM_SITE_COMPOSE" "$staged" "$service" healthcheck "$replacement"; then
+      printf '%s\taction-needed\tCould not edit the health check for %s.\n' "$site" "$service"; exit 1
     fi
     if ! sitePublishConfiguration "$site" "$staged" '' "$service"; then
       printf '%s\taction-needed\tCould not apply the configuration for %s.\n' "$site" "$service"; exit 1
@@ -8562,9 +8580,12 @@ function siteAlignConfiguration() {
       printf '%s\tupdated\tDisabled the Apache health check for the next start of %s.\n' "$site" "$service"; exit 0
     fi
     case "$result" in
-      null|'["NONE"]') printf '%s\tupdated\tDisabled the Apache health check on %s.\n' "$site" "$service" ;;
-      *) printf '%s\taction-needed\tSaved the Compose update, but could not verify the disabled health check on %s.\n' "$site" "$service"; exit 1 ;;
+      null|'["NONE"]') printf '%s\tupdated\tRemoved the Octojoom Apache health check on %s.\n' "$site" "$service"; exit 0 ;;
+      "$image_test") if [[ "$result" == '['* ]] && ! joomlaStockApacheProbe "$result"; then
+        printf '%s\tupdated\tRestored the image-provided health check on %s.\n' "$site" "$service"; exit 0
+      fi ;;
     esac
+    printf '%s\taction-needed\tSaved the Compose update, but could not verify the web health check on %s.\n' "$site" "$service"; exit 1
   )
 }
 

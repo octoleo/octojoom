@@ -36,6 +36,9 @@ alignment_container() {
     if [ "$1" = inspect ]; then
       [ "${*: -1}" = alpha-web-id ] || return 1
       cat "$STUB_DIR/live-test"
+    elif [ "$1 $2" = 'image inspect' ]; then
+      [ "${*: -1}" = alpha-image-id ] || return 1
+      printf '%s\n' "${ALIGN_IMAGE_TEST:-null}"
     else
       command docker "$@"
     fi
@@ -49,7 +52,16 @@ alignment_container() {
       *' ps --status running --services '*) [ "$ALIGN_CONTAINER_STATE" != running ] || echo joomlaalpha ;;
       *' ps --all --services '*) echo joomlaalpha ;;
       *' ps --all --quiet '*) echo alpha-web-id ;;
-      *' up '*) printf '%s\n' '["NONE"]' > "$STUB_DIR/live-test"; alignment_model '{"disable":true}' ;;
+      *' images --quiet '*) echo alpha-image-id ;;
+      *' up '*)
+        if joomlaServiceProperty "$file" joomlaalpha healthcheck | grep -q 'disable: true'; then
+          printf '%s\n' '["NONE"]' > "$STUB_DIR/live-test"
+          alignment_model '{"disable":true}'
+        else
+          printf '%s\n' "${ALIGN_IMAGE_TEST:-null}" > "$STUB_DIR/live-test"
+          alignment_model null
+        fi
+        ;;
     esac
   }
 }
@@ -240,7 +252,7 @@ EXTRA
   [ ! -e "$ALIGN_DIR/.env" ]
 }
 
-@test "alignment: disable the stock check only on the selected running Apache service" {
+@test "alignment: remove the stock check only on the selected running Apache service" {
   local site=alpha.example.test
   cp "$ALIGN_ENV" "$ALIGN_DIR/.env"
   printf "SITE_NOTE='one\ntwo'\n# Site-specific setting\n" >> "$ALIGN_DIR/.env"
@@ -307,14 +319,14 @@ YAML
   assert_output_contains $'updated\t'
   run joomlaServiceProperty "$ALIGN_YML" joomlaalpha healthcheck
   assert_success
-  assert_output_contains 'disable: true'
+  assert_equal "$output" ''
   refute_command ' (up|start|stop|restart) '
 }
 
-@test "alignment: a running container still using the homepage check receives the saved disabled setting once" {
-  alignment_model '{"disable":true}'
+@test "alignment: a running container still using the homepage check is recreated once when the saved file has no probe" {
+  alignment_model null
   alignment_container running '["CMD","curl","-f","http://localhost/"]'
-  cp "$ALIGN_YML" "$SANDBOX/disabled.yml"
+  cp "$ALIGN_YML" "$SANDBOX/no-probe.yml"
   run siteAlignConfiguration alpha.example.test inspect
   assert_success
   assert_output_contains $'pending\t'
@@ -324,23 +336,37 @@ YAML
   run siteAlignConfiguration alpha.example.test apply
   assert_success
   assert_output_contains $'unchanged\t'
-  cmp "$ALIGN_YML" "$SANDBOX/disabled.yml"
-  assert_equal "$(cat "$STUB_DIR/live-test")" '["NONE"]'
+  cmp "$ALIGN_YML" "$SANDBOX/no-probe.yml"
+  assert_equal "$(cat "$STUB_DIR/live-test")" null
   [ "$(grep -c ' up ' "$STUB_DIR/requests")" -eq 1 ]
   grep -q ' up -d --no-deps --force-recreate joomlaalpha$' "$STUB_DIR/requests"
 }
 
-@test "alignment: an image-inherited custom check is preserved and an inherited stock homepage check is removed" {
-  : > "$SANDBOX/empty"
-  joomlaSetServiceProperty "$ALIGN_YML" "$SANDBOX/inherited.yml" joomlaalpha healthcheck "$SANDBOX/empty"
-  cp "$SANDBOX/inherited.yml" "$ALIGN_YML"
+@test "alignment: an inherited custom check and an explicitly disabled check retain their settings" {
   alignment_model null
   alignment_container running '["CMD","test","-f","/run/ready"]'
+  cp "$ALIGN_YML" "$SANDBOX/inherited.yml"
   run siteAlignConfiguration alpha.example.test apply
   assert_success
   cmp "$ALIGN_YML" "$SANDBOX/inherited.yml"
   refute_file_contains "$STUB_DIR/requests" ' up '
-  printf '%s\n' '["CMD","curl","-f","http://localhost/"]' > "$STUB_DIR/live-test"
+
+  printf '    healthcheck:\n      disable: true\n' > "$SANDBOX/off"
+  joomlaSetServiceProperty "$ALIGN_YML" "$SANDBOX/disabled.yml" joomlaalpha healthcheck "$SANDBOX/off"
+  cp "$SANDBOX/disabled.yml" "$ALIGN_YML"
+  alignment_model '{"disable":true}'
+  printf '%s\n' '["NONE"]' > "$STUB_DIR/live-test"
+  run siteAlignConfiguration alpha.example.test apply
+  assert_success
+  assert_output_contains $'unchanged\t'
+  cmp "$ALIGN_YML" "$SANDBOX/disabled.yml"
+  refute_file_contains "$STUB_DIR/requests" ' up '
+}
+
+@test "alignment: the stock homepage check baked into the image is explicitly disabled on the selected service" {
+  ALIGN_IMAGE_TEST='["CMD","curl","-f","http://localhost/"]'
+  alignment_model null
+  alignment_container running "$ALIGN_IMAGE_TEST"
   run siteAlignConfiguration alpha.example.test apply
   assert_success
   assert_output_contains $'updated\t'
@@ -348,6 +374,10 @@ YAML
   run joomlaServiceProperty "$ALIGN_YML" joomlaalpha healthcheck
   assert_success
   assert_output_contains 'disable: true'
+  run siteAlignConfiguration alpha.example.test apply
+  assert_success
+  assert_output_contains $'unchanged\t'
+  [ "$(grep -c ' up ' "$STUB_DIR/requests")" -eq 1 ]
 }
 
 @test "image alignment: unexpected effective semantic changes are refused without disclosing resolved secrets" {

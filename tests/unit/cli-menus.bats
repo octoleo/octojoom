@@ -286,7 +286,9 @@ record_calls() {
   assert_success
   assert_answers_used
   [ "$(grep -cxF 'Update existing configurations' "${SANDBOX}/menu-arguments")" -eq 2 ]
-  assert_file_contains "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/docker-compose.yml" 'disable: true'
+  run joomlaServiceProperty "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/docker-compose.yml" joomlajcb healthcheck
+  assert_success
+  assert_equal "$output" ''
   refute_file_exists "${VDM_REPO_PATH}/joomla/available/jcb.vdm.dev/.env"
 }
 
