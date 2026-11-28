@@ -194,7 +194,15 @@ jobs:
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
       - name: Install mkcert (Windows)
         if: runner.os == 'Windows'
-        run: choco install mkcert -y --no-progress
+        shell: pwsh
+        run: |
+          $bin = New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'mkcert-bin')
+          $exe = Join-Path $bin.FullName 'mkcert.exe'
+          $release = 'https://github.com/FiloSottile/mkcert/releases/download/v1.4.4'
+          $sha256 = 'D2660B50A9ED59EADA480750561C96ABC2ED4C9A38C6A24D93E30E0977631398'
+          Invoke-WebRequest "$release/mkcert-v1.4.4-windows-amd64.exe" -OutFile $exe -MaximumRetryCount 3 -RetryIntervalSec 2
+          if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $sha256) { throw 'Unexpected mkcert checksum' }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $bin.FullName
       - name: Verify native host trust and certificate hostnames
         run: bash tests/integration/local-trust.sh
 
