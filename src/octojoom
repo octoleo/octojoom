@@ -1072,6 +1072,7 @@ function readEnvRecords() {
       first = substr(raw, 1, 1)
       if (first == "\"" || first == "\047") { quote = first; closing(raw, 2) }
       if (!selected(name)) next
+      if (!(name in position)) {position[name]=++count; order[count]=name}
       if (mode == "unique" && (quote != "" || ((name in saved) && saved[name] != raw))) invalid = 1
       if (mode == "locations") print NR
       at[name] = NR
@@ -1093,7 +1094,12 @@ function readEnvRecords() {
           exit 1
         }
       }
-      for (name in saved) print at[name] ":" name "=" saved[name]
+      # Stable source order lets callers compare a freshly rendered ENV with
+      # its previous version without recreating services for a reordered file.
+      for (i=1; i<=count; i++) {
+        name=order[i]
+        if (name in saved) print at[name] ":" name "=" saved[name]
+      }
     }
   ' "$file"
 }
