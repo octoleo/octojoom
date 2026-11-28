@@ -3,9 +3,9 @@
 ## Repair the Apache health check for one website
 
 In **Joomla Containers → Website Information**, select the affected hostname
-and choose **Update this website configuration**. This repairs the old Octojoom
-Apache health check for that website. The same operation is available from
-the command line.
+and choose **Update this website configuration**. This retires Octojoom's
+generated Apache probe for that website. The same update is available from the
+command line.
 
 ```bash
 read -r -p 'Joomla website hostname: ' site
@@ -13,27 +13,27 @@ octojoom --type joomla --task align --container "$site" --action inspect --non-i
 octojoom --type joomla --task align --container "$site" --action apply --non-interactive
 ```
 
-`inspect` previews the change. `apply` is the default action. It replaces the
-generated `curl -f http://localhost/` probe when its interval, timeout and
-retry count still match Octojoom's original defaults. The replacement sends
-`OPTIONS *` to Apache every 30 seconds. Joomla can then serve its native
-offline login page with HTTP 503 while the administrator remains reachable.
+`inspect` previews the update. `apply` is the default action. Octojoom
+recognizes both of its former curl commands, the homepage request and the
+Apache `OPTIONS *` request. Probe timing and YAML field order can vary.
+An operator-defined probe with a different command is preserved.
 
-The updater edits only the matching Compose health check. It uses the site's
-existing image and active environment, including a shared `joomla/.env`. An
-already-correct or custom probe, including one with custom timings, needs no
-update. Switching from Nginx/PHP-FPM back to Apache also upgrades a saved
-legacy default when restoring the Apache configuration.
+The update uses the selected site's Compose project, web service and active
+environment, including a shared `joomla/.env`. The environment file stays in
+place. If the saved configuration already disables the probe but the existing
+web container still runs an old generated probe, the update applies the
+saved configuration to that container.
 
-| Selected Apache service | Effect of applying a matching update |
+| Selected Apache service | Effect of applying a required update |
 | --- | --- |
-| Running | Compose recreates the web container. Docker resumes its scheduled probe. |
-| Stopped | Compose recreates the stopped container with the corrected probe and leaves it stopped. |
-| Never created | The next start uses the corrected Compose definition. |
+| Running | Compose recreates the web container with the generated probe disabled. |
+| Stopped | Compose recreates the web container in its stopped state. |
+| Never created | Octojoom updates the saved definition for the next start. |
 
-The database and other services keep their current state. Use `--container`
-for one site. An explicit `--all` requests a batch operation. Each site's
-result is `pending`, `updated`, `unchanged`, or `action-needed`.
+The site keeps its enabled or disabled setting. Its database and other
+services keep running or stay stopped as before. Reapplying the update to an
+already aligned site leaves the web container in place. Use `--container`
+for one site or `--all` to explicitly request a batch.
 
 ## Save the current image as a site setting
 

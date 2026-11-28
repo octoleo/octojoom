@@ -154,10 +154,34 @@ EOF
   refute_dialog root-secret
 }
 
-@test "migration health checks reject stopped or unhealthy containers" {
-  docker() { printf 'unhealthy\n'; }
+@test "migration accepts a running Joomla container without a probe when its database is healthy" {
+  docker() {
+    case "${!#}" in
+      mariadbnew) printf 'healthy\n' ;;
+      joomlanew) printf 'missing-healthcheck\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  run migrationWaitHealthy new 2
+  assert_success
+}
+
+@test "migration requires database health and rejects stopped or unhealthy Joomla containers" {
+  local database_state=missing-healthcheck web_state=healthy
+  docker() {
+    case "${!#}" in
+      mariadbnew) printf '%s\n' "$database_state" ;;
+      joomlanew) printf '%s\n' "$web_state" ;;
+      *) return 1 ;;
+    esac
+  }
   run migrationWaitHealthy new 2
   assert_failure
+  database_state=healthy
+  for web_state in stopped unhealthy; do
+    run migrationWaitHealthy new 2
+    assert_failure
+  done
 }
 
 @test "migration Compose runs cannot inherit stale project secrets or paths" {
@@ -235,7 +259,7 @@ EOF
   [ ! -e "$VDM_REPO_PATH/joomla/enabled/new.destination.test" ]
   [ ! -e "$VDM_REPO_PATH/joomla/.clone.lock" ]
   if ! is_windows; then assert_equal "$(file_mode "$VDM_REPO_PATH/joomla/available/new.destination.test/.env")" 600; fi
-  refute_command 'docker compose .*up'
+  refute_command 'docker compose (.* )?up( |$)'
 }
 
 @test "migration cancellation has a distinct result and retains the source archive" {

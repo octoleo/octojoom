@@ -61,9 +61,6 @@ cleanup() {
     fi
   done
   if [ -f "$work/donor.yml" ]; then donor down -v --remove-orphans >/dev/null; fi
-  if [ -f "$work/no-listener.json" ]; then
-    docker compose -p "pgprobe$run_id" -f "$work/no-listener.json" down -v >/dev/null
-  fi
   docker image rm "$repair_image" >/dev/null 2>&1
   docker rm -f "$proxy" "$retired_container" >/dev/null 2>&1
   docker network rm "$network" "$ssh_network" >/dev/null 2>&1
@@ -228,16 +225,16 @@ deploy() {
 # shellcheck disable=SC1090
 source <(awk '/^(function )?[A-Za-z_][A-Za-z0-9_]*\(\) \{$/ {p=1} p {print} p && /^}$/ {p=0}' "$root/src/octojoom")
 check_http() {
-  local sub="$1" key="$2" web="$3" attempt
+  local sub="$1" key="$2" web="$3" expected="${4:-200}" attempt
   for ((attempt=0; attempt<20; attempt++)); do
     if destination "$sub" exec -T "joomla$key" curl --silent --max-time 5 --include \
         --header "Host: $sub.$domain" "http://$web/" > "$work/homepage" &&
-      awk 'NR==1 {ok=($2==200)} END {exit !ok}' "$work/homepage"; then
+      awk -v expected="$expected" 'NR==1 {ok=($2==expected)} END {exit !ok}' "$work/homepage"; then
       return 0
     fi
     sleep 1
   done
-  printf 'The Joomla home page did not return its expected HTTP 200 response.\n' >&2
+  printf 'The Joomla home page did not return its expected HTTP %s response.\n' "$expected" >&2
   return 1
 }
 check_site() {
@@ -313,25 +310,17 @@ jq -se --arg service "joomla$first" '
   | length == 1' "$work/fresh-starts.jsonl" >/dev/null
 # Check what Docker actually installed on an intentionally offline import.
 web="joomla$first"
-expected_probe='["CMD","curl","-fsS","--noproxy","*","--request","OPTIONS","--request-target","*","http://127.0.0.1"]'
-# Normal enable can return before Docker schedules the first 30-second check.
-wait_for_web_probe() {
-  local i
-  for ((i=0; i<60; i++)); do
-    [ "$(docker inspect --format '{{.State.Health.Status}}' "$web")" = starting ] || return 0
-    sleep 2
-  done
-  return 1
+assert_web_probe_disabled() {
+  docker inspect "$web" | jq -e --argjson running "$1" '.[0] |
+    .State.Running==$running and .State.Health==null and
+    ((.Config.Healthcheck.Test // ["NONE"]) == ["NONE"])' >/dev/null
 }
-wait_for_web_probe
-docker inspect "$web" | jq -e --argjson probe "$expected_probe" '.[0] |
-  .State.Health.Status=="healthy" and .Config.Healthcheck.Test==$probe and
-  .Config.Healthcheck.Interval==30000000000 and .Config.Healthcheck.Timeout==5000000000 and
-  .Config.Healthcheck.Retries==5' >/dev/null
-[ "$(docker exec "$web" curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/)" = 503 ]
+assert_web_probe_disabled true
+check_http new "$first" 127.0.0.1 503
 docker exec "$web" php -d register_argc_argv=1 cli/joomla.php site:up
 check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 legacy_test='["CMD", "curl", "-f", "http://localhost/"]'
+options_test='["CMD", "curl", "-fsS", "--noproxy", "*", "--request", "OPTIONS", "--request-target", "*", "http://127.0.0.1"]'
 site_compose="$sites/new.$domain/docker-compose.yml"
 enabled_compose="$OCTOJOOM_HOME/Docker/joomla/enabled/new.$domain/docker-compose.yml"
 site_env="$sites/new.$domain/.env"
@@ -367,31 +356,35 @@ assert_probe_only_change() {
   [ "$(destination new ps -q "mariadb$first")" = "$alignment_db_id" ]
 }
 publish_legacy_probe() {
-  awk -v legacy="$legacy_test" '/^      test: .*"--request-target"/ { $0="      test: " legacy; changed++ }
+  awk -v test="$2" '/^      disable: true$/ {
+      print "      test: " test; print "      interval: 30s"; print "      timeout: 5s"
+      $0="      retries: 5"; changed++
+    }
     { print } END { if (changed!=1) exit 1 }' "$1" > "$work/legacy-compose.yml"
   publish_fixture_compose "$work/legacy-compose.yml"
 }
 
 # A generated literal image and a stopped web container must stay that way.
-publish_legacy_probe "$work/literal-image.yml"
+publish_legacy_probe "$work/literal-image.yml" "$options_test"
 destination new stop "$web"
 destination new up --no-start --no-deps --force-recreate "$web"
-docker inspect "$web" | jq -e --argjson test "$legacy_test" '.[0] |
+docker inspect "$web" | jq -e --argjson test "$options_test" '.[0] |
   (.State.Running|not) and .Config.Healthcheck.Test==$test' >/dev/null
 "${align[@]}"
 assert_probe_only_change "$work/literal-image.yml"
-docker inspect "$web" | jq -e --argjson probe "$expected_probe" '.[0] |
-  (.State.Running|not) and .Config.Healthcheck.Test==$probe' >/dev/null
+assert_web_probe_disabled false
 
 # Repeat on the running site with an operator-owned image expression.
 siteReplaceServiceScalar "$work/literal-image.yml" "$work/operator-image.yml" "$web" image '${FIXTURE_IMAGE:?missing image}'
-publish_legacy_probe "$work/operator-image.yml"
-destination new up -d --no-deps --wait --wait-timeout 240 "$web" >/dev/null
+publish_legacy_probe "$work/operator-image.yml" "$legacy_test"
+destination new up -d --no-deps "$web" >/dev/null
 check_http new "$first" 127.0.0.1
 
-# Apply the documented update while Joomla is offline. Only the web container changes.
+# The file was already updated, but the running web container still probes
+# Joomla's home page. Updating this site must reconcile the actual container.
 legacy_id=$(destination new ps -q "$web")
 alignment_image=$(docker inspect --format '{{.Image}} {{.Config.Image}}' "$legacy_id")
+publish_fixture_compose "$work/operator-image.yml"
 docker inspect "$legacy_id" | jq -e --argjson test "$legacy_test" '.[0].Config.Healthcheck.Test==$test' >/dev/null
 docker exec "$web" php -d register_argc_argv=1 cli/joomla.php site:down
 for ((i=0; i<10; i++)); do
@@ -401,24 +394,15 @@ for ((i=0; i<10; i++)); do
   sleep 1
 done
 [ "$legacy_exit" = 22 ]
-alignment_model() {
-  destination new config --format json | jq -cS --arg web "$web" 'del(.services[$web].healthcheck.test)'
-}
-alignment_model > "$work/before-alignment.json"
 "${align[@]}"
 assert_probe_only_change "$work/operator-image.yml"
-alignment_model > "$work/after-alignment.json"
-cmp "$work/before-alignment.json" "$work/after-alignment.json"
 [ "$(destination new ps -q "$web")" != "$legacy_id" ]
 [ "$(docker inspect --format '{{.Image}} {{.Config.Image}}' "$web")" = "$alignment_image" ]
-wait_for_web_probe
-docker inspect "$web" | jq -e --argjson probe "$expected_probe" --arg project "$alignment_project" '.[0] |
-  .Config.Healthcheck.Test==$probe and .State.Health.Status=="healthy" and
+assert_web_probe_disabled true
+docker inspect "$web" | jq -e --arg project "$alignment_project" '.[0] |
   .Config.Labels["octojoom.fixture.region"]=="Africa/Windhoek" and
   .Config.Labels["com.docker.compose.project"]==$project' >/dev/null
 offline_identity=$(docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}' "$web")
-offline_start=$SECONDS
-first_health_end=$(docker inspect "$web" | jq -er '.[0].State.Health.Log[-1].End')
 "${align[@]}"
 assert_probe_only_change "$work/operator-image.yml"
 [ "$(docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}' "$web")" = "$offline_identity" ]
@@ -427,13 +411,6 @@ publish_fixture_compose "$work/pre-alignment-compose.yml"
 cp -p "$work/pre-alignment-site.env" "$site_env"
 if [ -f "$work/pre-alignment-shared.env" ]; then mv "$work/pre-alignment-shared.env" "$shared_env"; else rm "$shared_env"; fi
 alignment_in_progress=false
-# Run the same image and effective probe without Apache listening. Docker must
-# mark this still-running container unhealthy using the production retry policy.
-destination new config --format json | jq --arg web "$web" '.services[$web] |
-  {services:{unavailable:{image,healthcheck,network_mode:"none",entrypoint:["sleep","infinity"]}}}' > "$work/no-listener.json"
-no_listener=(docker compose -p "pgprobe$run_id" -f "$work/no-listener.json")
-"${no_listener[@]}" up -d
-probe_container=$("${no_listener[@]}" ps -q unavailable)
 
 deploy stopped "$second" "$package" false --enable false --image-tag "${fpm_image#*:}" \
   --engine mysql --database-image "$mysql_image" --webserver nginx --docroot "$nginx_docroot"
@@ -726,15 +703,8 @@ other_database() {
     'exec mariadb --user=root --password="$MARIADB_ROOT_PASSWORD" --batch --skip-column-names'
 }
 without_backup=(--pre-backup no --confirm-no-backup yes)
-# The native offline form and both authenticated sessions must work through Traefik
-# beyond the five-check failure window.
-remaining=$((180 - (SECONDS - offline_start)))
-if ((remaining > 0)); then sleep "$remaining"; fi
-docker inspect "$web" | jq -e --arg first "$first_health_end" '.[0].State | .Running and
-  .Health.Status=="healthy" and .Health.FailingStreak==0 and (.Health.Log | length)==5 and
-  all(.Health.Log[]; .ExitCode==0 and .End>$first)' >/dev/null
-docker inspect "$probe_container" | jq -e '.[0].State | .Running and .Health.Status=="unhealthy" and
-  .Health.FailingStreak>=5 and all(.Health.Log[]; .ExitCode==7)' >/dev/null
+# The native offline form and both authenticated sessions must work through Traefik.
+assert_web_probe_disabled true
 [ "$(docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}' "$web")" = "$offline_identity" ]
 site_url="http://new.$domain:$proxy_port"
 frontend=(curl --silent --show-error --noproxy '*' --max-time 20 --resolve "new.$domain:$proxy_port:127.0.0.1")
@@ -753,7 +723,7 @@ docker exec "$web" php -d register_argc_argv=1 cli/joomla.php site:up
 check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
 [ "$("${frontend[@]}" -o /dev/null -w '%{http_code}' "$site_url/")" = 200 ]
 [ "$(docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}' "$web")" = "$offline_identity" ]
-printf 'Offline Joomla retained healthy probes for %ss, anonymous HTTP 503 and both logins. Guest HTTP 200 returned without a restart.\n' "$((SECONDS - offline_start))"
+echo 'Offline Joomla served its native HTTP 503, frontend login and administrator login. Guest HTTP 200 returned without a restart.'
 replacement_state new "$first" seed
 destination new exec -T --user 0 "joomla$first" sh -c 'echo "$1" > "$2"' sh "previous-new-$run_id" "/var/www/html/$route_file"
 apache_port=$(publish_fixture_port new "joomla$first")
@@ -761,8 +731,7 @@ require_routed_text new "$apache_port" "$route_file" "previous-new-$run_id"
 check_admin_login new shopmanager "$CONFIRMED_PASSWORD" "previous-new-$run_id"
 printf '\nprecision = 15\n' >> "$OCTOJOOM_HOME/Projects/$first/php.ini"
 # A custom probe belongs to the operator. Import must leave it unchanged.
-original_health=$(destination new config --format json | jq -cS --arg app "joomla$first" '.services[$app].healthcheck')
-jq -e --argjson probe "$expected_probe" '.test==$probe' <<< "$original_health" >/dev/null
+destination new config --format json | jq -e --arg app "$web" '.services[$app].healthcheck.disable' >/dev/null
 printf '    healthcheck:\n      test: ["CMD", "curl", "--silent", "--fail", "http://localhost/"]\n      interval: 17s\n      timeout: 4s\n      retries: 7\n' > "$work/custom-health.property"
 joomlaSetServiceProperty "$sites/new.$domain/docker-compose.yml" "$work/custom-health.yml" \
   "joomla$first" healthcheck "$work/custom-health.property"

@@ -56,13 +56,11 @@ setup() {
   assert_file_contains "$work/php.yml" '/var/www/html'
 }
 
-@test "new Apache sites probe the HTTP server and honor a configured health command" {
+@test "new Apache sites disable automatic health checks and honor an explicit command" {
   run joomlaServiceProperty "$compose" joomlaalpha healthcheck
   assert_success
-  assert_output_contains '["CMD", "curl", "-fsS", "--noproxy", "*", "--request", "OPTIONS", "--request-target", "*", "http://127.0.0.1"]'
-  assert_output_contains 'interval: 30s'
-  assert_output_contains 'timeout: 5s'
-  assert_output_contains 'retries: 5'
+  assert_equal "$output" "$(joomlaWebHealthcheck)"
+  assert_output_contains 'disable: true'
 
   local custom='["CMD", "curl", "-f", "http://localhost/custom-health"]'
   VDM_WEB_HEALTH="$custom" gen_joomla_compose alpha ALPHA alpha vdm.dev > "$work/custom.yml"
@@ -71,30 +69,26 @@ setup() {
   assert_output_contains "test: $custom"
 }
 
-@test "returning to Apache upgrades a previously saved default while preserving custom checks" {
+@test "returning to Apache discards saved stock probes and restores an operator's probe verbatim" {
   joomlaRewriteWebserverCompose "$compose" "$work/fpm.yml" joomlaalpha nginxalpha nginx joomla:fpm nginx:stable-alpine "$work"
-  local saved="$work/restore-healthcheck.yml"
-  cat > "$work/legacy-health" <<'YAML'
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-YAML
-  cp "$work/legacy-health" "$saved"
-  joomlaRewriteWebserverCompose "$work/fpm.yml" "$work/apache.yml" joomlaalpha nginxalpha apache joomla:apache nginx:stable-alpine "$work"
-  assert_equal "$(joomlaServiceProperty "$work/apache.yml" joomlaalpha healthcheck)" \
-    "$(joomlaServiceProperty "$compose" joomlaalpha healthcheck)"
-
-  # An operator can customize only the schedule or only the command.
-  local customization
-  for customization in 's/interval: 30s/interval: 17s/' 's#http://localhost/#http://localhost/private-health#'; do
-    sed "$customization" "$work/legacy-health" > "$work/custom-health"
-    joomlaSetServiceProperty "$compose" "$work/custom.yml" joomlaalpha healthcheck "$work/custom-health"
-    joomlaRewriteWebserverCompose "$work/custom.yml" "$work/fpm.yml" joomlaalpha nginxalpha nginx joomla:fpm nginx:stable-alpine "$work"
-    cp "$work/apache-healthcheck.yml" "$saved"
+  local probe saved="$work/restore-healthcheck.yml"
+  mkdir -p "$STUB_DIR/docker/config"
+  for probe in '["CMD","curl","-f","http://localhost/"]' \
+    '["CMD","curl","-fsS","--noproxy","*","--request","OPTIONS","--request-target","*","http://127.0.0.1"]' \
+    '["CMD","curl","-f","http://localhost/private-health"]'; do
+    {
+      printf '    healthcheck:\n      interval: 17s\n      test:\n'
+      joomlaSiteJSON -r '.[] | "        - " + tojson' <<< "$probe"
+      printf '      retries: 7  # Operator schedule\n'
+    } > "$saved"
+    # Hosts with Compose parse the actual YAML. Other hosts use the same model.
+    printf '{"services":{"web":{"healthcheck":{"test":%s}}}}\n' "$probe" > "$STUB_DIR/docker/config/web-change.json"
     joomlaRewriteWebserverCompose "$work/fpm.yml" "$work/apache.yml" joomlaalpha nginxalpha apache joomla:apache nginx:stable-alpine "$work"
-    assert_equal "$(joomlaServiceProperty "$work/apache.yml" joomlaalpha healthcheck)" "$(cat "$work/custom-health")"
+    if [[ "$probe" == *private-health* ]]; then
+      assert_equal "$(joomlaServiceProperty "$work/apache.yml" joomlaalpha healthcheck)" "$(cat "$saved")"
+    else
+      assert_equal "$(joomlaServiceProperty "$work/apache.yml" joomlaalpha healthcheck)" "$(joomlaWebHealthcheck)"
+    fi
   done
 }
 

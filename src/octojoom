@@ -2056,52 +2056,22 @@ function joomla__TRuST__setup() {
   )
 }
 
-# Apache handles OPTIONS * before looking up a document or dispatching Joomla.
-# Docker enforces the timeout even if the listener accepts but never replies.
+# Apache sites may intentionally serve Joomla's offline page with HTTP 503.
+# Suppress even an image-provided probe unless this service specifies its own.
 function joomlaWebHealthcheck() {
-  local apache='["CMD", "curl", "-fsS", "--noproxy", "*", "--request", "OPTIONS", "--request-target", "*", "http://127.0.0.1"]'
-  printf '    healthcheck:\n      test: %s\n      interval: 30s\n      timeout: 5s\n      retries: 5\n' "${1:-$apache}"
+  if [ -z "${1:-}" ]; then
+    printf '    healthcheck:\n      disable: true\n'
+  else
+    printf '    healthcheck:\n      test: %s\n      interval: 30s\n      timeout: 5s\n      retries: 5\n' "$1"
+  fi
 }
 
-# A saved property and a live Compose file use the same exact legacy default.
-# Inspecting returns its service. Applying replaces only the original test line.
-function joomlaNormalizeApacheHealthcheck() {
-  local file="$1" mode="${2:-property}" legacy='["CMD", "curl", "-f", "http://localhost/"]' replacement
-  replacement=$(joomlaWebHealthcheck | sed -n '/^      test: /p')
-  # BSD awk rejects literal newlines in -v arguments.
-  OCTOJOOM_LEGACY_HEALTH="$(joomlaWebHealthcheck "$legacy")" awk -v mode="$mode" -v replacement="$replacement" '
-    function finish() {
-      if (block==ENVIRON["OCTOJOOM_LEGACY_HEALTH"]) {matches++; target=service; change=test_line}
-      block=""
-    }
-    {
-      if (mode!="inspect") lines[NR]=$0
-      if ($0 ~ /^[[:space:]]*(#|$)/) next
-      if ($0 !~ /^      /) finish()
-      if ($0 ~ /^[^[:space:]]/) {
-        services=($0 ~ /^services:[[:space:]]*(#.*)?$/); service=""
-      } else if (services && $0 ~ /^  [^[:space:]]/) {
-        service=""
-        if ($0 ~ /^  joomla[A-Za-z]+:[[:space:]]*([&#].*)?$/) {
-          service=$0; sub(/^  /,"",service); sub(/:.*/,"",service)
-        }
-      }
-      if ((mode=="property" || service!="") && $0=="    healthcheck:") block=$0
-      else if (block!="") {
-        block=block "\n" $0
-        if ($1=="test:") test_line=NR
-      }
-    }
-    END {
-      finish()
-      if (matches>1) exit 1
-      if (mode=="inspect") {if (matches) print target}
-      else {
-        if (matches) lines[change]=replacement
-        for (i=1; i<=NR; i++) print lines[i]
-      }
-    }
-  ' "$file"
+# Accept the compact JSON test array reported by Compose or Docker.
+function joomlaStockApacheProbe() {
+  case "$1" in
+    '["CMD","curl","-f","http://localhost/"]'|'["CMD","curl","-fsS","--noproxy","*","--request","OPTIONS","--request-target","*","http://127.0.0.1"]') return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # return the Joomla Container setup yml
@@ -2595,10 +2565,18 @@ FPM_HEALTH
       joomlaServiceProperty "$current" "$nginx" "$property" > "$work/property" || return 1
       joomlaSetServiceProperty "$current" "$next" "$service" "$property" "$work/property" && mv "$next" "$current" || return 1
     done
-    if [ -f "$work/restore-healthcheck.yml" ]; then
-      joomlaNormalizeApacheHealthcheck "$work/restore-healthcheck.yml" > "$work/property" || return 1
-    else
+    local saved="$work/restore-healthcheck.yml" saved_test='[]'
+    if [ -s "$saved" ]; then
+      # Read the saved property in isolation without interpolating operator settings.
+      { printf 'services:\n  web:\n    image: joomla\n'; cat "$saved"; } > "$work/saved-probe.yml" || return 1
+      saved_test=$(set -o pipefail
+        COMPOSE_DISABLE_ENV_FILE=1 docker compose -p octojoom -f "$work/saved-probe.yml" config --no-interpolate --format json |
+          joomlaSiteJSON -ce '.services.web | select(type == "object") | .healthcheck.test // []') || return 1
+    fi
+    if [ "$saved_test" = '[]' ] || joomlaStockApacheProbe "$saved_test"; then
       joomlaWebHealthcheck > "$work/property" || return 1
+    else
+      cp "$saved" "$work/property" || return 1
     fi
     joomlaSetServiceProperty "$current" "$next" "$service" healthcheck "$work/property" && mv "$next" "$current" || return 1
     : > "$web"
@@ -8505,10 +8483,21 @@ function siteAlignImage() {
   )
 }
 
-# A website update only replaces the old Apache probe in its existing project.
+# Read the effective probe from the selected Compose service, including stopped containers.
+function siteContainerHealthTest() {
+  local service="$1" id probe
+  id=$(migrationRunCompose "$VDM_SITE_ENV" "$VDM_SITE_COMPOSE" --project-directory "$VDM_SITE_DIR" ps --all --quiet "$service") || return 1
+  id="${id%$'\r'}"
+  if [ -z "$id" ]; then printf 'absent\n'; return 0; fi
+  [[ "$id" != *$'\n'* ]] || return 1
+  probe=$(docker inspect --type container --format '{{with index .Config "Healthcheck"}}{{json .Test}}{{else}}null{{end}}' "$id") || return 1
+  printf '%s\n' "${probe%$'\r'}"
+}
+
+# A website update retires Octojoom's probes from this site's Apache service.
 function siteAlignConfiguration() {
   (
-    local site="$1" action="${2:-apply}" service staged
+    local site="$1" action="${2:-apply}" service staged model declared live result
     local OCTOJOOM_SITE_HELD_LOCK=''
     resolveJoomlaSite "$site" || exit 1
     if [ "$action" = apply ] || [ "$action" = save-image ]; then
@@ -8523,20 +8512,59 @@ function siteAlignConfiguration() {
     case "$action" in
       inspect-image|save-image) siteAlignImage "$site" "$action"; exit $? ;;
     esac
-    service=$(joomlaNormalizeApacheHealthcheck "$VDM_SITE_COMPOSE" inspect) || {
-      printf '%s\taction-needed\tCannot identify a single legacy Apache health check.\n' "$site"; exit 1;
-    }
-    if [ -z "$service" ]; then
-      printf '%s\tunchanged\tNo legacy Apache health check to update.\n' "$site"
-    elif [ "$action" = inspect ]; then
-      printf '%s\tpending\tUpdate the default Apache health check on %s.\n' "$site" "$service"
-    elif joomlaNormalizeApacheHealthcheck "$VDM_SITE_COMPOSE" compose > "$staged" &&
-      sitePublishConfiguration "$site" "$staged" '' "$service"; then
-      printf '%s\tupdated\tApplied the Apache health check to %s.\n' "$site" "$service"
-    else
-      printf '%s\taction-needed\tCould not apply the Apache health check.\n' "$site"
-      exit 1
+    if ! model=$(migrationRunCompose "$VDM_SITE_ENV" "$VDM_SITE_COMPOSE" --project-directory "$VDM_SITE_DIR" config --format json) ||
+      ! service=$(joomlaApplicationService <<< "$model"); then
+      printf '%s\taction-needed\tCannot read the selected Compose project.\n' "$site"; exit 1
     fi
+    if [ -z "$service" ]; then
+      if [ "${VDM_ALL:-false}" = true ]; then
+        printf '%s\tskipped\tNo unique Joomla service in this Compose file.\n' "$site"; exit 0
+      fi
+      printf '%s\taction-needed\tCannot identify a unique Joomla service in %s.\n' "$site" "$VDM_SITE_COMPOSE"; exit 1
+    fi
+    # shellcheck disable=SC2016 # The service key belongs to jq.
+    declared=$(joomlaSiteJSON -c --arg s "$service" '.services[$s].healthcheck |
+      if .disable then ["NONE"] else .test end' <<< "$model") || exit 1
+    if ! joomlaStockApacheProbe "$declared" && [ "$declared" != '["NONE"]' ] && [ "$declared" != null ]; then
+      printf '%s\tunchanged\t%s has an operator-defined or service-specific health check.\n' "$site" "$service"; exit 0
+    fi
+    if [ "$action" = inspect ] && joomlaStockApacheProbe "$declared"; then
+      printf '%s\tpending\tDisable the Octojoom Apache health check on %s.\n' "$site" "$service"; exit 0
+    fi
+    if ! live=$(siteContainerHealthTest "$service") || [ -z "$live" ]; then
+      printf '%s\taction-needed\tCannot inspect the container for %s.\n' "$site" "$service"; exit 1
+    fi
+    if ! joomlaStockApacheProbe "$declared"; then
+      case "$live" in
+        absent) printf '%s\tunchanged\tNo container for %s in this Compose project.\n' "$site" "$service"; exit 0 ;;
+        null|'["NONE"]') printf '%s\tunchanged\t%s has no active health check.\n' "$site" "$service"; exit 0 ;;
+      esac
+      if [ "$declared" = null ] && ! joomlaStockApacheProbe "$live"; then
+        printf '%s\tunchanged\t%s uses its image-provided health check.\n' "$site" "$service"; exit 0
+      fi
+    fi
+    if [ "$action" = inspect ]; then
+      printf '%s\tpending\tDisable the active web health check on %s.\n' "$site" "$service"; exit 0
+    fi
+    if [ "$declared" = '["NONE"]' ]; then
+      cp -p -- "$VDM_SITE_COMPOSE" "$staged" || exit 1
+    else
+      { joomlaWebHealthcheck; printf '\n'; } > "$OCTOJOOM_SITE_HELD_LOCK/healthcheck.yml" || exit 1
+      if ! joomlaSetServiceProperty "$VDM_SITE_COMPOSE" "$staged" "$service" healthcheck "$OCTOJOOM_SITE_HELD_LOCK/healthcheck.yml"; then
+        printf '%s\taction-needed\tCould not edit the health check for %s.\n' "$site" "$service"; exit 1
+      fi
+    fi
+    if ! sitePublishConfiguration "$site" "$staged" '' "$service"; then
+      printf '%s\taction-needed\tCould not apply the configuration for %s.\n' "$site" "$service"; exit 1
+    fi
+    result=$(siteContainerHealthTest "$service") || result=''
+    if [ "$live" = absent ] && [ "$result" = absent ]; then
+      printf '%s\tupdated\tDisabled the Apache health check for the next start of %s.\n' "$site" "$service"; exit 0
+    fi
+    case "$result" in
+      null|'["NONE"]') printf '%s\tupdated\tDisabled the Apache health check on %s.\n' "$site" "$service" ;;
+      *) printf '%s\taction-needed\tSaved the Compose update, but could not verify the disabled health check on %s.\n' "$site" "$service"; exit 1 ;;
+    esac
   )
 }
 
@@ -10949,6 +10977,13 @@ function joomlaSiteJSON() {
   )
 }
 
+# The database setting identifies Joomla even when the operator supplies a private image.
+function joomlaApplicationService() {
+  joomlaSiteJSON -er '.services | to_entries | map(select((.value.environment.JOOMLA_DB_HOST? != null) or
+    ((.value.image // "") | test("(^|/)(joomla|joomengine)(:|@|$)")))) |
+    if length == 1 then .[0].key else "" end'
+}
+
 # Git Bash may implement ln -s by copying a directory. Such a copy represents
 # this site only while its effective configuration still matches the source.
 function getJoomlaSiteEnabledState() {
@@ -11104,11 +11139,7 @@ function readJoomlaSiteFacts() {
   fi
   if [ -n "$config" ]; then
     VDM_SITE_SERVICES=$(printf '%s' "$config" | joomlaSiteJSON -r '.services | keys[]')
-    # JOOMLA_DB_HOST also identifies images from arbitrary configured registries.
-    VDM_SITE_SERVICE=$(printf '%s' "$config" | joomlaSiteJSON -r '
-      [.services | to_entries[] | select((.value.environment.JOOMLA_DB_HOST? != null) or
-      ((.value.image // "") | test("(^|/)(joomla|joomengine)(:|@|$)"))) | .key] |
-      if length==1 then .[0] else empty end')
+    VDM_SITE_SERVICE=$(joomlaApplicationService <<< "$config")
     if [ -n "$VDM_SITE_SERVICE" ]; then
       VDM_SITE_IMAGE=$(printf '%s' "$config" | joomlaSiteJSON -r --arg s "$VDM_SITE_SERVICE" '.services[$s].image // empty')
       mount=$(printf '%s' "$config" | joomlaSiteJSON -r --arg s "$VDM_SITE_SERVICE" '
@@ -19591,9 +19622,9 @@ function migrationWaitHealthy() {
     complete=true
     for service in mariadb joomla; do
       state=$(docker inspect --format '{{if .State.Running}}{{if .State.Health}}{{.State.Health.Status}}{{else}}missing-healthcheck{{end}}{{else}}stopped{{end}}' "${service}${key}" 2>/dev/null) || return 1
-      case "$state" in
-        healthy) ;;
-        starting) complete=false ;;
+      case "$service:$state" in
+        *:healthy|joomla:missing-healthcheck) ;;
+        *:starting) complete=false ;;
         *) return 1 ;;
       esac
     done
@@ -19769,9 +19800,9 @@ function importJoomlaMigration() {
     prepareJoomlaMigration "$archive" "$key" "$env_key" "$host" "$secure" "$resolver" "$puid" "$pgid" || exit 1
     if reason=$(migrationDestinationReady "$secure" "$resolver"); then
       if { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" = true ] && [ "${VDM_ENABLE:-false}" = true ]; } ||
-        { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && getInputYesNo 'The project is prepared. Enable it now and wait for database and Joomla health checks?' 'Enable Migrated Site' 10 112 'defaultno'; }; then
+        { [ "${OCTOJOOM_NON_INTERACTIVE:-false}" != true ] && getInputYesNo 'The project is prepared. Enable it now and verify database connectivity and the website route?' 'Enable Migrated Site' 10 112 'defaultno'; }; then
         activateJoomlaMigration "$key" "$host" "$secure" "$resolver" || exit 1
-        showNotice "Migration complete. ${host} is enabled; database connectivity, container health and the destination HTTP/HTTPS route passed."
+        showNotice "Migration complete. ${host} is enabled. Database connectivity and the destination HTTP/HTTPS route were verified."
       else
         showNotice "Migration prepared. ${host} remains disabled in available containers."
       fi

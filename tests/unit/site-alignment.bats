@@ -13,11 +13,48 @@ setup() {
   ALIGN_ENV="$VDM_REPO_PATH/joomla/.env"
 }
 
-write_legacy_compose() {
-  VDM_WEB_HEALTH='["CMD", "curl", "-f", "http://localhost/"]' gen_joomla_compose alpha ALPHA alpha example.test > "${1:-$ALIGN_YML}"
+# The Docker stub returns this model where a real Compose executable is unavailable.
+alignment_model() {
+  local file="$STUB_DIR/docker/config/alpha.example.test.json"
+  mkdir -p "${file%/*}"
+  joomlaSiteJSON -n --argjson check "$1" '{services:{
+    joomlaalpha:{image:"joomla:5.3",environment:{JOOMLA_DB_HOST:"mariadbalpha:3306"},healthcheck:$check},
+    mariadbalpha:{image:"mariadb:latest"}}}' > "$file"
 }
 
-@test "alignment: inspect has no writes or Docker calls, including with Docker unavailable" {
+write_legacy_compose() {
+  local test='["CMD", "curl", "-f", "http://localhost/"]'
+  VDM_WEB_HEALTH="$test" gen_joomla_compose alpha ALPHA alpha example.test > "${1:-$ALIGN_YML}"
+  alignment_model "{\"test\":$test}"
+}
+
+# Compose resolves the selected file as usual. Only daemon operations are simulated.
+alignment_container() {
+  ALIGN_CONTAINER_STATE="$1"
+  printf '%s\n' "$2" > "$STUB_DIR/live-test"
+  docker() {
+    if [ "$1" = inspect ]; then
+      [ "${*: -1}" = alpha-web-id ] || return 1
+      cat "$STUB_DIR/live-test"
+    else
+      command docker "$@"
+    fi
+  }
+  migrationRunCompose() {
+    local env="$1" file="$2"
+    printf '%s\n' "$*" >> "$STUB_DIR/requests"
+    shift 2
+    case " $* " in
+      *' config '*) command docker compose --env-file "$env" --file "$file" "$@" ;;
+      *' ps --status running --services '*) [ "$ALIGN_CONTAINER_STATE" != running ] || echo joomlaalpha ;;
+      *' ps --all --services '*) echo joomlaalpha ;;
+      *' ps --all --quiet '*) echo alpha-web-id ;;
+      *' up '*) printf '%s\n' '["NONE"]' > "$STUB_DIR/live-test"; alignment_model '{"disable":true}' ;;
+    esac
+  }
+}
+
+@test "alignment: inspecting a saved stock probe needs no running containers or file changes" {
   write_legacy_compose
   cp "$ALIGN_YML" "$SANDBOX/original"
   fail_command docker-info 1
@@ -26,7 +63,7 @@ write_legacy_compose() {
   [[ "$output" == *$'pending\t'* ]]
   cmp "$ALIGN_YML" "$SANDBOX/original"
   [ ! -e "$ALIGN_DIR/.env" ]
-  [ ! -s "$STUB_DIR/commands.log" ]
+  refute_command 'docker .* (up|start|stop|restart) '
 }
 
 @test "image alignment: a missing site setting prevents creating an incomplete private environment" {
@@ -54,7 +91,6 @@ write_legacy_compose() {
   run_octojoom --type joomla --task align --container "$site" --action inspect --non-interactive
   assert_success
   assert_output_contains $'alpha.example.test\tpending\t'
-  assert_output_contains 'Update the default Apache health check'
   cmp "$ALIGN_YML" "$SANDBOX/before.yml"
   cmp "$ALIGN_ENV" "$SANDBOX/shared"
   refute_file_exists "$ALIGN_DIR/.env"
@@ -204,7 +240,7 @@ EXTRA
   [ ! -e "$ALIGN_DIR/.env" ]
 }
 
-@test "alignment: recreate only the selected running Apache service with the corrected probe" {
+@test "alignment: disable the stock check only on the selected running Apache service" {
   local site=alpha.example.test
   cp "$ALIGN_ENV" "$ALIGN_DIR/.env"
   printf "SITE_NOTE='one\ntwo'\n# Site-specific setting\n" >> "$ALIGN_DIR/.env"
@@ -213,18 +249,14 @@ EXTRA
   write_legacy_compose
   mkdir -p "$VDM_REPO_PATH/joomla/available/other.example.test"
   printf 'unsupported layout\n' > "$VDM_REPO_PATH/joomla/available/other.example.test/docker-compose.yml"
-  migrationRunCompose() {
-    printf '%s\n' "$*" >> "$STUB_DIR/requests"
-    case " $* " in *' ps --status running --services '*) printf 'joomlaalpha\nmariadbalpha\n' ;; esac
-  }
+  alignment_container running '["CMD","curl","-f","http://localhost/"]'
   VDM_CONTAINER="$site" VDM_ALL=false VDM_ACTION=inspect
   run joomla__TRuST__align
   assert_success
-  assert_output_contains 'Update the default Apache health check'
-  [ ! -s "$STUB_DIR/requests" ]
   VDM_ACTION=apply
   run joomla__TRuST__align
   assert_success
+  assert_output_contains $'updated\t'
   cmp "$ALIGN_YML" "$SANDBOX/current.yml"
   cmp "$ALIGN_DIR/.env" "$SANDBOX/private.env"
   [ "$(grep -c ' up ' "$STUB_DIR/requests")" -eq 1 ]
@@ -233,31 +265,89 @@ EXTRA
   run joomla__TRuST__align
   assert_success
   assert_output_contains $'unchanged\t'
-  [ ! -s "$STUB_DIR/requests" ]
+  refute_file_contains "$STUB_DIR/requests" ' up '
 }
 
-@test "alignment: prepare a legacy probe on a stopped Apache container while preserving a custom probe" {
+@test "alignment: remove the stock check from a stopped web service while preserving a custom check" {
   local site=alpha.example.test legacy='["CMD", "curl", "-f", "http://localhost/"]'
   write_legacy_compose
   joomlaServiceProperty "$ALIGN_YML" joomlaalpha healthcheck > "$SANDBOX/legacy-probe"
-  migrationRunCompose() {
-    printf '%s\n' "$*" >> "$STUB_DIR/requests"
-    case " $* " in *' ps --all --services '*) printf 'joomlaalpha\n' ;; esac
-  }
+  alignment_container stopped '["CMD","curl","-f","http://localhost/"]'
   run siteAlignConfiguration "$site" apply
   assert_success
   [ "$(grep -c ' up ' "$STUB_DIR/requests")" -eq 1 ]
   grep -q ' up --no-start --no-deps --force-recreate joomlaalpha$' "$STUB_DIR/requests"
   refute_file_contains "$ALIGN_YML" "$legacy"
-  sed 's/interval: 30s/interval: 45s/' "$SANDBOX/legacy-probe" > "$SANDBOX/custom-probe"
+  sed 's#http://localhost/#http://localhost/operator-health#' "$SANDBOX/legacy-probe" > "$SANDBOX/custom-probe"
   joomlaSetServiceProperty "$ALIGN_YML" "$SANDBOX/custom.yml" joomlaalpha healthcheck "$SANDBOX/custom-probe"
   cp "$SANDBOX/custom.yml" "$ALIGN_YML"
+  alignment_model '{"test":["CMD","curl","-f","http://localhost/operator-health"]}'
   : > "$STUB_DIR/requests"
   run siteAlignConfiguration "$site" apply
   assert_success
   assert_output_contains $'unchanged\t'
   cmp "$ALIGN_YML" "$SANDBOX/custom.yml"
-  [ ! -s "$STUB_DIR/requests" ]
+  refute_file_contains "$STUB_DIR/requests" ' up '
+}
+
+@test "alignment: a reordered stock OPTIONS probe with custom timings is removed from a never-created site" {
+  local options='["CMD","curl","-fsS","--noproxy","*","--request","OPTIONS","--request-target","*","http://127.0.0.1"]'
+  cat > "$SANDBOX/health" <<'YAML'
+    healthcheck:
+      retries: 7
+      test: [CMD, curl, -fsS, --noproxy, '*', --request, OPTIONS, --request-target, '*', 'http://127.0.0.1']
+      interval: 45s
+      timeout: 5s
+YAML
+  joomlaSetServiceProperty "$ALIGN_YML" "$SANDBOX/previous.yml" joomlaalpha healthcheck "$SANDBOX/health"
+  cp "$SANDBOX/previous.yml" "$ALIGN_YML"
+  alignment_model "{\"test\":$options,\"interval\":\"45s\",\"retries\":7,\"timeout\":\"5s\"}"
+  run siteAlignConfiguration alpha.example.test apply
+  assert_success
+  assert_output_contains $'updated\t'
+  run joomlaServiceProperty "$ALIGN_YML" joomlaalpha healthcheck
+  assert_success
+  assert_output_contains 'disable: true'
+  refute_command ' (up|start|stop|restart) '
+}
+
+@test "alignment: a running container still using the homepage check receives the saved disabled setting once" {
+  alignment_model '{"disable":true}'
+  alignment_container running '["CMD","curl","-f","http://localhost/"]'
+  cp "$ALIGN_YML" "$SANDBOX/disabled.yml"
+  run siteAlignConfiguration alpha.example.test inspect
+  assert_success
+  assert_output_contains $'pending\t'
+  run siteAlignConfiguration alpha.example.test apply
+  assert_success
+  assert_output_contains $'updated\t'
+  run siteAlignConfiguration alpha.example.test apply
+  assert_success
+  assert_output_contains $'unchanged\t'
+  cmp "$ALIGN_YML" "$SANDBOX/disabled.yml"
+  assert_equal "$(cat "$STUB_DIR/live-test")" '["NONE"]'
+  [ "$(grep -c ' up ' "$STUB_DIR/requests")" -eq 1 ]
+  grep -q ' up -d --no-deps --force-recreate joomlaalpha$' "$STUB_DIR/requests"
+}
+
+@test "alignment: an image-inherited custom check is preserved and an inherited stock homepage check is removed" {
+  : > "$SANDBOX/empty"
+  joomlaSetServiceProperty "$ALIGN_YML" "$SANDBOX/inherited.yml" joomlaalpha healthcheck "$SANDBOX/empty"
+  cp "$SANDBOX/inherited.yml" "$ALIGN_YML"
+  alignment_model null
+  alignment_container running '["CMD","test","-f","/run/ready"]'
+  run siteAlignConfiguration alpha.example.test apply
+  assert_success
+  cmp "$ALIGN_YML" "$SANDBOX/inherited.yml"
+  refute_file_contains "$STUB_DIR/requests" ' up '
+  printf '%s\n' '["CMD","curl","-f","http://localhost/"]' > "$STUB_DIR/live-test"
+  run siteAlignConfiguration alpha.example.test apply
+  assert_success
+  assert_output_contains $'updated\t'
+  assert_equal "$(cat "$STUB_DIR/live-test")" '["NONE"]'
+  run joomlaServiceProperty "$ALIGN_YML" joomlaalpha healthcheck
+  assert_success
+  assert_output_contains 'disable: true'
 }
 
 @test "image alignment: unexpected effective semantic changes are refused without disclosing resolved secrets" {
@@ -290,16 +380,10 @@ EXTRA
   assert_equal "$(siteReadServiceScalar "$ALIGN_YML" joomlaalpha image)" "$image"
   printf 'COMPOSE_PROJECT_NAME=spark\n' >> "$ALIGN_ENV"
   cp "$ALIGN_ENV" "$SANDBOX/shared-before"
-  migrationRunCompose() {
-    printf '%s\n' "$*" >> "$STUB_DIR/requests"
-    case " $* " in
-      *' config ') if grep -q '^COMPOSE_PROJECT_NAME=spark$' "$1"; then echo spark; else echo default; fi ;;
-      *' ps --status running --services '*) echo joomlaalpha ;;
-    esac
-  }
+  alignment_container running '["CMD","curl","-f","http://localhost/"]'
   run siteAlignConfiguration alpha.example.test apply
   assert_success
-  assert_output_contains 'Applied the Apache health check'
+  assert_output_contains $'updated\t'
   cmp "$SANDBOX/updated-custom.yml" "$ALIGN_YML"
   refute_file_exists "$ALIGN_DIR/.env"
   cmp "$ALIGN_ENV" "$SANDBOX/shared-before"
@@ -314,6 +398,7 @@ EXTRA
   write_legacy_compose
   mkdir -p "$VDM_REPO_PATH/joomla/available/custom.example.test"
   printf 'services: {}\n' > "$VDM_REPO_PATH/joomla/available/custom.example.test/docker-compose.yml"
+  printf '%s\n' '{"services":{}}' > "$STUB_DIR/docker/config/custom.example.test.json"
   VDM_ALL=true VDM_CONTAINER='' VDM_ACTION=apply
   run joomla__TRuST__align
   assert_success
