@@ -156,6 +156,17 @@ ENV
   assert_equal "$(cat "$SANDBOX/scoped.env")" previous
 }
 
+@test "scoped environment: reapplying a setting keeps source record order and identical bytes" {
+  printf 'VDM_ALPHA_SMTP_PORT=465\nVDM_ALPHA_HOOKS_ENABLED=false\n' >> "$ALIGN_ENV"
+  siteWriteScopedEnv "$ALIGN_YML" "$ALIGN_ENV" ALPHA "$SANDBOX/first.env"
+  printf 'VDM_ALPHA_SMTP_PORT="465"\nVDM_ALPHA_HOOKS_ENABLED="false"\n' > "$SANDBOX/last-two"
+  tail -n 2 "$SANDBOX/first.env" | cmp "$SANDBOX/last-two" -
+  writeEnvVariable "$SANDBOX/first.env" 'VDM_ALPHA_TLS_MODE="local"' true
+  siteWriteScopedEnv "$ALIGN_YML" "$SANDBOX/first.env" ALPHA "$SANDBOX/reapplied.env"
+  writeEnvVariable "$SANDBOX/reapplied.env" 'VDM_ALPHA_TLS_MODE="local"' true
+  cmp "$SANDBOX/first.env" "$SANDBOX/reapplied.env"
+}
+
 @test "alignment: preserves custom fields and shared defaults, is idempotent and never starts disabled sites" {
   cat >> "$ALIGN_YML" <<'EXTRA'
 x-user-notes:
