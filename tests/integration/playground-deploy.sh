@@ -310,12 +310,11 @@ jq -se --arg service "joomla$first" '
   | length == 1' "$work/fresh-starts.jsonl" >/dev/null
 # Check what Docker actually installed on an intentionally offline import.
 web="joomla$first"
-assert_web_probe_disabled() {
+assert_web_has_no_probe() {
   docker inspect "$web" | jq -e --argjson running "$1" '.[0] |
-    .State.Running==$running and .State.Health==null and
-    ((.Config.Healthcheck.Test // ["NONE"]) == ["NONE"])' >/dev/null
+    .State.Running==$running and .State.Health==null and .Config.Healthcheck.Test==null' >/dev/null
 }
-assert_web_probe_disabled true
+assert_web_has_no_probe true
 check_http new "$first" 127.0.0.1 503
 docker exec "$web" php -d register_argc_argv=1 cli/joomla.php site:up
 check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
@@ -356,11 +355,9 @@ assert_probe_only_change() {
   [ "$(destination new ps -q "mariadb$first")" = "$alignment_db_id" ]
 }
 publish_legacy_probe() {
-  awk -v test="$2" '/^      disable: true$/ {
-      print "      test: " test; print "      interval: 30s"; print "      timeout: 5s"
-      $0="      retries: 5"; changed++
-    }
-    { print } END { if (changed!=1) exit 1 }' "$1" > "$work/legacy-compose.yml"
+  printf '    healthcheck:\n      test: %s\n      interval: 30s\n      timeout: 5s\n      retries: 5\n' \
+    "$2" > "$work/legacy-health.property"
+  joomlaSetServiceProperty "$1" "$work/legacy-compose.yml" "$web" healthcheck "$work/legacy-health.property"
   publish_fixture_compose "$work/legacy-compose.yml"
 }
 
@@ -372,7 +369,7 @@ docker inspect "$web" | jq -e --argjson test "$options_test" '.[0] |
   (.State.Running|not) and .Config.Healthcheck.Test==$test' >/dev/null
 "${align[@]}"
 assert_probe_only_change "$work/literal-image.yml"
-assert_web_probe_disabled false
+assert_web_has_no_probe false
 
 # Repeat on the running site with an operator-owned image expression.
 siteReplaceServiceScalar "$work/literal-image.yml" "$work/operator-image.yml" "$web" image '${FIXTURE_IMAGE:?missing image}'
@@ -398,7 +395,7 @@ done
 assert_probe_only_change "$work/operator-image.yml"
 [ "$(destination new ps -q "$web")" != "$legacy_id" ]
 [ "$(docker inspect --format '{{.Image}} {{.Config.Image}}' "$web")" = "$alignment_image" ]
-assert_web_probe_disabled true
+assert_web_has_no_probe true
 docker inspect "$web" | jq -e --arg project "$alignment_project" '.[0] |
   .Config.Labels["octojoom.fixture.region"]=="Africa/Windhoek" and
   .Config.Labels["com.docker.compose.project"]==$project' >/dev/null
@@ -704,7 +701,7 @@ other_database() {
 }
 without_backup=(--pre-backup no --confirm-no-backup yes)
 # The native offline form and both authenticated sessions must work through Traefik.
-assert_web_probe_disabled true
+assert_web_has_no_probe true
 [ "$(docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}' "$web")" = "$offline_identity" ]
 site_url="http://new.$domain:$proxy_port"
 frontend=(curl --silent --show-error --noproxy '*' --max-time 20 --resolve "new.$domain:$proxy_port:127.0.0.1")
@@ -731,7 +728,7 @@ require_routed_text new "$apache_port" "$route_file" "previous-new-$run_id"
 check_admin_login new shopmanager "$CONFIRMED_PASSWORD" "previous-new-$run_id"
 printf '\nprecision = 15\n' >> "$OCTOJOOM_HOME/Projects/$first/php.ini"
 # A custom probe belongs to the operator. Import must leave it unchanged.
-destination new config --format json | jq -e --arg app "$web" '.services[$app].healthcheck.disable' >/dev/null
+destination new config --format json | jq -e --arg app "$web" '.services[$app] | has("healthcheck") | not' >/dev/null
 printf '    healthcheck:\n      test: ["CMD", "curl", "--silent", "--fail", "http://localhost/"]\n      interval: 17s\n      timeout: 4s\n      retries: 7\n' > "$work/custom-health.property"
 joomlaSetServiceProperty "$sites/new.$domain/docker-compose.yml" "$work/custom-health.yml" \
   "joomla$first" healthcheck "$work/custom-health.property"
