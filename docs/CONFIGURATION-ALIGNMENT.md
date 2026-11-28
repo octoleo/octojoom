@@ -19,9 +19,20 @@ unrelated sites and unreferenced host credentials. The shared ENV remains intact
 Existing image source/tag, PHP settings, webserver/root choices, original Joomla
 settings, and recognized SMTP, hook and backup preferences are retained.
 
+When a private site `.env` already exists, image alignment updates its image
+assignment and preserves the other records and comments. When reading from the
+shared `joomla/.env`, Octojoom selects the variables this website uses. Ordinary
+host settings such as `TZ=Africa/Windhoek` and entries for sibling sites can
+stay in the shared file.
+
 Octojoom checks that the image and environment edits resolve to the same Compose
 configuration before applying any health check change. Image-only alignment
 keeps existing containers running.
+
+A probe-only repair uses the website's active environment in place. If moving
+the image setting into a private file would change the rendered Compose project
+(for example, its `COMPOSE_PROJECT_NAME`), the repair keeps the existing image
+and environment and applies the probe to the original project.
 
 ## Repair the Apache health check for one website
 
@@ -53,13 +64,11 @@ Reports distinguish `pending`, `unchanged`, `updated`, and `action-needed`.
 Batch application continues after an unsupported site and exits unsuccessfully
 if any site could not be handled. A partial result is not reported as complete.
 
-If a required environment setting cannot be read, `action-needed` identifies
-the variable and the effective `.env` file. A malformed assignment or quoted
-value also includes its line number. Values are never included in the report.
-Correct the reported line, or restore a missing setting using its existing site
-value, then run **Update existing configurations** again. A per-site `.env`
-takes precedence over the shared `joomla/.env`, so edit the file named in the
-report. This check leaves the site's files and services unchanged.
+If Octojoom cannot read a required website setting, `action-needed` identifies
+the variable and its effective `.env` file. Quoting errors include the source
+line. A site-local `.env` takes precedence over the shared `joomla/.env`.
+Docker Compose reads the active environment when it applies the update and
+reports syntax errors that prevent it from loading the project.
 
 The targeted image edit supports the original two-space service/four-space
 property block layout, including custom unrelated services, mounts, labels and

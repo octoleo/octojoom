@@ -345,8 +345,24 @@ for ((i=0; i<10; i++)); do
   sleep 1
 done
 [ "$legacy_exit" = 22 ]
+# Reproduce a generated site still using the host's shared Compose environment.
+# Preserve its contents for the independent setup/replacement scenarios below.
+if [ -f "$shared_env" ]; then cp -p "$shared_env" "$work/pre-alignment-shared.env"; fi
+site_env="$sites/new.$domain/.env"
+[[ "$(siteReadServiceScalar "$site_compose" "$web" image)" != *'$'* ]]
+if [ -f "$site_env" ]; then mv "$site_env" "$shared_env"; fi
+printf '\nTZ=Africa/Windhoek\n' >> "$shared_env"
+cp -p "$shared_env" "$work/alignment-shared.env"
+alignment_model() {
+  destination new config --format json | jq -cS --arg web "$web" 'del(.services[$web].healthcheck.test)'
+}
+alignment_model > "$work/before-alignment.json"
 align=(bash "$root/src/octojoom" --type joomla --task align --container "new.$domain" --action apply --non-interactive)
 "${align[@]}"
+[ "$(siteReadServiceScalar "$site_compose" "$web" image)" = "\${VDM_${first^^}_IMAGE}" ]
+cmp "$work/alignment-shared.env" "$shared_env"
+alignment_model > "$work/after-alignment.json"
+cmp "$work/before-alignment.json" "$work/after-alignment.json"
 [ "$(destination new ps -q "$web")" != "$legacy_id" ]
 [ "$(destination new ps -q "mariadb$first")" = "$alignment_db_id" ]
 docker inspect "$web" | jq -e --argjson probe "$expected_probe" '.[0] |
@@ -354,7 +370,12 @@ docker inspect "$web" | jq -e --argjson probe "$expected_probe" '.[0] |
 offline_identity=$(docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}' "$web")
 offline_start=$SECONDS
 first_health_end=$(docker inspect "$web" | jq -er '.[0].State.Health.Log[-1].End')
+cp -p "$site_env" "$work/aligned-site.env"
+if grep -q '^TZ=' "$site_env"; then echo 'Shared operator setting leaked into private site configuration.' >&2; exit 1; fi
 "${align[@]}"
+cmp "$work/aligned-site.env" "$site_env"
+cmp "$work/alignment-shared.env" "$shared_env"
+if [ -f "$work/pre-alignment-shared.env" ]; then mv "$work/pre-alignment-shared.env" "$shared_env"; else rm "$shared_env"; fi
 # Run the same image and effective probe without Apache listening. Docker must
 # mark this still-running container unhealthy using the production retry policy.
 destination new config --format json | jq --arg web "$web" '.services[$web] |
