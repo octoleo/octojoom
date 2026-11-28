@@ -2026,14 +2026,15 @@ function joomlaWebHealthcheck() {
 function joomlaNormalizeApacheHealthcheck() {
   local legacy='["CMD", "curl", "-f", "http://localhost/"]' replacement
   replacement=$(joomlaWebHealthcheck | sed -n '/^      test: /p')
-  awk -v legacy="$(joomlaWebHealthcheck "$legacy")" -v replacement="$replacement" '
+  # BSD awk rejects literal newlines in -v arguments.
+  OCTOJOOM_LEGACY_HEALTH="$(joomlaWebHealthcheck "$legacy")" awk -v replacement="$replacement" '
     {lines[NR]=$0}
     NF && $1 !~ /^#/ {
       block=block (block=="" ? "" : "\n") $0
       if($1=="test:") test_line=NR
     }
     END {
-      if(block==legacy) lines[test_line]=replacement
+      if(block==ENVIRON["OCTOJOOM_LEGACY_HEALTH"]) lines[test_line]=replacement
       for(i=1; i<=NR; i++) print lines[i]
     }
   ' "$1"
