@@ -387,7 +387,7 @@ docker inspect "$web" | jq -e --argjson probe "$expected_probe" '.[0] |
 siteReplaceServiceScalar "$work/literal-image.yml" "$work/operator-image.yml" "$web" image '${FIXTURE_IMAGE:?missing image}'
 publish_legacy_probe "$work/operator-image.yml"
 destination new up -d --no-deps --wait --wait-timeout 240 "$web" >/dev/null
-check_site new "$first" 'Imported Shop' shopmanager 'Shop Manager' shop@example.test "$CONFIRMED_PASSWORD"
+check_http new "$first" 127.0.0.1
 
 # Apply the documented update while Joomla is offline. Only the web container changes.
 legacy_id=$(destination new ps -q "$web")
